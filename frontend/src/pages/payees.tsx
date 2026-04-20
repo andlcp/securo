@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { payees as payeesApi, transactions as transactionsApi } from '@/lib/api'
+import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -40,6 +41,11 @@ export default function PayeesPage() {
   const { mask } = usePrivacyMode()
   const { user } = useAuth()
   const userCurrency = user?.preferences?.currency_display ?? 'USD'
+  const typeLabels: Record<string, string> = {
+    merchant: t('payees.typeMerchant'),
+    person: t('payees.typePerson'),
+    company: t('payees.typeCompany'),
+  }
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -95,8 +101,8 @@ export default function PayeesPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => payeesApi.delete(id),
     onSuccess: () => {
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['payees'] })
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       setDialogOpen(false)
       setEditingPayee(null)
       toast.success(t('payees.deleted'))
@@ -116,8 +122,8 @@ export default function PayeesPage() {
     mutationFn: ({ targetId, sourceIds }: { targetId: string; sourceIds: string[] }) =>
       payeesApi.merge(targetId, sourceIds),
     onSuccess: (result) => {
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['payees'] })
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       setMergeDialogOpen(false)
       setSelectedIds(new Set())
       setMergeTargetId('')
@@ -256,7 +262,7 @@ export default function PayeesPage() {
                     )}
                   </TableCell>
                   <TableCell className="hidden md:table-cell py-2.5">
-                    <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded-full capitalize">{payee.type}</span>
+                    <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded-full capitalize">{typeLabels[payee.type] ?? payee.type}</span>
                   </TableCell>
                   <TableCell className="py-2.5 text-right">
                     <span className="text-sm tabular-nums text-muted-foreground">{payee.transaction_count}</span>

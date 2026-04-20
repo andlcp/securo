@@ -1,7 +1,9 @@
 import React, { useState } from 'react'
+import { getAccountName } from '@/lib/account-utils'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { categories as categoriesApi, recurring as recurringApi, accounts as accountsApi, currencies as currenciesApi } from '@/lib/api'
+import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -83,6 +85,7 @@ function RecurringTab() {
   const createMutation = useMutation({
     mutationFn: (data: Partial<RecurringTransaction>) => recurringApi.create(data),
     onSuccess: () => {
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['recurring'] })
       setDialogOpen(false)
       toast.success(t('recurring.created'))
@@ -94,6 +97,7 @@ function RecurringTab() {
     mutationFn: ({ id, ...data }: Partial<RecurringTransaction> & { id: string }) =>
       recurringApi.update(id, data),
     onSuccess: () => {
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['recurring'] })
       setDialogOpen(false)
       setEditing(null)
@@ -105,6 +109,7 @@ function RecurringTab() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => recurringApi.delete(id),
     onSuccess: () => {
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['recurring'] })
       toast.success(t('recurring.deleted'))
     },
@@ -113,8 +118,8 @@ function RecurringTab() {
   const generateMutation = useMutation({
     mutationFn: () => recurringApi.generate(),
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      invalidateFinancialQueries(queryClient)
+      queryClient.invalidateQueries({ queryKey: ['recurring'] })
       toast.success(t('recurring.generated', { count: data.generated }))
     },
     onError: () => toast.error(t('common.error')),
@@ -277,7 +282,7 @@ function RecurringForm({
   const [startDate, setStartDate] = useState(recurring?.start_date ?? new Date().toISOString().split('T')[0])
   const [endDate, setEndDate] = useState(recurring?.end_date ?? '')
   const [categoryId, setCategoryId] = useState(recurring?.category_id ?? '')
-  const [accountId, setAccountId] = useState(recurring?.account_id ?? '')
+  const [accountId, setAccountId] = useState(recurring?.account_id ?? accounts[0]?.id ?? '')
   const [isActive, setIsActive] = useState(recurring?.is_active ?? true)
 
   const selectClass = 'w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary'
@@ -365,10 +370,15 @@ function RecurringForm({
         </div>
         <div className="space-y-2">
           <Label>{t('recurring.account')}</Label>
-          <select className={selectClass} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-            <option value="">{t('recurring.noAccount')}</option>
+          <select
+            className={selectClass}
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+            required
+          >
+            {!accountId && <option value="" disabled>{t('recurring.noAccount')}</option>}
             {accounts.map((acc) => (
-              <option key={acc.id} value={acc.id}>{acc.name}</option>
+              <option key={acc.id} value={acc.id}>{getAccountName(acc)}</option>
             ))}
           </select>
         </div>

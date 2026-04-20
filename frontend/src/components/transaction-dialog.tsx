@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { getAccountName } from '@/lib/account-utils'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '@/contexts/auth-context'
@@ -15,11 +16,19 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import { AlertTriangle, ChevronLeft, Download, Paperclip, Upload, X, FileText, Plus } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronLeft, Download, Paperclip, Upload, X, FileText, Plus, Unlink } from 'lucide-react'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { TransactionAttachments } from '@/components/transaction-attachments'
 import type { AttachmentPreview } from '@/components/transaction-attachments'
 import type { Transaction, RecurringTransaction } from '@/types'
 import { toast } from 'sonner'
+
+export type SaveAction = 'save' | 'saveAndNew' | 'saveAndDuplicate'
 
 export function extractApiError(error: unknown): string {
   if (
@@ -58,9 +67,12 @@ export function TransactionDialog({
   recurringMatch,
   onSave,
   onDelete,
+  onUnlinkTransfer,
   loading,
   error,
   isSynced = false,
+  duplicateDraft = null,
+  formResetKey = 0,
 }: {
   open: boolean
   onClose: () => void
@@ -68,11 +80,14 @@ export function TransactionDialog({
   categories: { id: string; name: string; icon: string }[]
   accounts: { id: string; name: string }[]
   recurringMatch?: RecurringTransaction
-  onSave: (data: Partial<Transaction>, recurringData?: { frequency: string; end_date?: string }, pendingFiles?: File[]) => void
+  onSave: (data: Partial<Transaction>, recurringData?: { frequency: string; end_date?: string }, pendingFiles?: File[], action?: SaveAction) => void
   onDelete?: () => void
+  onUnlinkTransfer?: (pairId: string) => void
   loading: boolean
   error: string | null
   isSynced?: boolean
+  duplicateDraft?: Partial<Transaction> | null
+  formResetKey?: number
 }) {
   const { t } = useTranslation()
   const [preview, setPreview] = useState<AttachmentPreview | null>(null)
@@ -128,13 +143,15 @@ export function TransactionDialog({
               </DialogTitle>
             </DialogHeader>
             <TransactionForm
-              key={transaction?.id ?? 'new'}
+              key={transaction?.id ?? `new-${formResetKey}`}
               transaction={transaction}
+              duplicateDraft={duplicateDraft}
               categories={categories}
               accounts={accounts}
               recurringMatch={recurringMatch}
               onSave={onSave}
               onDelete={onDelete}
+              onUnlinkTransfer={onUnlinkTransfer}
               onCancel={onClose}
               loading={loading}
               error={error}
@@ -243,11 +260,13 @@ export function TransactionDialog({
 
 function TransactionForm({
   transaction,
+  duplicateDraft,
   categories,
   accounts,
   recurringMatch,
   onSave,
   onDelete,
+  onUnlinkTransfer,
   onCancel,
   loading,
   error,
@@ -257,11 +276,13 @@ function TransactionForm({
   hasPreview,
 }: {
   transaction: Transaction | null
+  duplicateDraft: Partial<Transaction> | null
   categories: { id: string; name: string; icon: string }[]
   accounts: { id: string; name: string }[]
   recurringMatch?: RecurringTransaction
-  onSave: (data: Partial<Transaction>, recurringData?: { frequency: string; end_date?: string }, pendingFiles?: File[]) => void
+  onSave: (data: Partial<Transaction>, recurringData?: { frequency: string; end_date?: string }, pendingFiles?: File[], action?: SaveAction) => void
   onDelete?: () => void
+  onUnlinkTransfer?: (pairId: string) => void
   onCancel: () => void
   loading: boolean
   error: string | null
@@ -283,20 +304,21 @@ function TransactionForm({
     queryKey: ['payees'],
     queryFn: payeesApi.list,
   })
-  const [description, setDescription] = useState(transaction?.description ?? '')
-  const [amount, setAmount] = useState(transaction?.amount?.toString() ?? '')
-  const [date, setDate] = useState(transaction?.date ?? new Date().toISOString().split('T')[0])
-  const [type, setType] = useState<'debit' | 'credit'>(transaction?.type ?? 'debit')
-  const [currency, setCurrency] = useState(transaction?.currency ?? userCurrency)
-  const [categoryId, setCategoryId] = useState(transaction?.category_id ?? '')
-  const [payeeId, setPayeeId] = useState(transaction?.payee_id ?? '')
-  const [accountId, setAccountId] = useState(transaction?.account_id ?? accounts[0]?.id ?? '')
-  const [notes, setNotes] = useState(transaction?.notes ?? '')
+  const seed = transaction ?? duplicateDraft
+  const [description, setDescription] = useState(seed?.description ?? '')
+  const [amount, setAmount] = useState(seed?.amount?.toString() ?? '')
+  const [date, setDate] = useState(seed?.date ?? new Date().toISOString().split('T')[0])
+  const [type, setType] = useState<'debit' | 'credit'>(seed?.type ?? 'debit')
+  const [currency, setCurrency] = useState(seed?.currency ?? userCurrency)
+  const [categoryId, setCategoryId] = useState(seed?.category_id ?? '')
+  const [payeeId, setPayeeId] = useState(seed?.payee_id ?? '')
+  const [accountId, setAccountId] = useState(seed?.account_id ?? accounts[0]?.id ?? '')
+  const [notes, setNotes] = useState(seed?.notes ?? '')
   const [convertedAmount, setConvertedAmount] = useState(
-    transaction?.amount_primary != null ? transaction.amount_primary.toString() : ''
+    seed?.amount_primary != null ? seed.amount_primary.toString() : ''
   )
   const [fxRate, setFxRate] = useState(
-    transaction?.fx_rate_used != null ? transaction.fx_rate_used.toString() : ''
+    seed?.fx_rate_used != null ? seed.fx_rate_used.toString() : ''
   )
   const [isRecurring, setIsRecurring] = useState(false)
   const [frequency, setFrequency] = useState<'monthly' | 'weekly' | 'yearly'>('monthly')
@@ -306,6 +328,14 @@ function TransactionForm({
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [pendingDragOver, setPendingDragOver] = useState(false)
   const pendingFileInputRef = useRef<HTMLInputElement>(null)
+  const pendingActionRef = useRef<SaveAction>('save')
+  const formRef = useRef<HTMLFormElement>(null)
+
+  const triggerSubmit = (action: SaveAction) => {
+    pendingActionRef.current = action
+    formRef.current?.requestSubmit()
+  }
+  const showSaveVariants = isCreating && !isSynced
 
   const { data: attachmentSettings } = useQuery({
     queryKey: ['settings', 'attachments'],
@@ -388,8 +418,11 @@ function TransactionForm({
 
   return (
     <form
+      ref={formRef}
       onSubmit={(e) => {
         e.preventDefault()
+        const action = pendingActionRef.current
+        pendingActionRef.current = 'save'
         const fxFields: Partial<Transaction> = {}
         if (showConversion && convertedAmount) {
           fxFields.amount_primary = parseFloat(convertedAmount)
@@ -401,7 +434,7 @@ function TransactionForm({
           ? {
               category_id: categoryId || null,
               payee_id: payeeId || null,
-              notes: notes.trim() || undefined,
+              notes: notes.trim() || null,
             } as Partial<Transaction>
           : {
               description,
@@ -412,13 +445,13 @@ function TransactionForm({
               category_id: categoryId || null,
               payee_id: payeeId || null,
               account_id: accountId || undefined,
-              notes: notes.trim() || undefined,
+              notes: notes.trim() || null,
               ...fxFields,
             } as Partial<Transaction>
         const recurringData = isCreating && isRecurring
           ? { frequency, end_date: endDate || undefined }
           : undefined
-        onSave(txData, recurringData, isCreating && pendingFiles.length > 0 ? pendingFiles : undefined)
+        onSave(txData, recurringData, isCreating && pendingFiles.length > 0 ? pendingFiles : undefined, action)
       }}
       className={cn(
         'flex flex-col',
@@ -438,11 +471,29 @@ function TransactionForm({
         </div>
       )}
       {!!transaction?.transfer_pair_id && (
-        <div className="p-3 text-sm bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-md text-blue-700 dark:text-blue-300 space-y-1">
-          <div className="flex items-center gap-2">
-            {t('transactions.transferInfo')}
+        <div className="p-3 text-sm bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-md text-blue-700 dark:text-blue-300 space-y-2">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <p>{t('transactions.transferInfo')}</p>
+              <p className="text-xs text-blue-500 dark:text-blue-400">{t('transactions.transferTooltip')}</p>
+            </div>
+            {onUnlinkTransfer && transaction?.transfer_pair_id && (
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => {
+                  if (transaction?.transfer_pair_id) {
+                    onUnlinkTransfer(transaction.transfer_pair_id)
+                  }
+                }}
+                className="shrink-0 inline-flex items-center gap-1.5 rounded-md border border-blue-200 dark:border-blue-800 bg-white/60 dark:bg-blue-900/40 px-2.5 py-1.5 text-xs font-medium text-blue-700 dark:text-blue-200 hover:bg-white dark:hover:bg-blue-900/70 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                title={t('transactions.unlinkTransferConfirm')}
+              >
+                <Unlink size={12} />
+                {t('transactions.unlinkTransfer')}
+              </button>
+            )}
           </div>
-          <p className="text-xs text-blue-500 dark:text-blue-400">{t('transactions.transferTooltip')}</p>
         </div>
       )}
       {recurringMatch && (
@@ -591,7 +642,7 @@ function TransactionForm({
               required
             >
               {accounts.map((acc) => (
-                <option key={acc.id} value={acc.id}>{acc.name}</option>
+                <option key={acc.id} value={acc.id}>{getAccountName(acc)}</option>
               ))}
             </select>
           </div>
@@ -685,9 +736,41 @@ function TransactionForm({
           <Button type="button" variant="outline" onClick={onCancel}>
             {t('common.cancel')}
           </Button>
-          <Button type="submit" disabled={loading}>
-            {loading ? t('common.loading') : t('common.save')}
-          </Button>
+          {showSaveVariants ? (
+            <div className="inline-flex">
+              <Button
+                type="submit"
+                disabled={loading}
+                className="rounded-r-none"
+              >
+                {loading ? t('common.loading') : t('common.save')}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    disabled={loading}
+                    aria-label={t('transactions.moreSaveOptions')}
+                    className="rounded-l-none border-l border-l-primary-foreground/20 px-2 has-[>svg]:px-2"
+                  >
+                    <ChevronDown />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => triggerSubmit('saveAndNew')}>
+                    {t('transactions.saveAndNew')}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => triggerSubmit('saveAndDuplicate')}>
+                    {t('transactions.saveAndDuplicate')}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          ) : (
+            <Button type="submit" disabled={loading}>
+              {loading ? t('common.loading') : t('common.save')}
+            </Button>
+          )}
         </div>
       </DialogFooter>
     </form>

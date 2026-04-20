@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
+import { getAccountName } from '@/lib/account-utils'
 import { Link } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { accounts, connections, currencies } from '@/lib/api'
+import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -41,6 +43,14 @@ import { useAuth } from '@/contexts/auth-context'
 
 function formatCurrency(value: number, currency = 'USD', locale = 'en-US') {
   return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(value)
+}
+
+function daysUntil(dateStr: string | null): number | null {
+  if (!dateStr) return null
+  const due = new Date(dateStr + 'T00:00:00')
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
 }
 
 const ACCOUNT_TYPE_CONFIG: Record<string, { icon: React.ElementType; color: string; bg: string; label: string }> = {
@@ -91,9 +101,8 @@ export default function AccountsPage() {
   const syncMutation = useMutation({
     mutationFn: (id: string) => connections.sync(id),
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['connections'] })
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       toast.success(t('accounts.syncDone'))
       const merged = (result as BankConnection & { merged_count?: number })?.merged_count
       if (merged && merged > 0) {
@@ -106,7 +115,7 @@ export default function AccountsPage() {
   const disconnectMutation = useMutation({
     mutationFn: (id: string) => connections.delete(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['connections'] })
       toast.success(t('accounts.disconnected'))
     },
@@ -116,8 +125,7 @@ export default function AccountsPage() {
     mutationFn: (data: { name: string; type: string; balance?: number; currency?: string }) =>
       accounts.create(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      invalidateFinancialQueries(queryClient)
       setDialogOpen(false)
       toast.success(t('accounts.created'))
     },
@@ -128,8 +136,7 @@ export default function AccountsPage() {
     mutationFn: ({ id, ...data }: Partial<Account> & { id: string }) =>
       accounts.update(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      invalidateFinancialQueries(queryClient)
       setDialogOpen(false)
       setEditingAccount(null)
       toast.success(t('accounts.updated'))
@@ -140,8 +147,7 @@ export default function AccountsPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => accounts.delete(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      invalidateFinancialQueries(queryClient)
       setDeletingId(null)
       toast.success(t('accounts.deleted'))
     },
@@ -151,8 +157,7 @@ export default function AccountsPage() {
   const closeMutation = useMutation({
     mutationFn: (id: string) => accounts.close(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      invalidateFinancialQueries(queryClient)
       setClosingAccountId(null)
       toast.success(t('accounts.accountClosed'))
     },
@@ -162,8 +167,7 @@ export default function AccountsPage() {
   const reopenMutation = useMutation({
     mutationFn: (id: string) => accounts.reopen(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      invalidateFinancialQueries(queryClient)
       toast.success(t('accounts.accountReopened'))
     },
     onError: () => toast.error(t('common.error')),
@@ -209,6 +213,14 @@ export default function AccountsPage() {
                   const cfg = getTypeConfig(acc.type)
                   const Icon = cfg.icon
                   const bal = Number(acc.current_balance)
+                  const isCC = acc.type === 'credit_card'
+                  const dueIn = isCC ? daysUntil(acc.next_due_date) : null
+                  const dueText =
+                    dueIn == null ? null
+                      : dueIn < 0 ? t('accounts.overdue')
+                      : dueIn === 0 ? t('accounts.dueToday')
+                      : t('accounts.dueIn', { count: dueIn })
+                  const dueClass = dueIn != null && dueIn <= 3 ? 'text-amber-600' : 'text-muted-foreground'
                   return (
                     <div key={acc.id} className="group flex items-center px-5 py-3 hover:bg-muted/50 transition-colors">
                       <Link to={`/accounts/${acc.id}`} className="flex items-center gap-3 flex-1 min-w-0">
@@ -216,8 +228,11 @@ export default function AccountsPage() {
                           <Icon size={14} className={cfg.color} />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-foreground truncate">{acc.name}</p>
-                          <p className="text-xs text-muted-foreground">{t(cfg.label)}</p>
+                          <p className="text-sm font-medium text-foreground truncate">{getAccountName(acc)}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {t(cfg.label)}
+                            {dueText && <> · <span className={dueClass}>{dueText}</span></>}
+                          </p>
                         </div>
                       </Link>
                       <div className="flex items-center gap-1 mr-3 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -248,7 +263,11 @@ export default function AccountsPage() {
                         <p className={`text-xs sm:text-sm font-semibold tabular-nums ${(acc.type === 'credit_card' ? bal > 0 : bal < 0) ? 'text-rose-500' : 'text-foreground'}`}>
                           {mask(formatCurrency(bal, acc.currency, locale))}
                         </p>
-                        {acc.balance_primary != null && acc.currency !== userCurrency && (
+                        {isCC && acc.available_credit != null ? (
+                          <p className="text-[10px] text-muted-foreground tabular-nums">
+                            {t('accounts.availableCredit')}: {mask(formatCurrency(Number(acc.available_credit), acc.currency, locale))}
+                          </p>
+                        ) : acc.balance_primary != null && acc.currency !== userCurrency && (
                           <p className="text-[10px] text-muted-foreground tabular-nums">
                             {mask(formatCurrency(acc.balance_primary, userCurrency, locale))}
                           </p>
@@ -351,6 +370,14 @@ export default function AccountsPage() {
                           const cfg = getTypeConfig(acc.type)
                           const Icon = cfg.icon
                           const bal = Number(acc.current_balance)
+                          const isCC = acc.type === 'credit_card'
+                          const dueIn = isCC ? daysUntil(acc.next_due_date) : null
+                          const dueText =
+                            dueIn == null ? null
+                              : dueIn < 0 ? t('accounts.overdue')
+                              : dueIn === 0 ? t('accounts.dueToday')
+                              : t('accounts.dueIn', { count: dueIn })
+                          const dueClass = dueIn != null && dueIn <= 3 ? 'text-amber-600' : 'text-muted-foreground'
                           return (
                             <div key={acc.id} className="group flex items-center px-5 py-3 hover:bg-muted/50 transition-colors">
                               <Link to={`/accounts/${acc.id}`} className="flex items-center gap-3 flex-1 min-w-0">
@@ -358,22 +385,38 @@ export default function AccountsPage() {
                                   <Icon size={14} className={cfg.color} />
                                 </div>
                                 <div className="min-w-0 flex-1">
-                                  <p className="text-sm font-medium text-foreground truncate">{acc.name}</p>
-                                  <p className="text-xs text-muted-foreground">{t(cfg.label)}</p>
+                                  <p className="text-sm font-medium text-foreground truncate">{getAccountName(acc)}</p>
+                                  <p className="text-xs text-muted-foreground">
+                                    {t(cfg.label)}
+                                    {dueText && <> · <span className={dueClass}>{dueText}</span></>}
+                                  </p>
                                 </div>
                               </Link>
-                              <button
-                                className="p-1.5 rounded-md text-muted-foreground hover:text-amber-600 hover:bg-amber-50 transition-colors opacity-0 group-hover:opacity-100 mr-3"
-                                onClick={(e) => { e.preventDefault(); setClosingAccountId(acc.id) }}
-                                title={t('accounts.close')}
-                              >
-                                <Archive size={13} />
-                              </button>
+                              <div className="flex items-center gap-1 mr-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                                  onClick={(e) => { e.preventDefault(); setEditingAccount(acc); setDialogOpen(true) }}
+                                  title={t('common.edit')}
+                                >
+                                  <Pencil size={13} />
+                                </button>
+                                <button
+                                  className="p-1.5 rounded-md text-muted-foreground hover:text-amber-600 hover:bg-amber-50 transition-colors"
+                                  onClick={(e) => { e.preventDefault(); setClosingAccountId(acc.id) }}
+                                  title={t('accounts.close')}
+                                >
+                                  <Archive size={13} />
+                                </button>
+                              </div>
                               <div className="text-right">
                                 <p className={`text-xs sm:text-sm font-semibold tabular-nums ${(acc.type === 'credit_card' ? bal > 0 : bal < 0) ? 'text-rose-500' : 'text-foreground'}`}>
                                   {mask(formatCurrency(bal, acc.currency, locale))}
                                 </p>
-                                {acc.balance_primary != null && acc.currency !== userCurrency && (
+                                {isCC && acc.available_credit != null ? (
+                                  <p className="text-[10px] text-muted-foreground tabular-nums">
+                                    {t('accounts.availableCredit')}: {mask(formatCurrency(Number(acc.available_credit), acc.currency, locale))}
+                                  </p>
+                                ) : acc.balance_primary != null && acc.currency !== userCurrency && (
                                   <p className="text-[10px] text-muted-foreground tabular-nums">
                                     {mask(formatCurrency(acc.balance_primary, userCurrency, locale))}
                                   </p>
@@ -414,7 +457,7 @@ export default function AccountsPage() {
                         <div className={`w-8 h-8 rounded-lg ${cfg.bg} flex items-center justify-center shrink-0`}>
                           <Icon size={14} className={cfg.color} />
                         </div>
-                        <p className="text-sm font-medium text-muted-foreground truncate">{acc.name}</p>
+                        <p className="text-sm font-medium text-muted-foreground truncate">{getAccountName(acc)}</p>
                       </div>
                       <Button
                         variant="ghost"
@@ -547,7 +590,17 @@ function AccountDialog({
   open: boolean
   onClose: () => void
   account: Account | null
-  onSave: (data: { name?: string; type?: string; balance?: number; balance_date?: string; currency?: string }) => void
+  onSave: (data: {
+    name?: string
+    display_name?: string | null
+    type?: string
+    balance?: number
+    balance_date?: string
+    currency?: string
+    credit_limit?: number | null
+    statement_close_day?: number | null
+    payment_due_day?: number | null
+  }) => void
   loading: boolean
 }) {
   const { t } = useTranslation()
@@ -559,17 +612,25 @@ function AccountDialog({
     staleTime: Infinity,
   })
   const [name, setName] = useState(account?.name ?? '')
+  const [displayName, setDisplayName] = useState(account?.display_name ?? '')
   const [type, setType] = useState(account?.type ?? 'checking')
   const [balance, setBalance] = useState(account?.balance?.toString() ?? '0')
   const [currency, setCurrency] = useState(account?.currency ?? userCurrency)
   const [balanceDate, setBalanceDate] = useState(new Date().toISOString().slice(0, 10))
+  const [creditLimit, setCreditLimit] = useState(account?.credit_limit?.toString() ?? '')
+  const [statementCloseDay, setStatementCloseDay] = useState(account?.statement_close_day?.toString() ?? '')
+  const [paymentDueDay, setPaymentDueDay] = useState(account?.payment_due_day?.toString() ?? '')
 
   useEffect(() => {
     setName(account?.name ?? '')
+    setDisplayName(account?.display_name ?? '')
     setType(account?.type ?? 'checking')
     setBalance(account?.balance?.toString() ?? '0')
     setCurrency(account?.currency ?? userCurrency)
     setBalanceDate(new Date().toISOString().slice(0, 10))
+    setCreditLimit(account?.credit_limit?.toString() ?? '')
+    setStatementCloseDay(account?.statement_close_day?.toString() ?? '')
+    setPaymentDueDay(account?.payment_due_day?.toString() ?? '')
   }, [account])
 
   return (
@@ -584,61 +645,139 @@ function AccountDialog({
           key={account?.id ?? 'new'}
           onSubmit={(e) => {
             e.preventDefault()
-            onSave({ name, type, balance: parseFloat(balance), balance_date: balanceDate, currency })
+            const isCC = type === 'credit_card'
+            const parseDay = (v: string) => {
+              const n = parseInt(v, 10)
+              return Number.isFinite(n) && n >= 1 && n <= 31 ? n : null
+            }
+            const isConnected = !!account?.connection_id
+            onSave({
+              ...(!isConnected && { name, type, balance: parseFloat(balance), balance_date: balanceDate, currency }),
+              display_name: displayName.trim() || null,
+              ...(isCC && {
+                credit_limit: creditLimit !== '' ? parseFloat(creditLimit) : null,
+                statement_close_day: parseDay(statementCloseDay),
+                payment_due_day: parseDay(paymentDueDay),
+              }),
+            })
           }}
           className="space-y-4"
         >
           <div className="space-y-2">
             <Label>{t('accounts.accountName')}</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} required />
+            <Input value={name} onChange={(e) => setName(e.target.value)} required disabled={!!account?.connection_id} />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          {account?.connection_id && (
             <div className="space-y-2">
-              <Label>{t('accounts.accountType')}</Label>
-              <select
-                className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-                value={type}
-                onChange={(e) => setType(e.target.value)}
-              >
-                <option value="checking">{t('accounts.typeChecking')}</option>
-                <option value="savings">{t('accounts.typeSavings')}</option>
-                <option value="credit_card">{t('accounts.typeCreditCard')}</option>
-                <option value="investment">{t('accounts.typeInvestment')}</option>
-                <option value="wallet">{t('accounts.typeWallet')}</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <Label>{t('accounts.currency')}</Label>
-              <select
-                className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
-              >
-                {(supportedCurrencies ?? [{ code: userCurrency, symbol: userCurrency, name: userCurrency, flag: '' }]).map((c) => (
-                  <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>{t('accounts.balance')}</Label>
+              <Label>{t('accounts.displayName')}</Label>
               <Input
-                type="number"
-                step="0.01"
-                value={balance}
-                onChange={(e) => setBalance(e.target.value)}
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder={name}
               />
+              <p className="text-xs text-muted-foreground">{t('accounts.displayNameHint')}</p>
             </div>
-            <div className="space-y-2">
-              <Label>{t('accounts.balanceDate')}</Label>
-              <DatePickerInput
-                value={balanceDate}
-                onChange={setBalanceDate}
-                className="w-full justify-start"
-              />
+          )}
+          {!account?.connection_id && (
+            <>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t('accounts.accountType')}</Label>
+                  <select
+                    className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                    value={type}
+                    onChange={(e) => setType(e.target.value)}
+                  >
+                    <option value="checking">{t('accounts.typeChecking')}</option>
+                    <option value="savings">{t('accounts.typeSavings')}</option>
+                    <option value="credit_card">{t('accounts.typeCreditCard')}</option>
+                    <option value="investment">{t('accounts.typeInvestment')}</option>
+                    <option value="wallet">{t('accounts.typeWallet')}</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t('accounts.currency')}</Label>
+                  <select
+                    className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                    value={currency}
+                    onChange={(e) => setCurrency(e.target.value)}
+                  >
+                    {(supportedCurrencies ?? [{ code: userCurrency, symbol: userCurrency, name: userCurrency, flag: '' }]).map((c) => (
+                      <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>
+                    {type === 'credit_card'
+                      ? t('accounts.balanceCreditCard')
+                      : t('accounts.balance')}
+                  </Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min={type === 'credit_card' ? '0' : undefined}
+                    value={balance}
+                    onChange={(e) => setBalance(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>{t('accounts.balanceDate')}</Label>
+                  <DatePickerInput
+                    value={balanceDate}
+                    onChange={setBalanceDate}
+                    className="w-full justify-start"
+                  />
+                </div>
+              </div>
+              {type === 'credit_card' && (
+                <p className="text-xs text-muted-foreground -mt-2">
+                  {t('accounts.balanceCreditCardHint')}
+                </p>
+              )}
+            </>
+          )}
+          {type === 'credit_card' && (
+            <div className="space-y-4 rounded-lg border border-border bg-muted/30 p-4">
+              <div className="space-y-2">
+                <Label>{t('accounts.creditLimit')}</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={creditLimit}
+                  onChange={(e) => setCreditLimit(e.target.value)}
+                  placeholder="0.00"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>{t('accounts.statementCloseDay')}</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="31"
+                    value={statementCloseDay}
+                    onChange={(e) => setStatementCloseDay(e.target.value)}
+                    placeholder={t('accounts.dayOfMonthHint')}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>{t('accounts.paymentDueDay')}</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="31"
+                    value={paymentDueDay}
+                    onChange={(e) => setPaymentDueDay(e.target.value)}
+                    placeholder={t('accounts.dayOfMonthHint')}
+                  />
+                </div>
+              </div>
             </div>
-          </div>
+          )}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               {t('common.cancel')}

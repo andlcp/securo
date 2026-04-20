@@ -2,7 +2,7 @@ import csv
 import io
 import uuid
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import current_active_user
 from app.core.database import get_async_session
 from app.models.user import User
-from app.schemas.transaction import BulkCategorizeRequest, TransactionCreate, TransactionRead, TransactionUpdate, TransferCreate, TransferRead
+from app.schemas.transaction import BulkCategorizeRequest, LinkTransferRequest, TransactionCreate, TransactionRead, TransactionUpdate, TransferCreate, TransferRead
 from app.services import transaction_service
+from app.services.admin_service import get_credit_card_accounting_mode
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 
@@ -32,10 +33,24 @@ class PaginatedTransactions(BaseModel):
     limit: int
 
 
+def _merge_id_filters(
+    single: Optional[uuid.UUID], many: Optional[List[uuid.UUID]]
+) -> Optional[List[uuid.UUID]]:
+    """Combine the legacy single-id query param with the new list param."""
+    ids: list[uuid.UUID] = []
+    if many:
+        ids.extend(many)
+    if single and single not in ids:
+        ids.append(single)
+    return ids or None
+
+
 @router.get("", response_model=PaginatedTransactions)
 async def list_transactions(
     account_id: Optional[uuid.UUID] = Query(None),
+    account_ids: Optional[List[uuid.UUID]] = Query(None),
     category_id: Optional[uuid.UUID] = Query(None),
+    category_ids: Optional[List[uuid.UUID]] = Query(None),
     payee_id: Optional[uuid.UUID] = Query(None),
     from_date: Optional[date] = Query(None, alias="from"),
     to_date: Optional[date] = Query(None, alias="to"),
@@ -49,10 +64,15 @@ async def list_transactions(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    accounting_mode = await get_credit_card_accounting_mode(session)
     transactions, total = await transaction_service.get_transactions(
-        session, user.id, account_id, category_id, payee_id, from_date, to_date, page, limit,
-        include_opening_balance, search=q, uncategorized=uncategorized, txn_type=type,
-        exclude_transfers=exclude_transfers,
+        session, user.id,
+        account_ids=_merge_id_filters(account_id, account_ids),
+        category_ids=_merge_id_filters(category_id, category_ids),
+        payee_id=payee_id, from_date=from_date, to_date=to_date, page=page, limit=limit,
+        include_opening_balance=include_opening_balance, search=q, uncategorized=uncategorized,
+        txn_type=type, exclude_transfers=exclude_transfers,
+        accounting_mode=accounting_mode,
     )
     primary_currency = user.primary_currency
     items = [_tag_fx_fallback(TransactionRead.model_validate(tx, from_attributes=True), primary_currency) for tx in transactions]
@@ -62,7 +82,9 @@ async def list_transactions(
 @router.get("/export")
 async def export_transactions(
     account_id: Optional[uuid.UUID] = Query(None),
+    account_ids: Optional[List[uuid.UUID]] = Query(None),
     category_id: Optional[uuid.UUID] = Query(None),
+    category_ids: Optional[List[uuid.UUID]] = Query(None),
     payee_id: Optional[uuid.UUID] = Query(None),
     from_date: Optional[date] = Query(None, alias="from"),
     to_date: Optional[date] = Query(None, alias="to"),
@@ -72,9 +94,14 @@ async def export_transactions(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    accounting_mode = await get_credit_card_accounting_mode(session)
     transactions, _ = await transaction_service.get_transactions(
-        session, user.id, account_id, category_id, payee_id, from_date, to_date,
+        session, user.id,
+        account_ids=_merge_id_filters(account_id, account_ids),
+        category_ids=_merge_id_filters(category_id, category_ids),
+        payee_id=payee_id, from_date=from_date, to_date=to_date,
         search=q, uncategorized=uncategorized, txn_type=type, skip_pagination=True,
+        accounting_mode=accounting_mode,
     )
 
     output = io.StringIO()
@@ -140,6 +167,51 @@ async def create_transfer(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
+@router.post("/link-transfer", response_model=TransferRead)
+async def link_transfer(
+    data: LinkTransferRequest,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Link two existing transactions as an inter-account transfer pair."""
+    try:
+        debit_tx, credit_tx = await transaction_service.link_existing_as_transfer(
+            session, user.id, data.transaction_ids
+        )
+        debit_full = await transaction_service.get_transaction(session, debit_tx.id, user.id)
+        credit_full = await transaction_service.get_transaction(session, credit_tx.id, user.id)
+        primary_currency = user.primary_currency
+        return TransferRead(
+            debit=_tag_fx_fallback(TransactionRead.model_validate(debit_full, from_attributes=True), primary_currency),
+            credit=_tag_fx_fallback(TransactionRead.model_validate(credit_full, from_attributes=True), primary_currency),
+            transfer_pair_id=debit_tx.transfer_pair_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.get("/{transaction_id}/transfer-candidates", response_model=list[TransactionRead])
+async def get_transfer_candidates(
+    transaction_id: uuid.UUID,
+    limit: int = Query(10, ge=1, le=50),
+    window_days: int = Query(30, ge=1, le=365),
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Return ranked candidate transactions to link as a transfer counterpart."""
+    anchor = await transaction_service.get_transaction(session, transaction_id, user.id)
+    if not anchor:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    candidates = await transaction_service.get_transfer_candidates(
+        session, user.id, transaction_id, limit=limit, window_days=window_days
+    )
+    primary_currency = user.primary_currency
+    return [
+        _tag_fx_fallback(TransactionRead.model_validate(tx, from_attributes=True), primary_currency)
+        for tx in candidates
+    ]
+
+
 @router.get("/{transaction_id}", response_model=TransactionRead)
 async def get_transaction(
     transaction_id: uuid.UUID,
@@ -175,7 +247,10 @@ async def update_transaction(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
-    transaction = await transaction_service.update_transaction(session, transaction_id, user.id, data)
+    try:
+        transaction = await transaction_service.update_transaction(session, transaction_id, user.id, data)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if not transaction:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
     primary_currency = user.primary_currency

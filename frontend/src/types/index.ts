@@ -80,12 +80,22 @@ export interface Account {
   connection_id: string | null
   external_id: string | null
   name: string
+  display_name: string | null
   type: string
   balance: number
   current_balance: number
   previous_balance: number | null
   balance_primary: number | null
   currency: string
+  credit_limit: number | null
+  available_credit: number | null
+  statement_close_day: number | null
+  payment_due_day: number | null
+  next_close_date: string | null
+  next_due_date: string | null
+  minimum_payment: number | null
+  card_brand: string | null
+  card_level: string | null
   is_closed: boolean
   closed_at: string | null
 }
@@ -123,6 +133,10 @@ export interface Transaction {
   fx_rate_used: number | null
   fx_fallback: boolean
   attachment_count?: number
+  installment_number: number | null
+  total_installments: number | null
+  installment_total_amount: number | null
+  installment_purchase_date: string | null
 }
 
 export interface Payee {
@@ -308,6 +322,48 @@ export interface AssetValue {
   amount: number
   date: string
   source: string
+}
+
+export interface Goal {
+  id: string
+  user_id: string
+  name: string
+  target_amount: number
+  current_amount: number
+  currency: string
+  target_amount_primary: number | null
+  current_amount_primary: number | null
+  target_date: string | null
+  tracking_type: 'manual' | 'account' | 'asset' | 'net_worth'
+  account_id: string | null
+  asset_id: string | null
+  status: 'active' | 'completed' | 'paused' | 'archived'
+  icon: string | null
+  color: string | null
+  position: number
+  metadata_json: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+  percentage: number
+  monthly_contribution: number | null
+  on_track: 'ahead' | 'on_track' | 'behind' | 'overdue' | 'achieved' | null
+  account_name: string | null
+  asset_name: string | null
+}
+
+export interface GoalSummary {
+  id: string
+  name: string
+  target_amount: number
+  current_amount: number
+  currency: string
+  target_date: string | null
+  status: string
+  icon: string | null
+  color: string | null
+  percentage: number
+  monthly_contribution: number | null
+  on_track: string | null
 }
 
 export interface PaginatedResponse<T> {

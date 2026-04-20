@@ -35,6 +35,7 @@ class TransactionUpdate(BaseModel):
     date: Optional[_Date] = None
     type: Optional[str] = None
     currency: Optional[str] = None
+    account_id: Optional[uuid.UUID] = None
     category_id: Optional[uuid.UUID] = None
     payee_id: Optional[uuid.UUID] = None
     notes: Optional[str] = None
@@ -60,6 +61,10 @@ class TransactionRead(TransactionBase):
     fx_rate_used: Optional[float] = None
     fx_fallback: bool = False
     attachment_count: int = 0
+    installment_number: Optional[int] = None
+    total_installments: Optional[int] = None
+    installment_total_amount: Optional[float] = None
+    installment_purchase_date: Optional[_Date] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -77,6 +82,10 @@ class TransferCreate(BaseModel):
     description: str
     notes: Optional[str] = None
     fx_rate: Optional[Decimal] = None
+
+
+class LinkTransferRequest(BaseModel):
+    transaction_ids: list[uuid.UUID]
 
 
 class TransferRead(BaseModel):

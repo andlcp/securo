@@ -1,9 +1,11 @@
 import { useState, useEffect, useMemo } from 'react'
+import { getAccountName } from '@/lib/account-utils'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import { ptBR, enUS } from 'date-fns/locale'
-import { dashboard, transactions, budgets, categories as categoriesApi, accounts as accountsApi } from '@/lib/api'
+import { dashboard, transactions, budgets, categories as categoriesApi, accounts as accountsApi, goals as goalsApi } from '@/lib/api'
+import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
@@ -25,7 +27,9 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
-import { CheckCircle2, CalendarIcon, Paperclip } from 'lucide-react'
+import { CheckCircle2, CalendarIcon, Paperclip, Target, ArrowUpDown } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { ICON_MAP } from '@/lib/category-icons'
 import { PageHeader } from '@/components/page-header'
 import { CategoryIcon } from '@/components/category-icon'
 import { TransactionDrillDown, type DrillDownFilter } from '@/components/transaction-drill-down'
@@ -142,14 +146,16 @@ export default function DashboardPage() {
     queryFn: () => accountsApi.list(),
   })
 
+  const { data: goalsSummary } = useQuery({
+    queryKey: ['goals', 'summary'],
+    queryFn: () => goalsApi.summary(3),
+  })
+
   const updateMutation = useMutation({
     mutationFn: ({ id, ...data }: Partial<Transaction> & { id: string }) =>
       transactions.update(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['budgets'] })
-      queryClient.invalidateQueries({ queryKey: ['drill-down'] })
+      invalidateFinancialQueries(queryClient)
       setDialogOpen(false)
       setEditingTx(null)
     },
@@ -158,10 +164,16 @@ export default function DashboardPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => transactions.delete(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['budgets'] })
-      queryClient.invalidateQueries({ queryKey: ['drill-down'] })
+      invalidateFinancialQueries(queryClient)
+      setDialogOpen(false)
+      setEditingTx(null)
+    },
+  })
+
+  const unlinkTransferMutation = useMutation({
+    mutationFn: (pairId: string) => transactions.unlinkTransfer(pairId),
+    onSuccess: () => {
+      invalidateFinancialQueries(queryClient)
       setDialogOpen(false)
       setEditingTx(null)
     },
@@ -213,6 +225,8 @@ export default function DashboardPage() {
   const uncategorizedCount = summary?.pending_categorization ?? 0
   const uncategorizedAmount = summary?.pending_categorization_amount ?? 0
 
+  const [catSortDesc, setCatSortDesc] = useState(true)
+
   // Merged category bars data
   const mergedCategories = useMemo(() => {
     if (!spending) return []
@@ -245,10 +259,11 @@ export default function DashboardPage() {
           momPct,
         }
       })
-      .sort((a, b) => b.actual - a.actual)
-  }, [spending, budgetComparison])
+      .sort((a, b) => catSortDesc ? b.actual - a.actual : a.actual - b.actual)
+  }, [spending, budgetComparison, catSortDesc])
 
   const [txPage, setTxPage] = useState(1)
+  const [txSortDesc, setTxSortDesc] = useState(true)
   useEffect(() => setTxPage(1), [selectedMonth])
 
   type DisplayRow = {
@@ -301,9 +316,9 @@ export default function DashboardPage() {
         attachmentCount: 0,
       })
     }
-    rows.sort((a, b) => a.date.localeCompare(b.date))
+    rows.sort((a, b) => txSortDesc ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date))
     return rows
-  }, [currentMonthTxs, projectedTxs])
+  }, [currentMonthTxs, projectedTxs, txSortDesc])
 
   const txTotalPages = Math.ceil(allDisplayRows.length / TX_PER_PAGE)
   const pagedRows = allDisplayRows.slice((txPage - 1) * TX_PER_PAGE, txPage * TX_PER_PAGE)
@@ -338,7 +353,7 @@ export default function DashboardPage() {
               <PopoverTrigger asChild>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-2 border border-border rounded-lg px-3 py-1.5 text-sm bg-card text-foreground hover:bg-muted/50 transition-all cursor-pointer"
+                  className="inline-flex items-center justify-center gap-2 border border-border rounded-lg px-3 py-1.5 text-sm bg-card text-foreground hover:bg-muted/50 transition-all cursor-pointer min-w-[180px]"
                 >
                   <CalendarIcon className="size-3.5 text-muted-foreground" />
                   {new Date(selectedMonth + '-02').toLocaleDateString(locale, { month: 'long', year: 'numeric' }).replace(/^\w/, c => c.toUpperCase())}
@@ -513,8 +528,15 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5" style={{ gridAutoRows: 'minmax(380px, auto)' }}>
         {/* Category Spending Bars */}
         <div className="bg-card rounded-xl border border-border shadow-sm flex flex-col max-h-[420px]">
-          <div className="px-5 py-4 border-b border-border shrink-0">
+          <div className="px-5 py-4 border-b border-border shrink-0 flex items-center justify-between">
             <p className="text-sm font-semibold text-foreground">{t('dashboard.spendingByCategory')}</p>
+            <button
+              onClick={() => setCatSortDesc(v => !v)}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            >
+              <ArrowUpDown size={13} />
+              {catSortDesc ? t('dashboard.sortHighest') : t('dashboard.sortLowest')}
+            </button>
           </div>
           <div className="p-3 overflow-y-auto flex-1">
             {spendingLoading ? (
@@ -731,11 +753,89 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Goals Progress Widget */}
+      {goalsSummary && goalsSummary.length > 0 && (
+        <div className="bg-card rounded-xl border border-border shadow-sm mb-5">
+          <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+            <p className="text-sm font-semibold text-foreground">{t('goals.dashboardTitle')}</p>
+            <Link to="/goals" className="text-xs font-medium text-primary hover:underline">
+              {t('goals.viewAll')} &rarr;
+            </Link>
+          </div>
+          <div className="divide-y divide-border">
+            {goalsSummary.map((goal) => {
+              const progressColor = goal.percentage >= 100
+                ? 'bg-emerald-500'
+                : goal.percentage >= 60
+                  ? 'bg-blue-500'
+                  : goal.percentage >= 30
+                    ? 'bg-amber-400'
+                    : 'bg-muted-foreground/30'
+              const onTrackConfig: Record<string, { cls: string; key: string }> = {
+                ahead: { cls: 'text-emerald-600', key: 'goals.onTrackAhead' },
+                on_track: { cls: 'text-blue-600', key: 'goals.onTrackOnTrack' },
+                behind: { cls: 'text-amber-600', key: 'goals.onTrackBehind' },
+                overdue: { cls: 'text-rose-600', key: 'goals.onTrackOverdue' },
+                achieved: { cls: 'text-emerald-600', key: 'goals.onTrackAchieved' },
+              }
+              const otc = goal.on_track ? onTrackConfig[goal.on_track] : null
+              const GoalIcon = (goal.icon && ICON_MAP[goal.icon]) || Target
+              return (
+                <div key={goal.id} className="px-5 py-3 flex items-center gap-4">
+                  <div
+                    className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-white"
+                    style={{ backgroundColor: goal.color ?? '#6B7280' }}
+                  >
+                    <GoalIcon size={14} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="text-sm font-medium text-foreground truncate">{goal.name}</span>
+                      <span className="text-xs font-bold tabular-nums text-foreground shrink-0">
+                        {mask(formatCurrency(goal.current_amount, goal.currency, locale))} / {mask(formatCurrency(goal.target_amount, goal.currency, locale))}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-1.5 bg-muted/60 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all ${progressColor}`}
+                          style={{ width: `${Math.min(goal.percentage, 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-[11px] font-bold tabular-nums text-muted-foreground shrink-0">
+                        {goal.percentage.toFixed(0)}%
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground">
+                      {goal.monthly_contribution != null && goal.monthly_contribution > 0 && (
+                        <span className="tabular-nums">
+                          {mask(formatCurrency(goal.monthly_contribution, goal.currency, locale))}{t('goals.perMonth')}
+                        </span>
+                      )}
+                      {otc && (
+                        <span className={`font-medium ${otc.cls}`}>{t(otc.key)}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Period Transactions */}
       <div>
         <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-border">
+          <div className="px-5 py-4 border-b border-border flex items-center justify-between">
             <p className="text-sm font-semibold text-foreground">{t('dashboard.periodTransactions')}</p>
+            <button
+              onClick={() => { setTxSortDesc(v => !v); setTxPage(1) }}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            >
+              <ArrowUpDown size={13} />
+              {txSortDesc ? t('dashboard.sortNewest') : t('dashboard.sortOldest')}
+            </button>
           </div>
           {txListLoading ? (
             <div className="p-5 space-y-3">
@@ -837,14 +937,15 @@ export default function DashboardPage() {
         onClose={() => { setDialogOpen(false); setEditingTx(null) }}
         transaction={editingTx}
         categories={(categoriesList ?? []).map((c: { id: string; name: string; icon: string }) => ({ id: c.id, name: c.name, icon: c.icon }))}
-        accounts={(accountsList ?? []).map((a: { id: string; name: string }) => ({ id: a.id, name: a.name }))}
+        accounts={(accountsList ?? []).map((a: { id: string; name: string; display_name?: string | null }) => ({ id: a.id, name: getAccountName(a) }))}
         onSave={(data) => {
           if (editingTx) updateMutation.mutate({ id: editingTx.id, ...data })
         }}
         onDelete={() => {
           if (editingTx) deleteMutation.mutate(editingTx.id)
         }}
-        loading={updateMutation.isPending || deleteMutation.isPending}
+        onUnlinkTransfer={(pairId) => unlinkTransferMutation.mutate(pairId)}
+        loading={updateMutation.isPending || deleteMutation.isPending || unlinkTransferMutation.isPending}
         error={updateMutation.error ? extractApiError(updateMutation.error) : deleteMutation.error ? extractApiError(deleteMutation.error) : null}
         isSynced={!!editingTx?.external_id}
       />

@@ -22,6 +22,8 @@ import type {
   Asset,
   AssetValue,
   Attachment,
+  Goal,
+  GoalSummary,
   DashboardSummary,
   SpendingByCategory,
   MonthlyTrend,
@@ -197,7 +199,16 @@ export const accounts = {
     const { data } = await api.get(`/accounts/${id}`)
     return data
   },
-  create: async (account: { name: string; type: string; balance?: number; currency?: string }): Promise<Account> => {
+  create: async (account: {
+    name: string
+    type: string
+    balance?: number
+    balance_date?: string
+    currency?: string
+    credit_limit?: number | null
+    statement_close_day?: number | null
+    payment_due_day?: number | null
+  }): Promise<Account> => {
     const { data } = await api.post('/accounts', account)
     return data
   },
@@ -230,7 +241,9 @@ export const accounts = {
 export const transactions = {
   list: async (params?: {
     account_id?: string
+    account_ids?: string[]
     category_id?: string
+    category_ids?: string[]
     payee_id?: string
     uncategorized?: boolean
     type?: string
@@ -242,7 +255,10 @@ export const transactions = {
     include_opening_balance?: boolean
     exclude_transfers?: boolean
   }): Promise<PaginatedResponse<Transaction>> => {
-    const { data } = await api.get('/transactions', { params })
+    const { data } = await api.get('/transactions', {
+      params,
+      paramsSerializer: { indexes: null },
+    })
     return data
   },
   get: async (id: string): Promise<Transaction> => {
@@ -279,6 +295,19 @@ export const transactions = {
     })
     return data
   },
+  linkTransfer: async (transactionIds: string[]): Promise<{ debit: Transaction; credit: Transaction; transfer_pair_id: string }> => {
+    const { data } = await api.post('/transactions/link-transfer', {
+      transaction_ids: transactionIds,
+    })
+    return data
+  },
+  transferCandidates: async (transactionId: string, params?: { limit?: number; window_days?: number }): Promise<Transaction[]> => {
+    const { data } = await api.get(`/transactions/${transactionId}/transfer-candidates`, { params })
+    return data
+  },
+  unlinkTransfer: async (pairId: string): Promise<void> => {
+    await api.delete(`/connections/transfers/${pairId}`)
+  },
   previewImport: async (file: File, options?: {
     date_format?: string
     flip_amount?: boolean
@@ -300,14 +329,20 @@ export const transactions = {
   },
   export: async (params?: {
     account_id?: string
+    account_ids?: string[]
     category_id?: string
+    category_ids?: string[]
     uncategorized?: boolean
     type?: string
     from?: string
     to?: string
     q?: string
   }): Promise<void> => {
-    const { data } = await api.get('/transactions/export', { params, responseType: 'blob' })
+    const { data } = await api.get('/transactions/export', {
+      params,
+      responseType: 'blob',
+      paramsSerializer: { indexes: null },
+    })
     const blob = new Blob([data], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -449,6 +484,33 @@ export const budgets = {
   },
   comparison: async (month?: string): Promise<BudgetVsActual[]> => {
     const { data } = await api.get('/budgets/comparison', { params: { month } })
+    return data
+  },
+}
+
+// Goals
+export const goals = {
+  list: async (status?: string): Promise<Goal[]> => {
+    const { data } = await api.get('/goals', { params: { status } })
+    return data
+  },
+  get: async (id: string): Promise<Goal> => {
+    const { data } = await api.get(`/goals/${id}`)
+    return data
+  },
+  create: async (goal: Partial<Goal>): Promise<Goal> => {
+    const { data } = await api.post('/goals', goal)
+    return data
+  },
+  update: async (id: string, goal: Partial<Goal>): Promise<Goal> => {
+    const { data } = await api.patch(`/goals/${id}`, goal)
+    return data
+  },
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/goals/${id}`)
+  },
+  summary: async (limit = 3): Promise<GoalSummary[]> => {
+    const { data } = await api.get('/goals/summary', { params: { limit } })
     return data
   },
 }
@@ -620,6 +682,40 @@ export const admin = {
   registrationStatus: async (): Promise<{ enabled: boolean }> => {
     const { data } = await api.get('/admin/registration-status')
     return data
+  },
+  accountingMode: async (): Promise<{ mode: 'cash' | 'accrual' }> => {
+    const { data } = await api.get('/admin/accounting-mode')
+    return data
+  },
+}
+
+// Global search (powers the command palette)
+export type SearchHitType =
+  | 'transaction'
+  | 'account'
+  | 'payee'
+  | 'category'
+  | 'goal'
+  | 'asset'
+
+export interface SearchHit {
+  type: SearchHitType
+  id: string
+  label: string
+  subtitle: string | null
+  amount: number | null
+  currency: string | null
+  date: string | null
+  icon: string | null
+  color: string | null
+  meta: Record<string, unknown>
+}
+
+export const search = {
+  query: async (q: string, limit = 5): Promise<SearchHit[]> => {
+    if (!q.trim()) return []
+    const { data } = await api.get('/search', { params: { q, limit } })
+    return data.results as SearchHit[]
   },
 }
 

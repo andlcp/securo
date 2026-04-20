@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.accounts import router as accounts_router
 from app.api.budgets import router as budgets_router
+from app.api.goals import router as goals_router
 from app.api.categories import router as categories_router
 from app.api.category_groups import router as category_groups_router
 from app.api.connections import router as connections_router
@@ -17,6 +18,7 @@ from app.api.recurring_transactions import router as recurring_router
 from app.api.rules import router as rules_router
 from app.api.assets import router as assets_router
 from app.api.reports import router as reports_router
+from app.api.search import router as search_router
 from app.api.setup import router as setup_router
 from app.api.currencies import router as currencies_router
 from app.api.export import router as export_router
@@ -108,9 +110,11 @@ app.include_router(accounts_router)
 app.include_router(connections_router)
 app.include_router(recurring_router)
 app.include_router(budgets_router)
+app.include_router(goals_router)
 app.include_router(assets_router)
 app.include_router(dashboard_router)
 app.include_router(reports_router)
+app.include_router(search_router)
 app.include_router(setup_router)
 app.include_router(currencies_router)
 app.include_router(fx_rates_router)

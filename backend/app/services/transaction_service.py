@@ -12,6 +12,7 @@ from app.models.account import Account
 from app.models.bank_connection import BankConnection
 from app.models.payee import Payee
 from app.schemas.transaction import TransactionCreate, TransactionUpdate, TransferCreate
+from app.services.credit_card_service import apply_effective_date
 from app.services.rule_service import apply_rules_to_transaction
 from app.services.fx_rate_service import stamp_primary_amount, convert as fx_convert
 
@@ -58,7 +59,15 @@ async def get_transactions(
     txn_type: Optional[str] = None,
     skip_pagination: bool = False,
     exclude_transfers: bool = False,
+    account_ids: Optional[list[uuid.UUID]] = None,
+    category_ids: Optional[list[uuid.UUID]] = None,
+    accounting_mode: Optional[str] = None,
 ) -> tuple[list[Transaction], int]:
+    # In "accrual" mode, bucket/order by effective_date so list filters
+    # line up with the cash-flow view used by the dashboard and reports.
+    date_col = (
+        Transaction.effective_date if accounting_mode == "accrual" else Transaction.date
+    )
     # Base query: user's own transactions (manual or via account)
     base_query = (
         select(Transaction)
@@ -79,9 +88,14 @@ async def get_transactions(
         base_query = base_query.where(Transaction.source != "opening_balance")
 
     # Apply filters
-    if account_id:
+    # Multi-id filters take precedence over single-id filters.
+    if account_ids:
+        base_query = base_query.where(Transaction.account_id.in_(account_ids))
+    elif account_id:
         base_query = base_query.where(Transaction.account_id == account_id)
-    if category_id:
+    if category_ids:
+        base_query = base_query.where(Transaction.category_id.in_(category_ids))
+    elif category_id:
         base_query = base_query.where(Transaction.category_id == category_id)
     if payee_id:
         base_query = base_query.where(Transaction.payee_id == payee_id)
@@ -95,9 +109,9 @@ async def get_transactions(
     if txn_type:
         base_query = base_query.where(Transaction.type == txn_type)
     if from_date:
-        base_query = base_query.where(Transaction.date >= from_date)
+        base_query = base_query.where(date_col >= from_date)
     if to_date:
-        base_query = base_query.where(Transaction.date <= to_date)
+        base_query = base_query.where(date_col <= to_date)
     if search:
         term = f"%{search}%"
         base_query = base_query.where(
@@ -114,7 +128,7 @@ async def get_transactions(
     total = await session.scalar(count_query)
 
     # Apply ordering (and pagination unless skipped)
-    query = base_query.order_by(Transaction.date.desc(), Transaction.created_at.desc())
+    query = base_query.order_by(date_col.desc(), Transaction.created_at.desc())
     if not skip_pagination:
         query = query.offset((page - 1) * limit).limit(limit)
 
@@ -203,6 +217,7 @@ async def create_transaction(
         source="manual",
         notes=data.notes,
     )
+    apply_effective_date(transaction, account)
     session.add(transaction)
     await session.flush()  # get ID without committing
 
@@ -268,6 +283,7 @@ async def create_transfer(
         notes=data.notes,
         transfer_pair_id=transfer_pair_id,
     )
+    apply_effective_date(debit_tx, from_account)
     session.add(debit_tx)
 
     # Credit transaction (to account) — convert if cross-currency
@@ -297,6 +313,7 @@ async def create_transfer(
         notes=data.notes,
         transfer_pair_id=transfer_pair_id,
     )
+    apply_effective_date(credit_tx, to_account)
     session.add(credit_tx)
     await session.flush()
 
@@ -316,6 +333,152 @@ async def create_transfer(
     return debit_tx, credit_tx
 
 
+async def get_transfer_candidates(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+    limit: int = 10,
+    window_days: int = 30,
+) -> list[Transaction]:
+    """Return ranked transfer-pair candidates for the given anchor transaction.
+
+    Filters: different account, opposing type, not already linked, within
+    ``window_days`` of the anchor's date. Ranked by date proximity, then
+    primary-currency amount closeness (so cross-currency pairs match well).
+    """
+    from datetime import timedelta
+    from decimal import Decimal
+
+    anchor = await get_transaction(session, transaction_id, user_id)
+    if not anchor:
+        return []
+    if anchor.transfer_pair_id is not None:
+        return []
+
+    opposing_type = "credit" if anchor.type == "debit" else "debit"
+    from_date = anchor.date - timedelta(days=window_days)
+    to_date = anchor.date + timedelta(days=window_days)
+
+    result = await session.execute(
+        select(Transaction)
+        .outerjoin(Account)
+        .outerjoin(BankConnection)
+        .where(
+            or_(
+                Transaction.user_id == user_id,
+                BankConnection.user_id == user_id,
+            ),
+            Transaction.id != anchor.id,
+            Transaction.account_id != anchor.account_id,
+            Transaction.type == opposing_type,
+            Transaction.transfer_pair_id.is_(None),
+            Transaction.source != "opening_balance",
+            Transaction.date >= from_date,
+            Transaction.date <= to_date,
+        )
+        .options(
+            selectinload(Transaction.category),
+            selectinload(Transaction.account),
+            selectinload(Transaction.payee_entity),
+        )
+    )
+    candidates = list(result.scalars().all())
+
+    anchor_amount_primary = (
+        Decimal(str(anchor.amount_primary)) if anchor.amount_primary is not None else None
+    )
+
+    def score(tx: Transaction) -> tuple[int, Decimal]:
+        date_diff = abs((tx.date - anchor.date).days)
+        if anchor_amount_primary is not None and tx.amount_primary is not None:
+            amount_diff = abs(
+                Decimal(str(tx.amount_primary)).copy_abs()
+                - anchor_amount_primary.copy_abs()
+            )
+        else:
+            amount_diff = abs(
+                Decimal(str(tx.amount)).copy_abs()
+                - Decimal(str(anchor.amount)).copy_abs()
+            )
+        return (date_diff, amount_diff)
+
+    candidates.sort(key=score)
+    candidates = candidates[:limit]
+
+    # Hydrate fields the schema needs
+    if candidates:
+        tx_ids = [tx.id for tx in candidates]
+        count_rows = await session.execute(
+            select(
+                TransactionAttachment.transaction_id,
+                func.count(TransactionAttachment.id),
+            )
+            .where(TransactionAttachment.transaction_id.in_(tx_ids))
+            .group_by(TransactionAttachment.transaction_id)
+        )
+        counts = dict(count_rows.all())
+        for tx in candidates:
+            tx.attachment_count = counts.get(tx.id, 0)
+            tx.payee_name = tx.payee_entity.name if tx.payee_entity else None
+
+    return candidates
+
+
+async def link_existing_as_transfer(
+    session: AsyncSession, user_id: uuid.UUID, transaction_ids: list[uuid.UUID]
+) -> tuple[Transaction, Transaction]:
+    """Link two existing transactions as a transfer pair.
+
+    Permissive by design: amounts don't have to match. Validation enforces
+    ownership, opposing types, different accounts, and that neither side is
+    already part of an existing transfer.
+    """
+    if len(transaction_ids) != 2:
+        raise ValueError("Exactly two transactions are required")
+    if transaction_ids[0] == transaction_ids[1]:
+        raise ValueError("Cannot link a transaction to itself")
+
+    result = await session.execute(
+        select(Transaction)
+        .outerjoin(Account)
+        .outerjoin(BankConnection)
+        .where(
+            Transaction.id.in_(transaction_ids),
+            or_(
+                Transaction.user_id == user_id,
+                BankConnection.user_id == user_id,
+            ),
+        )
+    )
+    txns = list(result.scalars().all())
+    if len(txns) != 2:
+        raise ValueError("Transaction not found")
+
+    for tx in txns:
+        if tx.transfer_pair_id is not None:
+            raise ValueError("Transaction is already part of a transfer")
+
+    if txns[0].account_id == txns[1].account_id:
+        raise ValueError("Transactions must be in different accounts")
+
+    types = {tx.type for tx in txns}
+    if types != {"debit", "credit"}:
+        raise ValueError("Transactions must be one debit and one credit")
+
+    transfer_pair_id = uuid.uuid4()
+    for tx in txns:
+        tx.transfer_pair_id = transfer_pair_id
+        tx.category_id = None  # transfers are excluded from category reports
+
+    await session.commit()
+    for tx in txns:
+        await session.refresh(tx, ["category"])
+
+    debit_tx = next(tx for tx in txns if tx.type == "debit")
+    credit_tx = next(tx for tx in txns if tx.type == "credit")
+    return debit_tx, credit_tx
+
+
 async def update_transaction(
     session: AsyncSession, transaction_id: uuid.UUID, user_id: uuid.UUID, data: TransactionUpdate
 ) -> Optional[Transaction]:
@@ -324,6 +487,37 @@ async def update_transaction(
         return None
 
     update_data = data.model_dump(exclude_unset=True)
+
+    # Verify the new account belongs to the user before touching the row.
+    # When changing the account on one side of a transfer pair, refuse to
+    # collide with the paired transaction's account (a transfer must have two
+    # distinct accounts).
+    new_account_id = update_data.get("account_id")
+    if new_account_id is not None and new_account_id != transaction.account_id:
+        account_result = await session.execute(
+            select(Account)
+            .outerjoin(BankConnection)
+            .where(
+                Account.id == new_account_id,
+                or_(
+                    Account.user_id == user_id,
+                    BankConnection.user_id == user_id,
+                ),
+            )
+        )
+        if account_result.scalar_one_or_none() is None:
+            raise ValueError("Account not found")
+
+        if transaction.transfer_pair_id:
+            paired_result = await session.execute(
+                select(Transaction).where(
+                    Transaction.transfer_pair_id == transaction.transfer_pair_id,
+                    Transaction.id != transaction.id,
+                )
+            )
+            paired_tx = paired_result.scalar_one_or_none()
+            if paired_tx and paired_tx.account_id == new_account_id:
+                raise ValueError("Cannot move transfer to the same account as its paired transaction")
 
     # Pop FX override fields before generic setattr loop
     override_amount_primary = update_data.pop("amount_primary", None)
@@ -345,6 +539,11 @@ async def update_transaction(
         )
     elif needs_restamp:
         await stamp_primary_amount(session, user_id, transaction)
+
+    # Refresh effective_date when the purchase date or the account changed.
+    if "date" in update_data or "account_id" in update_data:
+        account_for_tx = await session.get(Account, transaction.account_id)
+        apply_effective_date(transaction, account_for_tx)
 
     # Cascade changes to paired transfer transaction
     cascade_fields = {"amount", "date", "description", "notes"}
@@ -370,6 +569,9 @@ async def update_transaction(
                 else:
                     paired_tx.amount = update_data[key]
             await stamp_primary_amount(session, user_id, paired_tx)
+            if "date" in update_data:
+                paired_account = await session.get(Account, paired_tx.account_id)
+                apply_effective_date(paired_tx, paired_account)
 
     await session.commit()
     await session.refresh(transaction)

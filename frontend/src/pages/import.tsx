@@ -1,7 +1,9 @@
 import { useState, useRef, useCallback } from 'react'
+import { getAccountName } from '@/lib/account-utils'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { transactions as transactionsApi, accounts as accountsApi, importLogs as importLogsApi } from '@/lib/api'
+import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -75,8 +77,7 @@ export default function ImportPage() {
   const importMutation = useMutation({
     mutationFn: () => transactionsApi.import(selectedAccount, previewData!.transactions, fileName ?? '', previewData!.detected_format),
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
-      queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['import-logs'] })
       const msg = data.skipped > 0
         ? t('import.importedWithSkipped', { imported: data.imported, skipped: data.skipped })
@@ -98,8 +99,8 @@ export default function ImportPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => importLogsApi.delete(id),
     onSuccess: () => {
+      invalidateFinancialQueries(queryClient)
       queryClient.invalidateQueries({ queryKey: ['import-logs'] })
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       setDeleteTarget(null)
     },
   })
@@ -284,7 +285,7 @@ export default function ImportPage() {
               >
                 <option value="">{t('import.selectAccount')}</option>
                 {accountsList?.map((acc) => (
-                  <option key={acc.id} value={acc.id}>{acc.name} ({t(TYPE_LABELS[acc.type] || acc.type)})</option>
+                  <option key={acc.id} value={acc.id}>{getAccountName(acc)} ({t(TYPE_LABELS[acc.type] || acc.type)})</option>
                 ))}
               </select>
               {!selectedAccount && (
