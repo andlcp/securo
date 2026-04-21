@@ -1,5 +1,4 @@
 import { useState, useMemo, useEffect } from 'react'
-import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { investments as investmentsApi } from '@/lib/api'
 import { toast } from 'sonner'
@@ -31,13 +30,6 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
@@ -268,8 +260,8 @@ function BenchmarkChart({ months }: { months: number }) {
           axisLine={false}
         />
         <Tooltip
-          formatter={(value: number, name: string) => [
-            `${value.toFixed(2)}%`,
+          formatter={(value: unknown, name: string) => [
+            `${(value as number).toFixed(2)}%`,
             name === 'cdi' ? 'CDI' : name === 'ibov' ? 'IBOV' : 'S&P 500',
           ]}
           contentStyle={{
@@ -534,20 +526,18 @@ function PositionDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Tipo de ativo</Label>
-              <Select value={form.asset_type} onValueChange={handleAssetTypeChange}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Selecione..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {(Object.entries(ASSET_TYPE_LABELS) as [InvestmentAssetType, string][]).map(
-                    ([key, label]) => (
-                      <SelectItem key={key} value={key}>
-                        {label}
-                      </SelectItem>
-                    ),
-                  )}
-                </SelectContent>
-              </Select>
+              <select
+                value={form.asset_type}
+                onChange={(e) => handleAssetTypeChange(e.target.value)}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+              >
+                <option value="" disabled>Selecione...</option>
+                {(Object.entries(ASSET_TYPE_LABELS) as [InvestmentAssetType, string][]).map(
+                  ([key, label]) => (
+                    <option key={key} value={key}>{label}</option>
+                  ),
+                )}
+              </select>
             </div>
 
             <div className="space-y-1.5">
@@ -715,8 +705,7 @@ function PortfolioDialog({
 type TabId = 'consolidated' | string // string = portfolio id
 
 export default function InvestmentsPage() {
-  const { t } = useTranslation()
-  const { isPrivacyMode } = usePrivacyMode()
+  const { privacyMode: isPrivacyMode } = usePrivacyMode()
   const qc = useQueryClient()
 
   const [activeTab, setActiveTab] = useState<TabId>('consolidated')
