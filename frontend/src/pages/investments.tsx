@@ -260,7 +260,7 @@ function BenchmarkChart({ months }: { months: number }) {
           axisLine={false}
         />
         <Tooltip
-          formatter={(value: unknown, name: string) => [
+          formatter={(value: unknown, name: string | undefined) => [
             `${(value as number).toFixed(2)}%`,
             name === 'cdi' ? 'CDI' : name === 'ibov' ? 'IBOV' : 'S&P 500',
           ]}
