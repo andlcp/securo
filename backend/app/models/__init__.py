@@ -15,6 +15,9 @@ from app.models.transaction_attachment import TransactionAttachment
 from app.models.payee import Payee, PayeeMapping
 from app.models.app_settings import AppSetting
 from app.models.goal import Goal
+from app.models.investment_portfolio import InvestmentPortfolio
+from app.models.investment_position import InvestmentPosition
+from app.models.investment_price_cache import InvestmentPriceCache
 
 __all__ = [
     "User",
@@ -35,4 +38,7 @@ __all__ = [
     "PayeeMapping",
     "AppSetting",
     "Goal",
+    "InvestmentPortfolio",
+    "InvestmentPosition",
+    "InvestmentPriceCache",
 ]
