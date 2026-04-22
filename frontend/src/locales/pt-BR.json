@@ -878,6 +878,7 @@
     "portfolioReturn": "Retorno das carteiras",
     "byClass": "Por classe de ativo",
     "return": "Retorno",
-    "noData": "Nenhum dado de investimento encontrado"
+    "noData": "Nenhum dado de investimento encontrado",
+    "sinceStart": "Início"
   }
 }

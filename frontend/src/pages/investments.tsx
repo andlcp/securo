@@ -128,6 +128,7 @@ export default function InvestmentsPage() {
   const userCurrency = user?.preferences?.currency_display ?? 'USD'
 
   const [months, setMonths] = useState(12)
+  const [sinceStart, setSinceStart] = useState(false)
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
 
   const { data: groupsList } = useQuery<AssetGroup[]>({
@@ -136,8 +137,8 @@ export default function InvestmentsPage() {
   })
 
   const { data: benchmarkData, isLoading: benchmarkLoading } = useQuery<BenchmarkData>({
-    queryKey: ['inv-benchmarks-series', months],
-    queryFn: () => investmentBenchmarks.series(months),
+    queryKey: ['inv-benchmarks-series', sinceStart ? 'start' : months],
+    queryFn: () => investmentBenchmarks.series(months, sinceStart),
     staleTime: 1000 * 60 * 30,
   })
 
@@ -207,9 +208,9 @@ export default function InvestmentsPage() {
             {([3, 6, 12, 24] as const).map(m => (
               <button
                 key={m}
-                onClick={() => setMonths(m)}
+                onClick={() => { setMonths(m); setSinceStart(false) }}
                 className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                  months === m
+                  !sinceStart && months === m
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                 }`}
@@ -217,6 +218,16 @@ export default function InvestmentsPage() {
                 {m < 12 ? `${m}M` : `${m / 12}A`}
               </button>
             ))}
+            <button
+              onClick={() => setSinceStart(true)}
+              className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                sinceStart
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
+            >
+              {t('investments.sinceStart')}
+            </button>
           </div>
         }
       />

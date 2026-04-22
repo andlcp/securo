@@ -878,6 +878,7 @@
     "portfolioReturn": "Portfolio Returns",
     "byClass": "By Asset Class",
     "return": "Return",
-    "noData": "No investment data found"
+    "noData": "No investment data found",
+    "sinceStart": "Inception"
   }
 }

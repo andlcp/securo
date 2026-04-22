@@ -7,11 +7,11 @@ Also computes per-group and per-asset-class returns from the assets table.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.asset import Asset
@@ -47,16 +47,19 @@ def detect_asset_class(ticker: Optional[str], name: str) -> str:
 
 # ─── External data fetching ───────────────────────────────────────────────────
 
-async def _fetch_cdi(months: int) -> list[dict]:
-    """Cumulative CDI % return series from BACEN."""
-    from datetime import date, timedelta
-    end = date.today().strftime("%d/%m/%Y")
-    start = (date.today() - timedelta(days=months * 31)).strftime("%d/%m/%Y")
+async def _fetch_cdi(start: date, end: date) -> list[dict]:
+    """Cumulative CDI % return series from BACEN for a date range."""
+    url = BACEN_CDI_URL.format(
+        start=start.strftime("%d/%m/%Y"),
+        end=end.strftime("%d/%m/%Y"),
+    )
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(BACEN_CDI_URL.format(start=start, end=end))
+            r = await client.get(url)
             r.raise_for_status()
             raw = r.json()
+        if not raw:
+            return []
         cumulative = 1.0
         result = []
         for entry in raw:
@@ -68,13 +71,15 @@ async def _fetch_cdi(months: int) -> list[dict]:
         return []
 
 
-async def _fetch_yahoo_index(symbol: str, months: int) -> list[dict]:
-    """Normalised % return series (base=0) from Yahoo Finance."""
+async def _fetch_yahoo_index(symbol: str, start: date, end: date) -> list[dict]:
+    """Normalised % return series (base=0) from Yahoo Finance using Unix timestamps."""
+    period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    period2 = int(datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc).timestamp())
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             r = await client.get(
                 f"{YAHOO_BASE}/{symbol}",
-                params={"interval": "1d", "range": f"{months}mo"},
+                params={"interval": "1d", "period1": period1, "period2": period2},
                 headers=YAHOO_HEADERS,
             )
             r.raise_for_status()
@@ -98,12 +103,29 @@ async def _fetch_yahoo_index(symbol: str, months: int) -> list[dict]:
         return []
 
 
-async def get_benchmark_series(months: int = 12) -> dict:
+async def get_portfolio_start_date(session: AsyncSession, user_id) -> Optional[date]:
+    """Return the earliest purchase_date among the user's non-sold assets, or None."""
+    result = await session.execute(
+        select(func.min(Asset.purchase_date)).where(
+            Asset.user_id == user_id,
+            Asset.purchase_date.is_not(None),
+            Asset.sell_date.is_(None),
+        )
+    )
+    return result.scalar()
+
+
+async def get_benchmark_series(
+    months: int = 12,
+    start_date: Optional[date] = None,
+) -> dict:
     """Return CDI, IBOV and S&P 500 cumulative return series (fetched concurrently)."""
+    today = date.today()
+    start = start_date if start_date else today - timedelta(days=months * 31)
     cdi, ibov, sp500 = await asyncio.gather(
-        _fetch_cdi(months),
-        _fetch_yahoo_index("%5EBVSP", months),
-        _fetch_yahoo_index("%5EGSPC", months),
+        _fetch_cdi(start, today),
+        _fetch_yahoo_index("%5EBVSP", start, today),
+        _fetch_yahoo_index("%5EGSPC", start, today),
     )
     return {"cdi": cdi, "ibov": ibov, "sp500": sp500}
 
@@ -119,7 +141,6 @@ def _asset_return(asset: Asset) -> tuple[float, float]:
     if asset.valuation_method == "market_price" and asset.last_price is not None:
         current = units * float(asset.last_price)
     else:
-        # Fall back to most recent manual value via purchase_price (approximation)
         current = invested
     return invested, current
 
@@ -129,12 +150,7 @@ async def get_portfolio_returns(
     user_id,
     group_ids: Optional[list[str]] = None,
 ) -> dict:
-    """Compute returns per group, per asset class, and consolidated.
-
-    Returns a structure ready for the frontend to display reference lines
-    alongside the benchmark time series.
-    """
-    # Fetch all active assets for the user
+    """Compute returns per group, per asset class, and consolidated."""
     stmt = (
         select(Asset)
         .where(Asset.user_id == user_id, Asset.is_archived.is_(False), Asset.sell_date.is_(None))
@@ -147,13 +163,11 @@ async def get_portfolio_returns(
     result = await session.execute(stmt)
     assets = list(result.scalars().all())
 
-    # Fetch group names
     group_rows = await session.execute(
         select(AssetGroup).where(AssetGroup.user_id == user_id)
     )
     groups_by_id = {str(g.id): g.name for g in group_rows.scalars().all()}
 
-    # Aggregate
     by_group: dict[str, dict] = {}
     by_class: dict[str, dict] = {}
     total_invested = total_current = 0.0
@@ -163,7 +177,6 @@ async def get_portfolio_returns(
         total_invested += invested
         total_current += current
 
-        # By group
         gid = str(asset.group_id) if asset.group_id else "_ungrouped"
         gname = groups_by_id.get(gid, "Sem carteira")
         if gid not in by_group:
@@ -171,7 +184,6 @@ async def get_portfolio_returns(
         by_group[gid]["invested"] += invested
         by_group[gid]["current"] += current
 
-        # By asset class
         cls = detect_asset_class(asset.ticker, asset.name)
         if cls not in by_class:
             by_class[cls] = {"name": cls, "invested": 0.0, "current": 0.0}

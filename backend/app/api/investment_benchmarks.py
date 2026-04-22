@@ -13,10 +13,15 @@ router = APIRouter(prefix="/api/investment-benchmarks", tags=["investment-benchm
 
 @router.get("/series")
 async def get_benchmark_series(
-    months: int = Query(12, ge=1, le=60),
+    months: int = Query(12, ge=1, le=120),
+    since_start: bool = Query(False),
+    session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
-    return await investment_benchmark_service.get_benchmark_series(months)
+    start_date = None
+    if since_start:
+        start_date = await investment_benchmark_service.get_portfolio_start_date(session, user.id)
+    return await investment_benchmark_service.get_benchmark_series(months=months, start_date=start_date)
 
 
 @router.get("/returns")

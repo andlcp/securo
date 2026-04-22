@@ -631,12 +631,14 @@ export const reports = {
 
 // Investment Benchmarks
 export const investmentBenchmarks = {
-  series: async (months = 12): Promise<{
+  series: async (months = 12, sinceStart = false): Promise<{
     cdi: { date: string; value: number }[]
     ibov: { date: string; value: number }[]
     sp500: { date: string; value: number }[]
   }> => {
-    const { data } = await api.get('/investment-benchmarks/series', { params: { months } })
+    const params: Record<string, unknown> = { months }
+    if (sinceStart) params.since_start = true
+    const { data } = await api.get('/investment-benchmarks/series', { params })
     return data
   },
   returns: async (groupIds?: string): Promise<{
