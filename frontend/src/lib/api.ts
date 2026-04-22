@@ -30,10 +30,6 @@ import type {
   BalanceHistory,
   PaginatedResponse,
   ReportResponse,
-  PortfolioSummary,
-  InvestmentPortfolio,
-  InvestmentPosition,
-  BenchmarkData,
 } from '@/types'
 
 const api = axios.create({
@@ -720,69 +716,6 @@ export const search = {
     if (!q.trim()) return []
     const { data } = await api.get('/search', { params: { q, limit } })
     return data.results as SearchHit[]
-  },
-}
-
-// Investments
-export const investments = {
-  summary: async (): Promise<PortfolioSummary> => {
-    const { data } = await api.get('/investments/summary')
-    return data
-  },
-  listPortfolios: async (): Promise<InvestmentPortfolio[]> => {
-    const { data } = await api.get('/investments/portfolios')
-    return data
-  },
-  createPortfolio: async (payload: { name: string; color?: string; description?: string }): Promise<InvestmentPortfolio> => {
-    const { data } = await api.post('/investments/portfolios', payload)
-    return data
-  },
-  updatePortfolio: async (id: string, payload: Partial<{ name: string; color: string; description: string }>): Promise<InvestmentPortfolio> => {
-    const { data } = await api.patch(`/investments/portfolios/${id}`, payload)
-    return data
-  },
-  deletePortfolio: async (id: string): Promise<void> => {
-    await api.delete(`/investments/portfolios/${id}`)
-  },
-  addPosition: async (
-    portfolioId: string,
-    payload: {
-      ticker: string
-      name: string
-      asset_type: string
-      currency: string
-      units: number
-      avg_price: number
-      broker?: string
-      notes?: string
-    },
-  ): Promise<InvestmentPosition> => {
-    const { data } = await api.post(`/investments/portfolios/${portfolioId}/positions`, payload)
-    return data
-  },
-  updatePosition: async (id: string, payload: Partial<{
-    ticker: string
-    name: string
-    asset_type: string
-    currency: string
-    units: number
-    avg_price: number
-    broker: string
-    notes: string
-  }>): Promise<InvestmentPosition> => {
-    const { data } = await api.patch(`/investments/positions/${id}`, payload)
-    return data
-  },
-  deletePosition: async (id: string): Promise<void> => {
-    await api.delete(`/investments/positions/${id}`)
-  },
-  benchmarks: async (months = 12): Promise<BenchmarkData> => {
-    const { data } = await api.get('/investments/benchmarks', { params: { months } })
-    return data
-  },
-  refreshPrices: async (): Promise<{ refreshed: number }> => {
-    const { data } = await api.post('/investments/prices/refresh')
-    return data
   },
 }
 
