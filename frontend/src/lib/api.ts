@@ -20,7 +20,10 @@ import type {
   Rule,
   ImportLog,
   Asset,
+  AssetGroup,
   AssetValue,
+  MarketSymbolMatch,
+  MarketSymbolQuote,
   Attachment,
   Goal,
   GoalSummary,
@@ -577,9 +580,40 @@ export const assets = {
   deleteValue: async (valueId: string): Promise<void> => {
     await api.delete(`/assets/values/${valueId}`)
   },
-  portfolioTrend: async (): Promise<{ assets: { id: string; name: string; type: string }[]; trend: Record<string, unknown>[]; total: number }> => {
+  portfolioTrend: async (): Promise<{ assets: { id: string; name: string; type: string; group_id: string | null }[]; trend: Record<string, unknown>[]; total: number }> => {
     const { data } = await api.get('/assets/portfolio-trend')
     return data
+  },
+  marketSearch: async (q: string, limit = 15): Promise<MarketSymbolMatch[]> => {
+    const { data } = await api.get('/assets/market/search', { params: { q, limit } })
+    return data
+  },
+  marketQuote: async (symbol: string): Promise<MarketSymbolQuote> => {
+    const { data } = await api.get('/assets/market/quote', { params: { symbol } })
+    return data
+  },
+  refreshPrice: async (id: string): Promise<Asset> => {
+    const { data } = await api.post(`/assets/${id}/refresh-price`)
+    return data
+  },
+}
+
+// Asset Groups ("wallets")
+export const assetGroups = {
+  list: async (): Promise<AssetGroup[]> => {
+    const { data } = await api.get('/asset-groups')
+    return data
+  },
+  create: async (group: Partial<AssetGroup> & { name: string }): Promise<AssetGroup> => {
+    const { data } = await api.post('/asset-groups', group)
+    return data
+  },
+  update: async (id: string, group: Partial<AssetGroup>): Promise<AssetGroup> => {
+    const { data } = await api.patch(`/asset-groups/${id}`, group)
+    return data
+  },
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/asset-groups/${id}`)
   },
 }
 

@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -23,6 +23,11 @@ class AssetCreate(BaseModel):
     growth_start_date: Optional[date] = None
     is_archived: bool = False
     position: int = 0
+    group_id: Optional[uuid.UUID] = None
+    # Market-priced assets: ticker is enough to create one. The service
+    # fetches the live quote on create and seeds the first AssetValue.
+    ticker: Optional[str] = None
+    ticker_exchange: Optional[str] = None
 
 
 class AssetUpdate(BaseModel):
@@ -41,6 +46,12 @@ class AssetUpdate(BaseModel):
     growth_start_date: Optional[date] = None
     is_archived: Optional[bool] = None
     position: Optional[int] = None
+    # Use a sentinel to differentiate "don't change group" (field omitted)
+    # from "remove from group" (explicit null). Pydantic's exclude_unset
+    # already handles this via model_dump.
+    group_id: Optional[uuid.UUID] = None
+    ticker: Optional[str] = None
+    ticker_exchange: Optional[str] = None
 
 
 class AssetRead(BaseModel):
@@ -66,8 +77,41 @@ class AssetRead(BaseModel):
     gain_loss: Optional[float] = None
     gain_loss_primary: Optional[float] = None
     value_count: int = 0
+    source: str = "manual"
+    connection_id: Optional[uuid.UUID] = None
+    isin: Optional[str] = None
+    maturity_date: Optional[date] = None
+    group_id: Optional[uuid.UUID] = None
+    ticker: Optional[str] = None
+    ticker_exchange: Optional[str] = None
+    last_price: Optional[float] = None
+    last_price_at: Optional[datetime] = None
+    logo_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MarketSymbolQuote(BaseModel):
+    """Live quote for a ticker, used by the add-asset form to preview value."""
+
+    symbol: str
+    name: Optional[str] = None
+    exchange: Optional[str] = None
+    currency: str
+    price: float
+    quote_type: Optional[str] = None  # EQUITY, ETF, CRYPTOCURRENCY, MUTUALFUND, ...
+    # Fully-formed logo URL if the provider can derive one. Caller stores
+    # this verbatim on the asset; no further processing required.
+    logo_url: Optional[str] = None
+
+
+class MarketSymbolMatch(BaseModel):
+    """A single search result returned by /assets/market/search."""
+
+    symbol: str
+    name: Optional[str] = None
+    exchange: Optional[str] = None
+    quote_type: Optional[str] = None
 
 
 class AssetValueCreate(BaseModel):

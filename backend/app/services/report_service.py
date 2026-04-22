@@ -12,7 +12,9 @@ from app.models.asset_value import AssetValue
 from app.models.transaction import Transaction
 from app.models.category import Category
 from app.models.user import User
+from app.services._query_filters import counts_as_pnl
 from app.services.admin_service import get_credit_card_accounting_mode
+from app.services.account_service import get_account_name
 from app.services.fx_rate_service import convert
 from app.schemas.report import (
     CategoryTrendItem,
@@ -271,7 +273,7 @@ async def get_net_worth_report(
         if account.type == "credit_card":
             composition.append(ReportCompositionItem(
                 key=str(account.id),
-                label=account.name,
+                label=get_account_name(account),
                 value=round(converted_val, 2),
                 color=account_type_colors.get(account.type, "#6B7280"),
                 group="liabilities",
@@ -280,7 +282,7 @@ async def get_net_worth_report(
             if bal > 0:
                 composition.append(ReportCompositionItem(
                     key=str(account.id),
-                    label=account.name,
+                    label=get_account_name(account),
                     value=round(converted_val, 2),
                     color=account_type_colors.get(account.type, "#6B7280"),
                     group="accounts",
@@ -380,7 +382,7 @@ async def get_income_expenses_report(
             report_date >= start,
             report_date <= today,
             Transaction.source != "opening_balance",
-            Transaction.transfer_pair_id.is_(None),
+            counts_as_pnl(),
         )
         .group_by(label_expr)
         .order_by(label_expr)
@@ -503,7 +505,7 @@ async def get_income_expenses_report(
             report_date >= start,
             report_date <= today,
             Transaction.source != "opening_balance",
-            Transaction.transfer_pair_id.is_(None),
+            counts_as_pnl(),
         )
         .group_by(Category.id, Category.name, Category.color, Transaction.type)
     )
@@ -543,7 +545,7 @@ async def get_income_expenses_report(
             report_date >= start,
             report_date <= today,
             Transaction.source != "opening_balance",
-            Transaction.transfer_pair_id.is_(None),
+            counts_as_pnl(),
         )
         .group_by(label_expr, Category.id, Category.name, Category.color, Transaction.type)
     )
