@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Registration
     registration_enabled: bool = True
 
+    # API docs — disable in production by setting ENABLE_API_DOCS=false
+    enable_api_docs: bool = True
+
     # Celery
     redis_url: str = "redis://localhost:6379/0"
 
