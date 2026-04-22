@@ -48,6 +48,7 @@
     "settings": "Settings",
     "recurring": "Recurring",
     "assets": "Assets",
+    "investments": "Investments",
     "payees": "Payees",
     "goals": "Goals",
     "reports": "Reports",
@@ -869,5 +870,14 @@
     "next": "Next",
     "back": "Back",
     "finish": "Get Started"
+  },
+  "investments": {
+    "title": "Investments",
+    "benchmarks": "Benchmarks",
+    "consolidated": "Consolidated",
+    "portfolioReturn": "Portfolio Returns",
+    "byClass": "By Asset Class",
+    "return": "Return",
+    "noData": "No investment data found"
   }
 }

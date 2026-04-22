@@ -48,6 +48,7 @@
     "settings": "Configurações",
     "recurring": "Recorrentes",
     "assets": "Patrimônio",
+    "investments": "Investimentos",
     "payees": "Beneficiários",
     "goals": "Metas",
     "reports": "Relatórios",
@@ -869,5 +870,14 @@
     "next": "Próximo",
     "back": "Voltar",
     "finish": "Começar"
+  },
+  "investments": {
+    "title": "Investimentos",
+    "benchmarks": "Benchmarks",
+    "consolidated": "Consolidado",
+    "portfolioReturn": "Retorno das carteiras",
+    "byClass": "Por classe de ativo",
+    "return": "Retorno",
+    "noData": "Nenhum dado de investimento encontrado"
   }
 }

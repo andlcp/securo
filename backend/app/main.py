@@ -18,6 +18,7 @@ from app.api.recurring_transactions import router as recurring_router
 from app.api.rules import router as rules_router
 from app.api.assets import router as assets_router
 from app.api.asset_groups import router as asset_groups_router
+from app.api.investment_benchmarks import router as investment_benchmarks_router
 from app.api.reports import router as reports_router
 from app.api.search import router as search_router
 from app.api.setup import router as setup_router
@@ -114,6 +115,7 @@ app.include_router(budgets_router)
 app.include_router(goals_router)
 app.include_router(assets_router)
 app.include_router(asset_groups_router)
+app.include_router(investment_benchmarks_router)
 app.include_router(dashboard_router)
 app.include_router(reports_router)
 app.include_router(search_router)

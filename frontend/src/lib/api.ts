@@ -629,6 +629,28 @@ export const reports = {
   },
 }
 
+// Investment Benchmarks
+export const investmentBenchmarks = {
+  series: async (months = 12): Promise<{
+    cdi: { date: string; value: number }[]
+    ibov: { date: string; value: number }[]
+    sp500: { date: string; value: number }[]
+  }> => {
+    const { data } = await api.get('/investment-benchmarks/series', { params: { months } })
+    return data
+  },
+  returns: async (groupIds?: string): Promise<{
+    consolidated: { invested: number; current: number; return_pct: number | null }
+    by_group: { id: string; name: string; invested: number; current: number; return_pct: number | null }[]
+    by_class: { name: string; invested: number; current: number; return_pct: number | null }[]
+  }> => {
+    const { data } = await api.get('/investment-benchmarks/returns', {
+      params: groupIds ? { group_ids: groupIds } : {},
+    })
+    return data
+  },
+}
+
 // Currencies
 export const currencies = {
   list: async (): Promise<{ code: string; symbol: string; name: string; flag: string }[]> => {
