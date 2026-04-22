@@ -19,7 +19,7 @@ from app.models.asset_group import AssetGroup
 
 logger = logging.getLogger(__name__)
 
-BACEN_CDI_URL = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados/ultimos/{days}?formato=json"
+BACEN_CDI_URL = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?dataInicial={start}&dataFinal={end}&formato=json"
 YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -49,10 +49,12 @@ def detect_asset_class(ticker: Optional[str], name: str) -> str:
 
 async def _fetch_cdi(months: int) -> list[dict]:
     """Cumulative CDI % return series from BACEN."""
-    days = min(months * 23, 500)
+    from datetime import date, timedelta
+    end = date.today().strftime("%d/%m/%Y")
+    start = (date.today() - timedelta(days=months * 31)).strftime("%d/%m/%Y")
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(BACEN_CDI_URL.format(days=days))
+            r = await client.get(BACEN_CDI_URL.format(start=start, end=end))
             r.raise_for_status()
             raw = r.json()
         cumulative = 1.0
