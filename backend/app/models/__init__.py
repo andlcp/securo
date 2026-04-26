@@ -16,6 +16,7 @@ from app.models.transaction_attachment import TransactionAttachment
 from app.models.payee import Payee, PayeeMapping
 from app.models.app_settings import AppSetting
 from app.models.goal import Goal
+from app.models.portfolio_snapshot import PortfolioSnapshot
 
 __all__ = [
     "User",
@@ -37,4 +38,5 @@ __all__ = [
     "PayeeMapping",
     "AppSetting",
     "Goal",
+    "PortfolioSnapshot",
 ]

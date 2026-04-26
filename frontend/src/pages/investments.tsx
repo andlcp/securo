@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   LineChart,
   Line,
@@ -14,7 +14,8 @@ import {
   CartesianGrid,
   ResponsiveContainer,
 } from 'recharts'
-import { investmentBenchmarks, assetGroups } from '@/lib/api'
+import { investmentBenchmarks, assetGroups, portfolioSnapshots } from '@/lib/api'
+import type { PortfolioSnapshot } from '@/lib/api'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/page-header'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
@@ -56,6 +57,8 @@ interface PortfolioReturns {
 const CDI_COLOR = '#F59E0B'
 const IBOV_COLOR = '#6366F1'
 const SP500_COLOR = '#10B981'
+const TWR_COLOR = '#EC4899'        // pink — destaque pra carteira no gráfico
+const TWR_BRUTO_COLOR = '#BE185D'  // pink escuro — TWR bruto
 
 const CLASS_COLORS: Record<string, string> = {
   'Ação': '#6366F1',
@@ -76,7 +79,11 @@ function parseDateKey(d: string) {
   return `${yy}${mm}${dd}`
 }
 
-type MergedRow = { date: string; _s: string; cdi?: number; ibov?: number; sp500?: number }
+type MergedRow = {
+  date: string; _s: string;
+  cdi?: number; ibov?: number; sp500?: number;
+  twr?: number; twr_bruto?: number; ivvb?: number;
+}
 
 function mergeSeries(
   cdi: BenchmarkPoint[],
@@ -96,6 +103,34 @@ function mergeSeries(
     map.set(p.date, row)
   }
   return Array.from(map.values()).sort((a, b) => a._s.localeCompare(b._s))
+}
+
+/** Build merged chart data from imported portfolio snapshots.
+ *  Filters to last `months` snapshots (or all when sinceStart). */
+function snapshotsToChartData(
+  snaps: PortfolioSnapshot[],
+  months: number,
+  sinceStart: boolean,
+): MergedRow[] {
+  if (!snaps || snaps.length === 0) return []
+  const sliced = sinceStart ? snaps : snaps.slice(-months)
+  const pct = (v: number | null | undefined): number | undefined =>
+    v == null ? undefined : v * 100
+  return sliced.map(s => {
+    // YYYY-MM-DD -> dd/MM/yyyy (matches the date format used by the live series)
+    const [yyyy, mm, dd] = s.month_end.split('-')
+    const date = `${dd}/${mm}/${yyyy}`
+    return {
+      date,
+      _s: `${yyyy}${mm}${dd}`,
+      cdi: pct(s.cdi_cum),
+      ibov: pct(s.ibov_cum),
+      sp500: pct(s.sp500_cum),
+      ivvb: pct(s.ivvb11_cum),
+      twr: pct(s.twr_cum),
+      twr_bruto: pct(s.twr_cum_bruto),
+    }
+  })
 }
 
 function fmtPct(v: number | null) {
@@ -130,17 +165,62 @@ export default function InvestmentsPage() {
   const [months, setMonths] = useState(12)
   const [sinceStart, setSinceStart] = useState(false)
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
+  const [importing, setImporting] = useState(false)
+  const [importMessage, setImportMessage] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const queryClient = useQueryClient()
 
   const { data: groupsList } = useQuery<AssetGroup[]>({
     queryKey: ['asset-groups'],
     queryFn: () => assetGroups.list(),
   })
 
+  // Imported snapshots (offline TWR pipeline). When present, override the
+  // live benchmark series — the snapshot CSV already contains both the
+  // portfolio TWR and the benchmark cumulatives at the same month-ends.
+  const { data: snapshots, isLoading: snapshotsLoading } = useQuery<PortfolioSnapshot[]>({
+    queryKey: ['portfolio-snapshots'],
+    queryFn: () => portfolioSnapshots.list(),
+    staleTime: 1000 * 60 * 5,
+  })
+
+  const hasSnapshots = (snapshots?.length ?? 0) > 0
+
   const { data: benchmarkData, isLoading: benchmarkLoading } = useQuery<BenchmarkData>({
     queryKey: ['inv-benchmarks-series', sinceStart ? 'start' : months],
     queryFn: () => investmentBenchmarks.series(months, sinceStart),
     staleTime: 1000 * 60 * 30,
+    enabled: !hasSnapshots,  // skip live fetch when snapshots are present
   })
+
+  async function handleImportFile(file: File) {
+    setImporting(true)
+    setImportMessage(null)
+    try {
+      const result = await portfolioSnapshots.importCsv(file)
+      const errs = result.errors?.length ?? 0
+      setImportMessage(
+        `Importados ${result.inserted_or_updated} snapshots${errs > 0 ? ` (${errs} avisos)` : ''}.`,
+      )
+      await queryClient.invalidateQueries({ queryKey: ['portfolio-snapshots'] })
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Falha ao importar.'
+      setImportMessage(`Erro: ${msg}`)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  function onUploadClick() {
+    fileInputRef.current?.click()
+  }
+
+  async function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    await handleImportFile(file)
+    e.target.value = ''
+  }
 
   const groupIdsParam = selectedGroups.size > 0 ? [...selectedGroups].join(',') : undefined
 
@@ -149,10 +229,16 @@ export default function InvestmentsPage() {
     queryFn: () => investmentBenchmarks.returns(groupIdsParam),
   })
 
-  const chartData = useMemo(() => {
+  const chartData = useMemo<MergedRow[]>(() => {
+    if (hasSnapshots && snapshots) {
+      return snapshotsToChartData(snapshots, months, sinceStart)
+    }
     if (!benchmarkData) return []
     return mergeSeries(benchmarkData.cdi, benchmarkData.ibov, benchmarkData.sp500)
-  }, [benchmarkData])
+  }, [hasSnapshots, snapshots, benchmarkData, months, sinceStart])
+
+  // Latest snapshot — used to show TWR badges from imported data.
+  const latestSnap = hasSnapshots && snapshots ? snapshots[snapshots.length - 1] : null
 
   const groups = groupsList ?? []
   const consolidated = returnsData?.consolidated
@@ -204,33 +290,93 @@ export default function InvestmentsPage() {
         section={t('nav.groupAnalysis')}
         title={t('investments.title')}
         action={
-          <div className="flex items-center rounded-lg border border-border bg-card overflow-hidden">
-            {([3, 6, 12, 24] as const).map(m => (
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={onFileChange}
+            />
+            <button
+              onClick={onUploadClick}
+              disabled={importing}
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50"
+              title="Importar twr_full.csv (saída do compute_twr_v2.py + merge_twr_benchmarks.py)"
+            >
+              {importing ? 'Importando…' : 'Importar TWR (CSV)'}
+            </button>
+            <div className="flex items-center rounded-lg border border-border bg-card overflow-hidden">
+              {([3, 6, 12, 24] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => { setMonths(m); setSinceStart(false) }}
+                  className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    !sinceStart && months === m
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                  }`}
+                >
+                  {m < 12 ? `${m}M` : `${m / 12}A`}
+                </button>
+              ))}
               <button
-                key={m}
-                onClick={() => { setMonths(m); setSinceStart(false) }}
+                onClick={() => setSinceStart(true)}
                 className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                  !sinceStart && months === m
+                  sinceStart
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                 }`}
               >
-                {m < 12 ? `${m}M` : `${m / 12}A`}
+                {t('investments.sinceStart')}
               </button>
-            ))}
-            <button
-              onClick={() => setSinceStart(true)}
-              className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                sinceStart
-                  ? 'bg-primary text-primary-foreground'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
-            >
-              {t('investments.sinceStart')}
-            </button>
+            </div>
           </div>
         }
       />
+      {importMessage && (
+        <div className="mb-4 px-4 py-2 rounded-lg bg-muted/50 border border-border text-xs text-foreground">
+          {importMessage}
+        </div>
+      )}
+
+      {latestSnap && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+          <div className="rounded-xl border border-border bg-card p-4">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">V_end TOTAL</p>
+            <p className="text-base font-bold text-foreground tabular-nums">
+              {mask(fmtCurrency(latestSnap.v_end_total ?? 0, 'BRL', locale))}
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">{latestSnap.month_end}</p>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-4">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">RV / RF / US</p>
+            <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
+              {mask(fmtCurrency(latestSnap.v_end_rv ?? 0, 'BRL', locale))}
+            </p>
+            <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
+              {mask(fmtCurrency(latestSnap.v_end_rf ?? 0, 'BRL', locale))}
+            </p>
+            <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
+              {mask(fmtCurrency(latestSnap.v_end_us ?? 0, 'BRL', locale))}
+            </p>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-4">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">TWR (líq.)</p>
+            <p className={`text-base font-bold tabular-nums ${(latestSnap.twr_cum ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+              {privacyMode ? MASK : fmtPct((latestSnap.twr_cum ?? 0) * 100)}
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">cumulativo</p>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-4">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">TWR (brt.)</p>
+            <p className={`text-base font-bold tabular-nums ${(latestSnap.twr_cum_bruto ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+              {privacyMode ? MASK : fmtPct((latestSnap.twr_cum_bruto ?? 0) * 100)}
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">comparável a benchmarks</p>
+          </div>
+        </div>
+      )}
 
       {/* Wallet filter chips */}
       {groups.length > 0 && (
@@ -268,10 +414,14 @@ export default function InvestmentsPage() {
           <p className="text-sm font-semibold text-foreground">{t('investments.benchmarks')}</p>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 ml-auto">
             {[
+              ...(hasSnapshots ? [
+                { label: 'TWR (líq.)', color: TWR_COLOR, dashed: false },
+                { label: 'TWR (brt.)', color: TWR_BRUTO_COLOR, dashed: true },
+              ] : []),
               { label: 'CDI', color: CDI_COLOR, dashed: false },
               { label: 'IBOV', color: IBOV_COLOR, dashed: false },
               { label: 'S&P 500', color: SP500_COLOR, dashed: false },
-              ...portfolioRefLines.map(rl => ({ label: rl.label, color: rl.color, dashed: true })),
+              ...(hasSnapshots ? [] : portfolioRefLines.map(rl => ({ label: rl.label, color: rl.color, dashed: true }))),
             ].map(item => (
               <div key={item.label} className="flex items-center gap-1.5">
                 <div
@@ -284,7 +434,7 @@ export default function InvestmentsPage() {
           </div>
         </div>
         <div className="px-1 pb-4" style={{ height: 360 }}>
-          {benchmarkLoading ? (
+          {(benchmarkLoading || snapshotsLoading) ? (
             <div className="px-4 h-full"><Skeleton className="h-full w-full" /></div>
           ) : chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -316,7 +466,13 @@ export default function InvestmentsPage() {
                 <Line type="monotone" dataKey="cdi" stroke={CDI_COLOR} strokeWidth={1.5} dot={false} name="CDI" connectNulls />
                 <Line type="monotone" dataKey="ibov" stroke={IBOV_COLOR} strokeWidth={1.5} dot={false} name="IBOV" connectNulls />
                 <Line type="monotone" dataKey="sp500" stroke={SP500_COLOR} strokeWidth={1.5} dot={false} name="S&P 500" connectNulls />
-                {portfolioRefLines.map(rl => (
+                {hasSnapshots && (
+                  <>
+                    <Line type="monotone" dataKey="twr" stroke={TWR_COLOR} strokeWidth={2.5} dot={false} name="TWR (líq.)" connectNulls />
+                    <Line type="monotone" dataKey="twr_bruto" stroke={TWR_BRUTO_COLOR} strokeWidth={2} strokeDasharray="6 3" dot={false} name="TWR (brt.)" connectNulls />
+                  </>
+                )}
+                {!hasSnapshots && portfolioRefLines.map(rl => (
                   <ReferenceLine
                     key={rl.label}
                     y={rl.value}

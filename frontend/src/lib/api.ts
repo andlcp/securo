@@ -653,6 +653,51 @@ export const investmentBenchmarks = {
   },
 }
 
+// Portfolio Snapshots — historical TWR + benchmarks (CSV import from offline pipeline)
+export interface PortfolioSnapshot {
+  month_end: string
+  month: string
+  v_end_rv: number | null
+  v_end_rf: number | null
+  v_end_us: number | null
+  v_end_total: number | null
+  cashflow_month: number | null
+  income_month: number | null
+  return_month: number | null
+  twr_cum: number | null
+  twr_cum_bruto: number | null
+  ibov_cum: number | null
+  ivvb11_cum: number | null
+  sp500_cum: number | null
+  cdi_cum: number | null
+}
+
+export const portfolioSnapshots = {
+  list: async (): Promise<PortfolioSnapshot[]> => {
+    const { data } = await api.get('/portfolio/snapshots')
+    return data
+  },
+  hasData: async (): Promise<{ has_data: boolean }> => {
+    const { data } = await api.get('/portfolio/snapshots/has-data')
+    return data
+  },
+  importCsv: async (file: File): Promise<{
+    inserted_or_updated: number
+    errors: string[]
+  }> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const { data } = await api.post('/portfolio/snapshots/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return data
+  },
+  deleteAll: async (): Promise<{ deleted: number }> => {
+    const { data } = await api.delete('/portfolio/snapshots')
+    return data
+  },
+}
+
 // Currencies
 export const currencies = {
   list: async (): Promise<{ code: string; symbol: string; name: string; flag: string }[]> => {
