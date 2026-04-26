@@ -4,3 +4,54 @@
 .playwright-mcp/
 .claude
 docs/plans/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+
+# ============================================================================
+# Personal financial data (NEVER commit — this is a public repo)
+# ----------------------------------------------------------------------------
+# All CSVs and XLSX in repo root contain user-specific positions, trades,
+# proventos, prices, etc., produced by tools/import-pipeline/. They live
+# next to the scripts because the scripts default to relative paths.
+# ============================================================================
+
+# All CSVs and Excel files in the repo root (where the offline pipeline runs)
+/*.csv
+/*.xlsx
+/*.xls
+
+# Be explicit about the typical pipeline outputs (defense in depth)
+trades.csv
+holdings_*.csv
+proventos.csv
+prices_cache*.csv
+target_position.csv
+ticker_aliases.csv
+splits.csv
+benchmarks_monthly.csv
+twr_*.csv
+ledger_*.csv
+positions.csv
+portfolio_history.csv
+xp_*.csv
+
+# Renda Fixa
+rf_*.csv
+tesouro_*.csv
+cdi_*.csv
+
+# Ações americanas (IBKR)
+us_*.csv
+ptax_*.csv
+
+# Consolidated workbook
+investimentos_consolidado.xlsx
+
+# Session notes (personal)
+CONTEXTO_SESSAO.md
