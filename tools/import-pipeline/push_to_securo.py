@@ -101,14 +101,26 @@ class SecuroClient:
 
 
 def login(base_url: str, email: str, password: str) -> str:
+    """Securo uses a custom /api/auth/login route (OAuth2 form-encoded).
+    Returns the JWT access token. Raises if 2FA is required (the script
+    doesn't handle the challenge — disable 2FA temporarily or pass a token
+    via --token in a future iteration).
+    """
     r = requests.post(
-        base_url.rstrip("/") + "/api/auth/jwt/login",
+        base_url.rstrip("/") + "/api/auth/login",
         data={"username": email, "password": password},
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=30,
     )
-    r.raise_for_status()
-    return r.json()["access_token"]
+    if r.status_code >= 400:
+        raise RuntimeError(
+            f"Login falhou (HTTP {r.status_code}): {r.text}")
+    body = r.json()
+    if body.get("requires_2fa"):
+        raise RuntimeError(
+            "Conta com 2FA ativado — desative temporariamente nas "
+            "configurações ou rode com --token TOKEN_JA_AUTENTICADO")
+    return body["access_token"]
 
 
 # --- Group resolution -----------------------------------------------------
