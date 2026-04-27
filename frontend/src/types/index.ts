@@ -325,6 +325,48 @@ export interface Asset {
   last_price: number | null
   last_price_at: string | null
   logo_url: string | null
+  asset_class: AssetClass | null
+}
+
+/** Explicit asset-class taxonomy used for grouping/filtering. */
+export type AssetClass =
+  | 'RENDA_VARIAVEL_BR'
+  | 'RENDA_FIXA'
+  | 'STOCKS_US'
+  | 'FIIS'
+  | 'CRIPTO'
+  | 'OUTRO'
+
+export const ASSET_CLASS_LABELS: Record<AssetClass, string> = {
+  RENDA_VARIAVEL_BR: 'Renda Variável Brasil',
+  RENDA_FIXA: 'Renda Fixa',
+  STOCKS_US: 'Stocks (Ações Americanas)',
+  FIIS: 'FIIs (Fundos Imobiliários)',
+  CRIPTO: 'Criptomoedas',
+  OUTRO: 'Outro',
+}
+
+export const ASSET_CLASS_OPTIONS: { value: AssetClass; label: string }[] = [
+  { value: 'RENDA_VARIAVEL_BR', label: ASSET_CLASS_LABELS.RENDA_VARIAVEL_BR },
+  { value: 'RENDA_FIXA', label: ASSET_CLASS_LABELS.RENDA_FIXA },
+  { value: 'STOCKS_US', label: ASSET_CLASS_LABELS.STOCKS_US },
+  { value: 'FIIS', label: ASSET_CLASS_LABELS.FIIS },
+  { value: 'CRIPTO', label: ASSET_CLASS_LABELS.CRIPTO },
+  { value: 'OUTRO', label: ASSET_CLASS_LABELS.OUTRO },
+]
+
+export interface AssetTransaction {
+  id: string
+  asset_id: string
+  date: string
+  type: string
+  qty: number | null
+  price: number | null
+  value: number | null
+  fees: number
+  notes: string | null
+  source: string
+  external_id: string | null
 }
 
 export interface MarketSymbolMatch {

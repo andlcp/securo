@@ -580,6 +580,22 @@ export const assets = {
   deleteValue: async (valueId: string): Promise<void> => {
     await api.delete(`/assets/values/${valueId}`)
   },
+  // Per-asset transactions (BUY/SELL/DIVIDEND/...)
+  transactions: async (id: string): Promise<import('@/types').AssetTransaction[]> => {
+    const { data } = await api.get(`/assets/${id}/transactions`)
+    return data
+  },
+  addTransaction: async (id: string, tx: {
+    date: string; type: string;
+    qty?: number | null; price?: number | null; value?: number | null;
+    fees?: number; notes?: string | null; external_id?: string | null;
+  }): Promise<import('@/types').AssetTransaction> => {
+    const { data } = await api.post(`/assets/${id}/transactions`, tx)
+    return data
+  },
+  deleteTransaction: async (txId: string): Promise<void> => {
+    await api.delete(`/assets/transactions/${txId}`)
+  },
   portfolioTrend: async (): Promise<{ assets: { id: string; name: string; type: string; group_id: string | null }[]; trend: Record<string, unknown>[]; total: number }> => {
     const { data } = await api.get('/assets/portfolio-trend')
     return data
@@ -649,6 +665,34 @@ export const investmentBenchmarks = {
     const { data } = await api.get('/investment-benchmarks/returns', {
       params: groupIds ? { group_ids: groupIds } : {},
     })
+    return data
+  },
+}
+
+// Portfolio Timeseries — live TWR computed from Assets + AssetValues + AssetTransactions
+export interface PortfolioPoint {
+  month_end: string
+  month: string
+  v_end: number
+  cashflow: number
+  income: number
+  return_month: number | null
+  twr_cum: number
+  by_class: Record<string, number>
+}
+
+export const portfolioTimeseries = {
+  series: async (params: {
+    months?: number; sinceStart?: boolean;
+    assetIds?: string[]; assetClasses?: string[]; groupIds?: string[];
+  } = {}): Promise<PortfolioPoint[]> => {
+    const q: Record<string, unknown> = {}
+    if (params.months) q.months = params.months
+    if (params.sinceStart) q.since_start = true
+    if (params.assetIds && params.assetIds.length) q.asset_ids = params.assetIds.join(',')
+    if (params.assetClasses && params.assetClasses.length) q.asset_classes = params.assetClasses.join(',')
+    if (params.groupIds && params.groupIds.length) q.group_ids = params.groupIds.join(',')
+    const { data } = await api.get('/portfolio/timeseries', { params: q })
     return data
   },
 }

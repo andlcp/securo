@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DatePickerInput } from '@/components/ui/date-picker-input'
 import type { Asset, AssetGroup, AssetValue, MarketSymbolMatch, MarketSymbolQuote } from '@/types'
+import { ASSET_CLASS_OPTIONS } from '@/types'
 import {
   Home,
   Car,
@@ -202,6 +203,7 @@ export default function AssetsPage() {
   const [formType, setFormType] = useState<string>('other')
   const [formCurrency, setFormCurrency] = useState(userCurrency)
   const [formMethod, setFormMethod] = useState<string>('manual')
+  const [formAssetClass, setFormAssetClass] = useState<string>('')  // empty = unset
   const [formPurchaseDate, setFormPurchaseDate] = useState<string>('')
   const [formPurchasePrice, setFormPurchasePrice] = useState('')
   const [formSellDate, setFormSellDate] = useState<string>('')
@@ -455,6 +457,7 @@ export default function AssetsPage() {
     setFormType('other')
     setFormCurrency(userCurrency)
     setFormMethod('manual')
+    setFormAssetClass('')
     setFormPurchaseDate('')
     setFormPurchasePrice('')
     setFormSellDate('')
@@ -474,6 +477,7 @@ export default function AssetsPage() {
     setFormType(asset.type)
     setFormCurrency(asset.currency)
     setFormMethod(asset.valuation_method)
+    setFormAssetClass(asset.asset_class ?? '')
     setFormPurchaseDate(asset.purchase_date ?? '')
     setFormPurchasePrice(asset.purchase_price?.toString() ?? '')
     setFormSellDate(asset.sell_date ?? '')
@@ -530,6 +534,10 @@ export default function AssetsPage() {
 
     if (!editingAsset && formCurrentValue) {
       payload.current_value = parseFloat(formCurrentValue)
+    }
+
+    if (formAssetClass) {
+      payload.asset_class = formAssetClass
     }
 
     return payload
@@ -947,6 +955,21 @@ export default function AssetsPage() {
                   ))}
                 </select>
               </div>
+            </div>
+
+            {/* Asset class — explicit taxonomy used by Investments dashboard */}
+            <div className="space-y-2">
+              <Label>Classe do ativo</Label>
+              <select
+                className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
+                value={formAssetClass}
+                onChange={e => setFormAssetClass(e.target.value)}
+              >
+                <option value="">— selecionar —</option>
+                {ASSET_CLASS_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Valuation Method — locked on edit */}

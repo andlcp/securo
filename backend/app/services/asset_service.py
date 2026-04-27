@@ -140,6 +140,7 @@ def _asset_to_read(asset: Asset, latest_value: Optional[AssetValue], value_count
         last_price=float(asset.last_price) if asset.last_price is not None else None,
         last_price_at=asset.last_price_at,
         logo_url=asset.logo_url,
+        asset_class=asset.asset_class,
     )
 
 
@@ -255,6 +256,8 @@ async def create_asset(
         last_price_at=datetime.now(timezone.utc) if quote else None,
         logo_url=quote.logo_url if quote else None,
         source="yfinance" if data.valuation_method == "market_price" else "manual",
+        asset_class=data.asset_class,
+        maturity_date=data.maturity_date,
     )
     session.add(asset)
     await session.flush()

@@ -49,6 +49,11 @@ class Asset(Base):
     maturity_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     external_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
+    # Explicit asset class taxonomy used by the investments dashboard for
+    # grouping/filtering. One of: RENDA_VARIAVEL_BR, RENDA_FIXA, STOCKS_US,
+    # FIIS, CRIPTO, OUTRO. Validated at the schema layer (not the DB).
+    asset_class: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
     # Optional parent group ("wallet"). NULL means ungrouped. Deleting a
     # group nullifies this field rather than removing the asset.
     group_id: Mapped[Optional[uuid.UUID]] = mapped_column(

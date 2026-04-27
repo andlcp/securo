@@ -28,6 +28,11 @@ class AssetCreate(BaseModel):
     # fetches the live quote on create and seeds the first AssetValue.
     ticker: Optional[str] = None
     ticker_exchange: Optional[str] = None
+    # Explicit class — one of RENDA_VARIAVEL_BR, RENDA_FIXA, STOCKS_US,
+    # FIIS, CRIPTO, OUTRO. If omitted the backend tries to infer from
+    # ticker/name; the frontend Add Asset form sends it explicitly.
+    asset_class: Optional[str] = None
+    maturity_date: Optional[date] = None
 
 
 class AssetUpdate(BaseModel):
@@ -52,6 +57,8 @@ class AssetUpdate(BaseModel):
     group_id: Optional[uuid.UUID] = None
     ticker: Optional[str] = None
     ticker_exchange: Optional[str] = None
+    asset_class: Optional[str] = None
+    maturity_date: Optional[date] = None
 
 
 class AssetRead(BaseModel):
@@ -87,6 +94,43 @@ class AssetRead(BaseModel):
     last_price: Optional[float] = None
     last_price_at: Optional[datetime] = None
     logo_url: Optional[str] = None
+    asset_class: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- AssetTransaction schemas ----------
+
+ASSET_TX_TYPES = {
+    "BUY", "SELL", "DIVIDEND", "JCP", "RENDIMENTO",
+    "DEPOSIT", "WITHDRAWAL", "INTEREST", "FEE", "RESGATE",
+}
+
+
+class AssetTransactionCreate(BaseModel):
+    date: date
+    type: str  # one of ASSET_TX_TYPES
+    qty: Optional[Decimal] = None
+    price: Optional[Decimal] = None
+    value: Optional[Decimal] = None
+    fees: Decimal = Decimal("0")
+    notes: Optional[str] = None
+    source: str = "manual"
+    external_id: Optional[str] = None
+
+
+class AssetTransactionRead(BaseModel):
+    id: uuid.UUID
+    asset_id: uuid.UUID
+    date: date
+    type: str
+    qty: Optional[float] = None
+    price: Optional[float] = None
+    value: Optional[float] = None
+    fees: float = 0.0
+    notes: Optional[str] = None
+    source: str = "manual"
+    external_id: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

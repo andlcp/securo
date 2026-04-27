@@ -15,13 +15,15 @@ from app.providers.market_price import (
 from app.schemas.asset import (
     AssetCreate,
     AssetRead,
+    AssetTransactionCreate,
+    AssetTransactionRead,
     AssetUpdate,
     AssetValueCreate,
     AssetValueRead,
     MarketSymbolMatch,
     MarketSymbolQuote,
 )
-from app.services import asset_service
+from app.services import asset_service, asset_transaction_service
 from app.services.fx_rate_service import convert
 
 logger = logging.getLogger(__name__)
@@ -274,3 +276,54 @@ async def delete_asset_value(
     deleted = await asset_service.delete_asset_value(session, value_id, user.id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Value not found")
+
+
+# --------- Asset transactions (BUY/SELL/DIVIDEND/...) ---------
+
+@router.get("/{asset_id}/transactions", response_model=list[AssetTransactionRead])
+async def list_asset_transactions(
+    asset_id: uuid.UUID,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    txs = await asset_transaction_service.list_for_asset(
+        session, user.id, asset_id)
+    if txs is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Asset not found")
+    return txs
+
+
+@router.post("/{asset_id}/transactions",
+             response_model=AssetTransactionRead,
+             status_code=status.HTTP_201_CREATED)
+async def add_asset_transaction(
+    asset_id: uuid.UUID,
+    data: AssetTransactionCreate,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    try:
+        tx = await asset_transaction_service.create(
+            session, user.id, asset_id, data)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=str(e))
+    if tx is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Asset not found")
+    return tx
+
+
+@router.delete("/transactions/{transaction_id}",
+               status_code=status.HTTP_204_NO_CONTENT)
+async def delete_asset_transaction(
+    transaction_id: uuid.UUID,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    ok = await asset_transaction_service.delete(
+        session, user.id, transaction_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Transaction not found")

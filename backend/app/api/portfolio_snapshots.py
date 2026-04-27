@@ -84,3 +84,18 @@ async def delete_snapshots(
 ):
     deleted = await portfolio_snapshot_service.delete_all(session, user.id)
     return {"deleted": deleted}
+
+
+# ----- Bulk transactions delete (used by --reset import flow) -----
+
+@router.delete("/transactions", status_code=status.HTTP_200_OK)
+async def delete_all_transactions(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Wipe every AssetTransaction owned by the user. Useful before a
+    full re-import from the offline pipeline."""
+    from app.services import asset_transaction_service
+    deleted = await asset_transaction_service.delete_all_for_user(
+        session, user.id)
+    return {"deleted": deleted}

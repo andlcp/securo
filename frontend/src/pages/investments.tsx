@@ -14,8 +14,9 @@ import {
   CartesianGrid,
   ResponsiveContainer,
 } from 'recharts'
-import { investmentBenchmarks, assetGroups, portfolioSnapshots } from '@/lib/api'
-import type { PortfolioSnapshot } from '@/lib/api'
+import { investmentBenchmarks, assetGroups, portfolioSnapshots, portfolioTimeseries } from '@/lib/api'
+import type { PortfolioSnapshot, PortfolioPoint } from '@/lib/api'
+import { ASSET_CLASS_OPTIONS, type AssetClass, ASSET_CLASS_LABELS } from '@/types'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/page-header'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
@@ -133,6 +134,74 @@ function snapshotsToChartData(
   })
 }
 
+/** Build chart data from the live timeseries endpoint. The TWR line comes
+ *  from `points`; benchmarks come from `bench`. Both sources are sliced
+ *  to the same window and rebased to 0 % at the start of the window so
+ *  every line shows the return INSIDE the window — not the cumulative
+ *  return since inception clipped to a tail. */
+function timeseriesToChartData(
+  points: PortfolioPoint[] | undefined,
+  bench: BenchmarkData | undefined,
+  windowMonths: number,
+  sinceStart: boolean,
+): MergedRow[] {
+  if (!points || points.length === 0) return []
+
+  // 1. Slice the portfolio series to the requested window.
+  const sliced = sinceStart ? points : points.slice(-windowMonths - 1)
+  if (sliced.length === 0) return []
+
+  // 2. Build a row per month_end with TWR (rebased to 0 % at first row).
+  const baseTwr = sliced[0].twr_cum
+  const baseFactor = 1 + baseTwr  // factor at start of window
+  const rows: MergedRow[] = sliced.map(p => {
+    const [yyyy, mm, dd] = p.month_end.split('-')
+    const date = `${dd}/${mm}/${yyyy}`
+    const factor = 1 + p.twr_cum
+    const rebased = factor / baseFactor - 1
+    return {
+      date,
+      _s: `${yyyy}${mm}${dd}`,
+      twr: rebased * 100,  // pct
+    }
+  })
+
+  // 3. Merge benchmark series by date label. Each benchmark is rebased to
+  //    its own start-of-window value, so all lines start at 0%.
+  if (bench) {
+    const rebaseSeries = (series: BenchmarkPoint[]) => {
+      // Keep only points whose date is between rows[0] and rows[last].
+      const startKey = rows[0]?._s
+      const endKey = rows[rows.length - 1]?._s
+      if (!startKey || !endKey) return new Map<string, number>()
+      const filtered = series.filter(p => {
+        const k = parseDateKey(p.date)
+        return k >= startKey && k <= endKey
+      })
+      if (filtered.length === 0) return new Map<string, number>()
+      // Each benchmark series stores cumulative % since its own start.
+      // To rebase to the chart window, divide each (1 + v/100) by the
+      // first value's (1 + v/100). Output back as %.
+      const baseFactor = 1 + filtered[0].value / 100
+      return new Map(
+        filtered.map(p => {
+          const f = 1 + p.value / 100
+          return [p.date, (f / baseFactor - 1) * 100]
+        })
+      )
+    }
+    const cdiMap = rebaseSeries(bench.cdi)
+    const ibovMap = rebaseSeries(bench.ibov)
+    const sp500Map = rebaseSeries(bench.sp500)
+    for (const r of rows) {
+      r.cdi = cdiMap.get(r.date)
+      r.ibov = ibovMap.get(r.date)
+      r.sp500 = sp500Map.get(r.date)
+    }
+  }
+  return rows
+}
+
 function fmtPct(v: number | null) {
   if (v == null) return '—'
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
@@ -165,6 +234,7 @@ export default function InvestmentsPage() {
   const [months, setMonths] = useState(12)
   const [sinceStart, setSinceStart] = useState(false)
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
+  const [selectedClasses, setSelectedClasses] = useState<Set<AssetClass>>(new Set())
   const [importing, setImporting] = useState(false)
   const [importMessage, setImportMessage] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -190,7 +260,28 @@ export default function InvestmentsPage() {
     queryKey: ['inv-benchmarks-series', sinceStart ? 'start' : months],
     queryFn: () => investmentBenchmarks.series(months, sinceStart),
     staleTime: 1000 * 60 * 30,
-    enabled: !hasSnapshots,  // skip live fetch when snapshots are present
+  })
+
+  // Live portfolio time series — Modified Dietz computed from
+  // Asset/AssetValue/AssetTransaction. This is the source of truth for the
+  // chart. Adding/editing assets in the UI immediately changes the chart.
+  const classesParam = useMemo(
+    () => Array.from(selectedClasses),
+    [selectedClasses]
+  )
+  const groupsParam = useMemo(
+    () => Array.from(selectedGroups),
+    [selectedGroups]
+  )
+  const { data: tsData, isLoading: tsLoading } = useQuery<PortfolioPoint[]>({
+    queryKey: ['portfolio-timeseries', months, sinceStart, classesParam, groupsParam],
+    queryFn: () => portfolioTimeseries.series({
+      months,
+      sinceStart,
+      assetClasses: classesParam,
+      groupIds: groupsParam,
+    }),
+    staleTime: 1000 * 60,
   })
 
   async function handleImportFile(file: File) {
@@ -230,15 +321,22 @@ export default function InvestmentsPage() {
   })
 
   const chartData = useMemo<MergedRow[]>(() => {
+    // Prefer the live timeseries (single source of truth: Asset+AssetValue+AssetTransaction).
+    // Fall back to the imported portfolio_snapshots only if the user has no
+    // assets yet (shouldn't happen after migration, but defensive).
+    if (tsData && tsData.length > 0) {
+      return timeseriesToChartData(tsData, benchmarkData, months, sinceStart)
+    }
     if (hasSnapshots && snapshots) {
       return snapshotsToChartData(snapshots, months, sinceStart)
     }
     if (!benchmarkData) return []
     return mergeSeries(benchmarkData.cdi, benchmarkData.ibov, benchmarkData.sp500)
-  }, [hasSnapshots, snapshots, benchmarkData, months, sinceStart])
+  }, [tsData, benchmarkData, hasSnapshots, snapshots, months, sinceStart])
 
   // Latest snapshot — used to show TWR badges from imported data.
   const latestSnap = hasSnapshots && snapshots ? snapshots[snapshots.length - 1] : null
+  const latestTs = tsData && tsData.length > 0 ? tsData[tsData.length - 1] : null
 
   const groups = groupsList ?? []
   const consolidated = returnsData?.consolidated
@@ -340,43 +438,110 @@ export default function InvestmentsPage() {
         </div>
       )}
 
-      {latestSnap && (
+      {(latestTs || latestSnap) && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
           <div className="rounded-xl border border-border bg-card p-4">
             <p className="text-[11px] text-muted-foreground uppercase tracking-wider">V_end TOTAL</p>
             <p className="text-base font-bold text-foreground tabular-nums">
-              {mask(fmtCurrency(latestSnap.v_end_total ?? 0, 'BRL', locale))}
+              {mask(fmtCurrency(
+                latestTs?.v_end ?? latestSnap?.v_end_total ?? 0,
+                userCurrency, locale))}
             </p>
-            <p className="text-[10px] text-muted-foreground mt-0.5">{latestSnap.month_end}</p>
-          </div>
-          <div className="rounded-xl border border-border bg-card p-4">
-            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">RV / RF / US</p>
-            <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
-              {mask(fmtCurrency(latestSnap.v_end_rv ?? 0, 'BRL', locale))}
-            </p>
-            <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
-              {mask(fmtCurrency(latestSnap.v_end_rf ?? 0, 'BRL', locale))}
-            </p>
-            <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
-              {mask(fmtCurrency(latestSnap.v_end_us ?? 0, 'BRL', locale))}
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              {latestTs?.month_end ?? latestSnap?.month_end}
             </p>
           </div>
           <div className="rounded-xl border border-border bg-card p-4">
-            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">TWR (líq.)</p>
-            <p className={`text-base font-bold tabular-nums ${(latestSnap.twr_cum ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-              {privacyMode ? MASK : fmtPct((latestSnap.twr_cum ?? 0) * 100)}
-            </p>
-            <p className="text-[10px] text-muted-foreground mt-0.5">cumulativo</p>
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">Por classe</p>
+            {latestTs ? (
+              Object.entries(latestTs.by_class)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 4)
+                .map(([cls, v]) => (
+                  <p key={cls} className="text-xs font-semibold text-foreground tabular-nums leading-snug flex justify-between gap-2">
+                    <span className="text-muted-foreground truncate">
+                      {ASSET_CLASS_LABELS[cls as AssetClass] ?? cls}
+                    </span>
+                    <span>{mask(fmtCurrency(v, userCurrency, locale))}</span>
+                  </p>
+                ))
+            ) : (
+              <>
+                <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
+                  {mask(fmtCurrency(latestSnap?.v_end_rv ?? 0, 'BRL', locale))}
+                </p>
+                <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
+                  {mask(fmtCurrency(latestSnap?.v_end_rf ?? 0, 'BRL', locale))}
+                </p>
+                <p className="text-xs font-semibold text-foreground tabular-nums leading-snug">
+                  {mask(fmtCurrency(latestSnap?.v_end_us ?? 0, 'BRL', locale))}
+                </p>
+              </>
+            )}
           </div>
           <div className="rounded-xl border border-border bg-card p-4">
-            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">TWR (brt.)</p>
-            <p className={`text-base font-bold tabular-nums ${(latestSnap.twr_cum_bruto ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-              {privacyMode ? MASK : fmtPct((latestSnap.twr_cum_bruto ?? 0) * 100)}
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">
+              TWR (cumulativo)
             </p>
-            <p className="text-[10px] text-muted-foreground mt-0.5">comparável a benchmarks</p>
+            <p className={`text-base font-bold tabular-nums ${
+              (latestTs?.twr_cum ?? latestSnap?.twr_cum ?? 0) >= 0
+                ? 'text-emerald-600' : 'text-rose-500'
+            }`}>
+              {privacyMode ? MASK : fmtPct((latestTs?.twr_cum ?? latestSnap?.twr_cum ?? 0) * 100)}
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              {sinceStart ? 'desde o início' : `últimos ${months}m`}
+            </p>
+          </div>
+          <div className="rounded-xl border border-border bg-card p-4">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider">No período</p>
+            {chartData.length > 0 ? (
+              <p className={`text-base font-bold tabular-nums ${
+                ((chartData[chartData.length - 1] as MergedRow).twr ?? 0) >= 0
+                  ? 'text-emerald-600' : 'text-rose-500'
+              }`}>
+                {privacyMode ? MASK : fmtPct((chartData[chartData.length - 1] as MergedRow).twr ?? 0)}
+              </p>
+            ) : (
+              <p className="text-base font-bold text-muted-foreground">—</p>
+            )}
+            <p className="text-[10px] text-muted-foreground mt-0.5">retorno na janela</p>
           </div>
         </div>
       )}
+
+      {/* Filter chips by asset class */}
+      <div className="flex flex-wrap items-center gap-2 mb-5">
+        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Classe:</span>
+        <button
+          onClick={() => setSelectedClasses(new Set())}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+            selectedClasses.size === 0
+              ? 'bg-primary text-primary-foreground border-primary'
+              : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted/50'
+          }`}
+        >
+          Todas
+        </button>
+        {ASSET_CLASS_OPTIONS.map(opt => (
+          <button
+            key={opt.value}
+            onClick={() => setSelectedClasses(prev => {
+              const next = new Set(prev)
+              if (next.has(opt.value)) next.delete(opt.value)
+              else next.add(opt.value)
+              return next
+            })}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+              selectedClasses.has(opt.value)
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
 
       {/* Wallet filter chips */}
       {groups.length > 0 && (
@@ -414,14 +579,14 @@ export default function InvestmentsPage() {
           <p className="text-sm font-semibold text-foreground">{t('investments.benchmarks')}</p>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 ml-auto">
             {[
-              ...(hasSnapshots ? [
-                { label: 'TWR (líq.)', color: TWR_COLOR, dashed: false },
-                { label: 'TWR (brt.)', color: TWR_BRUTO_COLOR, dashed: true },
+              ...((tsData && tsData.length > 0) || hasSnapshots ? [
+                { label: 'TWR Carteira', color: TWR_COLOR, dashed: false },
               ] : []),
               { label: 'CDI', color: CDI_COLOR, dashed: false },
               { label: 'IBOV', color: IBOV_COLOR, dashed: false },
               { label: 'S&P 500', color: SP500_COLOR, dashed: false },
-              ...(hasSnapshots ? [] : portfolioRefLines.map(rl => ({ label: rl.label, color: rl.color, dashed: true }))),
+              ...((tsData && tsData.length > 0) || hasSnapshots ? []
+                : portfolioRefLines.map(rl => ({ label: rl.label, color: rl.color, dashed: true }))),
             ].map(item => (
               <div key={item.label} className="flex items-center gap-1.5">
                 <div
@@ -434,7 +599,7 @@ export default function InvestmentsPage() {
           </div>
         </div>
         <div className="px-1 pb-4" style={{ height: 360 }}>
-          {(benchmarkLoading || snapshotsLoading) ? (
+          {(benchmarkLoading || snapshotsLoading || tsLoading) ? (
             <div className="px-4 h-full"><Skeleton className="h-full w-full" /></div>
           ) : chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -466,13 +631,10 @@ export default function InvestmentsPage() {
                 <Line type="monotone" dataKey="cdi" stroke={CDI_COLOR} strokeWidth={1.5} dot={false} name="CDI" connectNulls />
                 <Line type="monotone" dataKey="ibov" stroke={IBOV_COLOR} strokeWidth={1.5} dot={false} name="IBOV" connectNulls />
                 <Line type="monotone" dataKey="sp500" stroke={SP500_COLOR} strokeWidth={1.5} dot={false} name="S&P 500" connectNulls />
-                {hasSnapshots && (
-                  <>
-                    <Line type="monotone" dataKey="twr" stroke={TWR_COLOR} strokeWidth={2.5} dot={false} name="TWR (líq.)" connectNulls />
-                    <Line type="monotone" dataKey="twr_bruto" stroke={TWR_BRUTO_COLOR} strokeWidth={2} strokeDasharray="6 3" dot={false} name="TWR (brt.)" connectNulls />
-                  </>
+                {((tsData && tsData.length > 0) || hasSnapshots) && (
+                  <Line type="monotone" dataKey="twr" stroke={TWR_COLOR} strokeWidth={2.5} dot={false} name="TWR Carteira" connectNulls />
                 )}
-                {!hasSnapshots && portfolioRefLines.map(rl => (
+                {!(tsData && tsData.length > 0) && !hasSnapshots && portfolioRefLines.map(rl => (
                   <ReferenceLine
                     key={rl.label}
                     y={rl.value}

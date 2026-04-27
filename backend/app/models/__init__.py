@@ -17,6 +17,7 @@ from app.models.payee import Payee, PayeeMapping
 from app.models.app_settings import AppSetting
 from app.models.goal import Goal
 from app.models.portfolio_snapshot import PortfolioSnapshot
+from app.models.asset_transaction import AssetTransaction
 
 __all__ = [
     "User",
@@ -39,4 +40,5 @@ __all__ = [
     "AppSetting",
     "Goal",
     "PortfolioSnapshot",
+    "AssetTransaction",
 ]
