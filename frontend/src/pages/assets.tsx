@@ -1872,10 +1872,9 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
   const [txValue, setTxValue] = useState('')
   const [txNotes, setTxNotes] = useState('')
 
-  const { data: values, isLoading: valuesLoading } = useQuery({
-    queryKey: ['asset-values', assetId],
-    queryFn: () => assets.values(assetId),
-  })
+  // The asset-values list query was removed when we hid the
+  // "Histórico de Valores" section. The trend query below still feeds
+  // the legacy chart for manual assets.
 
   const { data: trend } = useQuery({
     queryKey: ['asset-trend', assetId],
@@ -1906,21 +1905,7 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
     return result
   }, [trend, purchasePrice, purchaseDate])
 
-  // Build value history with purchase as the initial entry
-  const valuesWithPurchase = useMemo(() => {
-    if (!values) return []
-    if (!purchasePrice || !purchaseDate) return values
-    const hasPurchaseValue = values.some(v => v.date === purchaseDate && v.amount === purchasePrice)
-    if (hasPurchaseValue) return values
-    const purchaseEntry: AssetValue = {
-      id: 'purchase',
-      asset_id: assetId,
-      amount: purchasePrice,
-      date: purchaseDate,
-      source: 'purchase',
-    }
-    return [...values, purchaseEntry]
-  }, [values, purchasePrice, purchaseDate, assetId])
+  // valuesWithPurchase removed when we hid the Histórico de Valores section.
 
   const addValueMutation = useMutation({
     mutationFn: ({ assetId: id, ...data }: { assetId: string; amount: number; date: string }) =>
@@ -1936,17 +1921,7 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
     onError: () => toast.error(t('common.error')),
   })
 
-  const deleteValueMutation = useMutation({
-    mutationFn: (valueId: string) => assets.deleteValue(valueId),
-    onSuccess: () => {
-      queryClient.refetchQueries({ queryKey: ['assets'] })
-      queryClient.refetchQueries({ queryKey: ['asset-values', assetId] })
-      queryClient.refetchQueries({ queryKey: ['asset-trend', assetId] })
-      queryClient.refetchQueries({ queryKey: ['dashboard'] })
-      toast.success(t('assets.valueDeleted'))
-    },
-    onError: () => toast.error(t('common.error')),
-  })
+  // deleteValueMutation removed with the Histórico de Valores section.
 
   const { data: transactions, isLoading: transactionsLoading } = useQuery({
     queryKey: ['asset-transactions', assetId],
