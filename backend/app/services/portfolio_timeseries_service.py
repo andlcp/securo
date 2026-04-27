@@ -319,6 +319,11 @@ async def get_timeseries(session: AsyncSession, user: User,
     for (y, m) in _iter_months(date(start_y, start_m, 1),
                                 date(end_y, end_m, 1)):
         me = _month_end(y, m)
+        # Cap the chart label at today so we don't render a future
+        # month-end as if it had already happened. The cashflow / value
+        # math above uses `me` (and value_at_for_asset already caps at
+        # today), so only the display label needs trimming here.
+        label_date = min(me, today_d)
         ym = me.strftime("%Y-%m")
         # Sum V_end across assets, converting each to user_ccy
         v_end_total = 0.0
@@ -353,7 +358,7 @@ async def get_timeseries(session: AsyncSession, user: User,
             cum *= (1.0 + max(min(r_m, 5.0), -0.95))
 
         out.append({
-            "month_end": me.isoformat(),
+            "month_end": label_date.isoformat(),
             "month": me.strftime("%Y-%m"),
             "v_end": round(v_end_total, 2),
             "cashflow": round(cf, 2),

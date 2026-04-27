@@ -115,7 +115,13 @@ function snapshotsToChartData(
   sinceStart: boolean,
 ): MergedRow[] {
   if (!snaps || snaps.length === 0) return []
-  const sliced = sinceStart ? snaps : snaps.slice(-months - 1)
+  // Drop points whose month_end is still in the future (the offline
+  // pipeline emits one row per calendar month, so the current month's
+  // entry is dated to month-end which may be 1-3 days ahead of today).
+  const todayISO = new Date().toISOString().slice(0, 10)
+  const past = snaps.filter(s => s.month_end <= todayISO)
+  if (past.length === 0) return []
+  const sliced = sinceStart ? past : past.slice(-months - 1)
   if (sliced.length === 0) return []
   const base = sliced[0]
   const baseFactor = (cum: number | null | undefined): number =>
