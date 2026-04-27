@@ -16,7 +16,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DatePickerInput } from '@/components/ui/date-picker-input'
-import type { Asset, AssetGroup, AssetValue, MarketSymbolMatch, MarketSymbolQuote } from '@/types'
+import type { Asset, AssetGroup, MarketSymbolMatch, MarketSymbolQuote } from '@/types'
 import { ASSET_CLASS_OPTIONS } from '@/types'
 import {
   Home,
