@@ -212,7 +212,23 @@ def build_b3_rv_assets(holdings_final: list[dict],
     return out
 
 
-def build_rf_assets(rf_final: list[dict], group_id: str) -> list[dict]:
+def build_rf_assets(rf_final: list[dict], rf_trades: list[dict],
+                    group_id: str) -> list[dict]:
+    """For each open RF position, look up its earliest BUY in rf_trades to
+    populate purchase_date + purchase_price (PU). Without those, the
+    CDB cron can't compound CDI from the buy date.
+    """
+    # Index trades by titulo: list of BUYs sorted by date asc.
+    by_titulo: dict[str, list[dict]] = defaultdict(list)
+    for t in rf_trades:
+        if (t.get("operacao") or "").strip() != "BUY":
+            continue
+        titulo = (t.get("titulo") or "").strip()
+        if titulo:
+            by_titulo[titulo].append(t)
+    for v in by_titulo.values():
+        v.sort(key=lambda x: x.get("data", ""))
+
     out = []
     for r in rf_final:
         titulo = (r.get("titulo") or "").strip()
@@ -221,6 +237,9 @@ def build_rf_assets(rf_final: list[dict], group_id: str) -> list[dict]:
         if not titulo or abs(qty) < 1e-6:
             continue
         v_atual = _f(r.get("valor_mtm_liquido"))
+        # Earliest BUY for this titulo — anchors the CDI compound for CDBs.
+        buys = by_titulo.get(titulo, [])
+        first_buy = buys[0] if buys else {}
         out.append({
             "_history_key": ("rf", titulo),
             "payload": {
@@ -230,6 +249,9 @@ def build_rf_assets(rf_final: list[dict], group_id: str) -> list[dict]:
                 "units": qty,
                 "valuation_method": "manual",
                 "current_value": round(v_atual, 2),
+                "purchase_date": first_buy.get("data") or None,
+                "purchase_price": (round(_f(first_buy.get("pu")), 2)
+                                   if first_buy.get("pu") else None),
                 "maturity_date": r.get("vencimento") or None,
                 "group_id": group_id,
                 "source": "csv_import",
@@ -602,6 +624,7 @@ def main() -> int:
     holdings_final = read_csv(base / "holdings_final.csv")
     rf_final = read_csv(base / "rf_final.csv")
     us_final = read_csv(base / "us_final.csv")
+    rf_trades = read_csv(base / "rf_trades.csv")
     prices = load_prices_cache(base / "prices_cache.csv")
     holdings_monthly = read_csv(base / "holdings_monthly.csv") if not args.no_history else []
     rf_monthly = read_csv(base / "rf_holdings_monthly.csv") if not args.no_history else []
@@ -620,7 +643,7 @@ def main() -> int:
     if args.dry_run:
         rv_assets = build_b3_rv_assets(holdings_final, prices,
                                        "<rv>", "<fiis>")
-        rf_assets = build_rf_assets(rf_final, "<rf>")
+        rf_assets = build_rf_assets(rf_final, rf_trades, "<rf>")
         us_assets = build_us_assets(us_final, "<us>")
         n_arch_b3 = n_arch_rf = 0
         if args.include_archived:
@@ -696,7 +719,7 @@ def main() -> int:
     # Build asset payloads
     rv_assets = build_b3_rv_assets(holdings_final, prices,
                                     group_ids["rv_br"], group_ids["fiis"])
-    rf_assets = build_rf_assets(rf_final, group_ids["rf"])
+    rf_assets = build_rf_assets(rf_final, rf_trades, group_ids["rf"])
     us_assets = build_us_assets(us_final, group_ids["us"])
 
     if args.include_archived:
