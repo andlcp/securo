@@ -333,6 +333,104 @@ def build_history_us(us_monthly: list[dict]
     return out
 
 
+def build_archived_b3_assets(holdings_monthly: list[dict],
+                             active_tickers: set[str],
+                             prices: dict[str, dict[str, float]],
+                             group_id_rv: str,
+                             group_id_fii: str) -> list[dict]:
+    """For B3 RV tickers that appear in holdings_monthly but NOT in the
+    current snapshot (qty=0 today), create archived Asset rows. Their
+    historical AssetValue chain keeps the Net Worth chart accurate."""
+    seen_tickers: dict[str, dict] = {}
+    for r in holdings_monthly:
+        tk = (r.get("ticker") or "").strip()
+        if tk in ("", "__EMPTY__"):
+            continue
+        if tk in active_tickers:
+            continue
+        qty = _f(r.get("qty"))
+        date_iso = r.get("date") or ""
+        d = seen_tickers.setdefault(tk, {
+            "first_with_qty": None, "last_with_qty": None,
+            "max_qty": 0.0, "max_qty_date": None,
+        })
+        if qty > 1e-6:
+            if d["first_with_qty"] is None or date_iso < d["first_with_qty"]:
+                d["first_with_qty"] = date_iso
+            if d["last_with_qty"] is None or date_iso > d["last_with_qty"]:
+                d["last_with_qty"] = date_iso
+            if qty > d["max_qty"]:
+                d["max_qty"] = qty
+                d["max_qty_date"] = date_iso
+
+    out = []
+    for tk, d in seen_tickers.items():
+        if not d["first_with_qty"]:
+            continue
+        cls = _classify_b3_class(tk)
+        gid = group_id_fii if cls == "FIIS" else group_id_rv
+        out.append({
+            "_history_key": ("rv", tk),
+            "payload": {
+                "name": tk,
+                "type": "investment",
+                "currency": "BRL",
+                "units": 0,
+                "valuation_method": "manual",  # manual to skip yfinance refresh
+                "current_value": 0,
+                "purchase_date": d["first_with_qty"],
+                "sell_date": d["last_with_qty"],
+                "is_archived": True,
+                "group_id": gid,
+                "source": "csv_import",
+                "asset_class": cls,
+            }
+        })
+    return out
+
+
+def build_archived_rf_assets(rf_monthly: list[dict],
+                             active_titulos: set[str],
+                             group_id: str) -> list[dict]:
+    seen: dict[str, dict] = {}
+    for r in rf_monthly:
+        titulo = (r.get("titulo") or "").strip()
+        if not titulo or titulo in active_titulos:
+            continue
+        v = _f(r.get("valor_mtm_liquido"))
+        d = seen.setdefault(titulo, {"first": None, "last": None,
+                                     "tipo": r.get("tipo", "")})
+        if v > 0:
+            iso = r.get("month_end") or ""
+            if d["first"] is None or iso < d["first"]:
+                d["first"] = iso
+            if d["last"] is None or iso > d["last"]:
+                d["last"] = iso
+
+    out = []
+    for titulo, d in seen.items():
+        if not d["first"]:
+            continue
+        out.append({
+            "_history_key": ("rf", titulo),
+            "payload": {
+                "name": titulo[:255],
+                "type": "investment",
+                "currency": "BRL",
+                "units": 0,
+                "valuation_method": "manual",
+                "current_value": 0,
+                "purchase_date": d["first"],
+                "sell_date": d["last"],
+                "is_archived": True,
+                "group_id": group_id,
+                "source": "csv_import",
+                "asset_class": "RENDA_FIXA",
+            }
+        })
+    return out
+
+
 def load_prices_cache(path: Path) -> dict[str, dict[str, float]]:
     """{ticker -> {month_end_iso: close_brl}} (B3 .SA prices)."""
     out: dict[str, dict[str, float]] = defaultdict(dict)
@@ -490,6 +588,11 @@ def main() -> int:
                     help="Pula a criação dos AssetValue mensais (só posição atual)")
     ap.add_argument("--no-transactions", action="store_true",
                     help="Pula a criação das AssetTransactions (compras/vendas/dividendos)")
+    ap.add_argument("--include-archived", action="store_true",
+                    help="Cria também Assets arquivados para tickers que apareceram "
+                         "no histórico mas estão zerados hoje (RIVA3, ENBR3, etc). "
+                         "Necessário para o gráfico de Patrimônio Líquido refletir "
+                         "o valor da carteira em meses passados sem omissões.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -519,9 +622,23 @@ def main() -> int:
                                        "<rv>", "<fiis>")
         rf_assets = build_rf_assets(rf_final, "<rf>")
         us_assets = build_us_assets(us_final, "<us>")
+        n_arch_b3 = n_arch_rf = 0
+        if args.include_archived:
+            active_tk = {a["payload"]["name"] for a in rv_assets}
+            active_tit = {a["payload"]["name"] for a in rf_assets}
+            arch_b3 = build_archived_b3_assets(
+                holdings_monthly, active_tk, prices, "<rv>", "<fiis>")
+            arch_rf = build_archived_rf_assets(
+                rf_monthly, active_tit, "<rf>")
+            n_arch_b3 = len(arch_b3)
+            n_arch_rf = len(arch_rf)
+            rv_assets += arch_b3
+            rf_assets += arch_rf
         n_fii = sum(1 for a in rv_assets if a["payload"]["asset_class"] == "FIIS")
         n_rv = len(rv_assets) - n_fii
         print(f"\nAtivos a criar: RV={n_rv}  FIIs={n_fii}  RF={len(rf_assets)}  US={len(us_assets)}")
+        if args.include_archived:
+            print(f"  (incluídos {n_arch_b3} B3 + {n_arch_rf} RF arquivados)")
         print("\n--- DRY RUN — primeiros exemplos por bucket ---")
         for label, lst in [("RV", rv_assets), ("RF", rf_assets), ("US", us_assets)]:
             print(f"\n[{label}]")
@@ -581,6 +698,20 @@ def main() -> int:
                                     group_ids["rv_br"], group_ids["fiis"])
     rf_assets = build_rf_assets(rf_final, group_ids["rf"])
     us_assets = build_us_assets(us_final, group_ids["us"])
+
+    if args.include_archived:
+        active_tk = {(a["payload"]["name"]) for a in rv_assets}
+        active_titulo = {(a["payload"]["name"]) for a in rf_assets}
+        arch_b3 = build_archived_b3_assets(
+            holdings_monthly, active_tk, prices,
+            group_ids["rv_br"], group_ids["fiis"])
+        arch_rf = build_archived_rf_assets(
+            rf_monthly, active_titulo, group_ids["rf"])
+        rv_assets += arch_b3
+        rf_assets += arch_rf
+        print(f"  + {len(arch_b3)} ativos B3 arquivados (já zerados)")
+        print(f"  + {len(arch_rf)} títulos RF arquivados (vencidos / vendidos)")
+
     n_fii = sum(1 for a in rv_assets if a["payload"]["asset_class"] == "FIIS")
     n_rv = len(rv_assets) - n_fii
     print(f"\nAtivos a criar: RV={n_rv}  FIIs={n_fii}  RF={len(rf_assets)}  US={len(us_assets)}")

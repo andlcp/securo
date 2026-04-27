@@ -1646,6 +1646,14 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
   const [valueAmount, setValueAmount] = useState('')
   const [valueDate, setValueDate] = useState(new Date().toISOString().slice(0, 10))
 
+  // Transaction form state (BUY/SELL/DIVIDEND/JCP/RENDIMENTO/RESGATE)
+  const [txDate, setTxDate] = useState(new Date().toISOString().slice(0, 10))
+  const [txType, setTxType] = useState<string>('BUY')
+  const [txQty, setTxQty] = useState('')
+  const [txPrice, setTxPrice] = useState('')
+  const [txValue, setTxValue] = useState('')
+  const [txNotes, setTxNotes] = useState('')
+
   const { data: values, isLoading: valuesLoading } = useQuery({
     queryKey: ['asset-values', assetId],
     queryFn: () => assets.values(assetId),
@@ -1712,6 +1720,64 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
     },
     onError: () => toast.error(t('common.error')),
   })
+
+  const { data: transactions, isLoading: transactionsLoading } = useQuery({
+    queryKey: ['asset-transactions', assetId],
+    queryFn: () => assets.transactions(assetId),
+  })
+
+  const invalidateAfterTx = () => {
+    queryClient.refetchQueries({ queryKey: ['asset-transactions', assetId] })
+    queryClient.refetchQueries({ queryKey: ['portfolio-timeseries'] })
+    queryClient.refetchQueries({ queryKey: ['assets'] })
+  }
+
+  const addTxMutation = useMutation({
+    mutationFn: (tx: {
+      date: string; type: string;
+      qty?: number | null; price?: number | null; value?: number | null;
+      notes?: string | null;
+    }) => assets.addTransaction(assetId, tx),
+    onSuccess: () => {
+      setTxQty(''); setTxPrice(''); setTxValue(''); setTxNotes('')
+      invalidateAfterTx()
+      toast.success('Transação registrada')
+    },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg || 'Falha ao registrar transação')
+    },
+  })
+
+  const deleteTxMutation = useMutation({
+    mutationFn: (txId: string) => assets.deleteTransaction(txId),
+    onSuccess: () => { invalidateAfterTx(); toast.success('Transação removida') },
+    onError: () => toast.error(t('common.error')),
+  })
+
+  function submitTransaction() {
+    const qty = txQty ? parseFloat(txQty) : null
+    const price = txPrice ? parseFloat(txPrice) : null
+    let value = txValue ? parseFloat(txValue) : null
+    // For BUY/SELL, derive value from qty * price if not provided
+    if (!value && qty && price) value = qty * price
+    if (!value && (txType === 'DIVIDEND' || txType === 'JCP' || txType === 'RENDIMENTO' || txType === 'RESGATE')) {
+      toast.error('Informe o valor recebido')
+      return
+    }
+    if (!value && (txType === 'BUY' || txType === 'SELL')) {
+      toast.error('Informe quantidade e preço (ou valor total)')
+      return
+    }
+    addTxMutation.mutate({
+      date: txDate,
+      type: txType,
+      qty,
+      price,
+      value,
+      notes: txNotes || null,
+    })
+  }
 
   // Determine chart color based on trend direction
   const trendIsPositive = trendWithPurchase.length >= 2
@@ -1819,6 +1885,151 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
           {t('assets.addValue')}
         </Button>
       </div>}
+
+      {/* Transactions — BUY / SELL / DIVIDEND / JCP / RENDIMENTO / RESGATE */}
+      <div>
+        <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+          Transações
+        </p>
+        <p className="text-[11px] text-muted-foreground mb-3">
+          Registre compras, vendas e proventos para que a aba Investimentos
+          calcule o TWR automaticamente. As transações alimentam o Modified
+          Dietz mensal — o gráfico atualiza após cada lançamento.
+        </p>
+
+        {/* Add transaction form */}
+        <div className="grid grid-cols-12 gap-2 items-end mb-3">
+          <div className="col-span-3">
+            <Label className="text-[11px] text-muted-foreground">Data</Label>
+            <DatePickerInput value={txDate} onChange={setTxDate} />
+          </div>
+          <div className="col-span-3">
+            <Label className="text-[11px] text-muted-foreground">Tipo</Label>
+            <select
+              className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-2 py-2 rounded-lg text-foreground text-sm w-full h-9"
+              value={txType}
+              onChange={e => setTxType(e.target.value)}
+            >
+              <option value="BUY">Compra</option>
+              <option value="SELL">Venda</option>
+              <option value="DIVIDEND">Dividendo</option>
+              <option value="JCP">JCP</option>
+              <option value="RENDIMENTO">Rendimento (FII)</option>
+              <option value="RESGATE">Resgate</option>
+            </select>
+          </div>
+          {(txType === 'BUY' || txType === 'SELL') && (
+            <>
+              <div className="col-span-2">
+                <Label className="text-[11px] text-muted-foreground">Qtd.</Label>
+                <Input
+                  type="number" step="any"
+                  value={txQty} onChange={e => setTxQty(e.target.value)}
+                  placeholder="0" className="h-9 text-sm"
+                />
+              </div>
+              <div className="col-span-2">
+                <Label className="text-[11px] text-muted-foreground">Preço unit.</Label>
+                <Input
+                  type="number" step="any"
+                  value={txPrice} onChange={e => setTxPrice(e.target.value)}
+                  placeholder="0.00" className="h-9 text-sm"
+                />
+              </div>
+            </>
+          )}
+          <div className={(txType === 'BUY' || txType === 'SELL') ? 'col-span-2' : 'col-span-6'}>
+            <Label className="text-[11px] text-muted-foreground">
+              Valor total {(txType === 'BUY' || txType === 'SELL') ? '(opcional)' : ''}
+            </Label>
+            <Input
+              type="number" step="any"
+              value={txValue} onChange={e => setTxValue(e.target.value)}
+              placeholder="0.00" className="h-9 text-sm"
+            />
+          </div>
+        </div>
+        <div className="flex items-end gap-2 mb-4">
+          <div className="flex-1">
+            <Label className="text-[11px] text-muted-foreground">Nota (opcional)</Label>
+            <Input
+              value={txNotes} onChange={e => setTxNotes(e.target.value)}
+              placeholder="ex: corretagem, observação..."
+              className="h-9 text-sm"
+            />
+          </div>
+          <Button
+            size="sm"
+            onClick={submitTransaction}
+            disabled={addTxMutation.isPending}
+          >
+            <Plus size={14} className="mr-1" />
+            Registrar
+          </Button>
+        </div>
+
+        {/* Transactions list */}
+        {transactionsLoading ? (
+          <Skeleton className="h-16 w-full rounded-lg" />
+        ) : transactions && transactions.length > 0 ? (
+          <div className="rounded-lg border border-border overflow-hidden divide-y divide-border max-h-72 overflow-y-auto">
+            {[...transactions].sort((a, b) => b.date.localeCompare(a.date)).map(tx => {
+              const isInflow = tx.type === 'SELL' || tx.type === 'DIVIDEND'
+                || tx.type === 'JCP' || tx.type === 'RENDIMENTO'
+                || tx.type === 'RESGATE'
+              return (
+                <div key={tx.id} className="flex items-center justify-between py-2 px-3 hover:bg-muted/30 transition-colors">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
+                      isInflow ? 'border-emerald-500/40 text-emerald-700'
+                        : tx.type === 'BUY' ? 'border-blue-500/40 text-blue-700'
+                          : ''
+                    }`}>
+                      {tx.type}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {new Date(tx.date + 'T00:00:00').toLocaleDateString(loc)}
+                    </span>
+                    {tx.qty != null && (
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        qty {tx.qty}
+                        {tx.price != null && ` @ ${formatCurrency(tx.price, currency, loc)}`}
+                      </span>
+                    )}
+                    {tx.notes && (
+                      <span className="text-[11px] text-muted-foreground italic truncate max-w-[200px]">
+                        {tx.notes}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className={`text-sm tabular-nums font-semibold ${
+                      isInflow ? 'text-emerald-600' : 'text-foreground'
+                    }`}>
+                      {tx.value != null ? mask(formatCurrency(tx.value, currency, loc)) : '—'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        if (confirm('Remover esta transação?')) {
+                          deleteTxMutation.mutate(tx.id)
+                        }
+                      }}
+                      className="p-1 rounded text-muted-foreground/40 hover:text-rose-600 transition-colors"
+                      disabled={deleteTxMutation.isPending}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground py-3 text-center">
+            Nenhuma transação registrada
+          </p>
+        )}
+      </div>
 
       {/* Value History */}
       <div>
