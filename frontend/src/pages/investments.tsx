@@ -58,8 +58,7 @@ interface PortfolioReturns {
 const CDI_COLOR = '#F59E0B'
 const IBOV_COLOR = '#6366F1'
 const SP500_COLOR = '#10B981'
-const TWR_COLOR = '#EC4899'        // pink — destaque pra carteira no gráfico
-const TWR_BRUTO_COLOR = '#BE185D'  // pink escuro — TWR bruto
+const TWR_COLOR = '#EC4899'  // pink — destaque pra carteira no gráfico
 
 const CLASS_COLORS: Record<string, string> = {
   'Ação': '#6366F1',
