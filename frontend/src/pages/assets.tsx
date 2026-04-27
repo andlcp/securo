@@ -693,7 +693,7 @@ export default function AssetsPage() {
     return (
       <div key={asset.id} className="border border-border rounded-xl bg-card shadow-sm overflow-hidden">
         <div
-          className="flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-muted/30 transition-colors"
+          className="flex items-center gap-6 px-5 py-4 cursor-pointer hover:bg-muted/30 transition-colors"
           onClick={() => setExpandedId(isExpanded ? null : asset.id)}
         >
           <AssetIcon
@@ -745,44 +745,40 @@ export default function AssetsPage() {
               )}
             </div>
           </div>
-          {/* Rich columns inline: Qtd | Invested | Custodiante */}
-          <div className="hidden md:flex items-center gap-4 shrink-0 tabular-nums">
-            <div className="text-right min-w-[64px]">
-              <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Qtd</p>
-              <p className="text-xs font-semibold text-foreground">
-                {asset.units != null
-                  ? asset.units.toLocaleString(locale, { maximumFractionDigits: 4 })
-                  : '—'}
-              </p>
-            </div>
-            <div className="text-right min-w-[100px]">
-              <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Investido</p>
-              <p className="text-xs font-semibold text-foreground">
-                {asset.purchase_price != null && asset.units != null
-                  ? mask(formatCurrency(asset.purchase_price * asset.units, asset.currency, locale))
-                  : '—'}
-              </p>
-            </div>
-            <div className="text-right min-w-[120px] max-w-[160px] truncate">
-              <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Custodiante</p>
-              <p className="text-xs font-medium text-muted-foreground truncate" title={asset.custodian ?? ''}>
-                {asset.custodian || '—'}
-              </p>
-            </div>
+          {/* Each column has a FIXED width (w-[…], not min-w-[…]) so the
+              labels and values align vertically across all rows in the
+              wallet/subgroup. */}
+          <div className="hidden md:block text-right shrink-0 w-[80px] tabular-nums">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Qtd</p>
+            <p className="text-xs font-semibold text-foreground">
+              {asset.units != null
+                ? asset.units.toLocaleString(locale, { maximumFractionDigits: 4 })
+                : '—'}
+            </p>
           </div>
-          {/* Rent. TWR column — Modified Dietz over the selected period.
-              Source: bulk endpoint /api/portfolio/timeseries/by-asset.
-              When the period is shorter than the asset's first cashflow,
-              TWR is approximate (Modified Dietz still works but the
-              denominator is small). */}
-          <div className="hidden lg:block text-right shrink-0 min-w-[80px]">
+          <div className="hidden md:block text-right shrink-0 w-[110px] tabular-nums">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Investido</p>
+            <p className="text-xs font-semibold text-foreground">
+              {asset.purchase_price != null && asset.units != null
+                ? mask(formatCurrency(asset.purchase_price * asset.units, asset.currency, locale))
+                : '—'}
+            </p>
+          </div>
+          <div className="hidden md:block text-right shrink-0 w-[180px]">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Custodiante</p>
+            <p className="text-xs font-medium text-muted-foreground truncate"
+               title={asset.custodian ?? ''}>
+              {asset.custodian || '—'}
+            </p>
+          </div>
+          <div className="hidden lg:block text-right shrink-0 w-[90px] tabular-nums">
             <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Rent. TWR</p>
             {(() => {
               const t = twrByAsset?.[asset.id]
               if (!t) return <p className="text-xs text-muted-foreground">—</p>
               const v = t.twr_cum
               return (
-                <p className={`text-xs font-semibold tabular-nums ${
+                <p className={`text-xs font-semibold ${
                   v >= 0 ? 'text-emerald-600' : 'text-rose-500'
                 }`}>
                   {mask(`${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)}
@@ -790,7 +786,7 @@ export default function AssetsPage() {
               )
             })()}
           </div>
-          <div className="text-right shrink-0 min-w-[110px]">
+          <div className="text-right shrink-0 w-[140px]">
             {asset.current_value != null ? (
               <>
                 <p className="text-sm font-bold tabular-nums text-foreground">

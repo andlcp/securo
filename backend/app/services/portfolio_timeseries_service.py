@@ -289,18 +289,36 @@ async def get_timeseries(session: AsyncSession, user: User,
     for av in avs:
         av_by_asset[av.asset_id].append(av)
 
-    def value_at_for_asset(asset_id: uuid.UUID, on: date) -> float:
-        rows = av_by_asset.get(asset_id, [])
-        if not rows:
-            return 0.0
-        # rows already sorted asc; find last row with date <= on
+    today_d = date.today()
+
+    def value_at_for_asset(asset: Asset, on: date) -> float:
+        """Return V_end at month-end `on` in the asset's native currency.
+
+        For the current month (on >= today) we want the LIVE value, since
+        AssetValue rows imported by push_to_securo can hold a future date
+        with a stale snapshot. Patrimônio renders `last_price * units` for
+        market-priced assets, so this code path mirrors that to keep the
+        two views in sync.
+        """
+        # Cap the lookup at today so we never read a future-dated row that
+        # the offline pipeline may have written when month_end > today.
+        cap = min(on, today_d)
+        rows = av_by_asset.get(asset.id, [])
         latest = None
         for r in rows:
-            if r.date <= on:
+            if r.date <= cap:
                 latest = r
             else:
                 break
-        return float(latest.amount) if latest else 0.0
+        latest_amount = float(latest.amount) if latest else 0.0
+
+        # For market-priced assets in the *current* month, prefer the
+        # cached live quote (last_price * units). This matches Patrimônio.
+        if (asset.valuation_method == "market_price"
+                and asset.last_price is not None and asset.units is not None
+                and on >= today_d):
+            return float(asset.last_price) * float(asset.units)
+        return latest_amount
 
     # Walk months
     out: list[dict] = []
@@ -315,7 +333,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         v_end_total = 0.0
         per_class: dict[str, float] = defaultdict(float)
         for a in assets:
-            v_native = value_at_for_asset(a.id, me)
+            v_native = value_at_for_asset(a, me)
             if v_native == 0:
                 continue
             rate = await _fx_rate(session, a.currency, user_ccy, me)
