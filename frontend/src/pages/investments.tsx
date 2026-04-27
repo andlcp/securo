@@ -106,29 +106,44 @@ function mergeSeries(
 }
 
 /** Build merged chart data from imported portfolio snapshots.
- *  Filters to last `months` snapshots (or all when sinceStart). */
+ *  Each line is rebased to 0 % at the start of the selected window so
+ *  short timeframes show the return INSIDE the window — not the
+ *  cumulative-since-inception clipped to a tail. */
 function snapshotsToChartData(
   snaps: PortfolioSnapshot[],
   months: number,
   sinceStart: boolean,
 ): MergedRow[] {
   if (!snaps || snaps.length === 0) return []
-  const sliced = sinceStart ? snaps : snaps.slice(-months)
-  const pct = (v: number | null | undefined): number | undefined =>
-    v == null ? undefined : v * 100
+  const sliced = sinceStart ? snaps : snaps.slice(-months - 1)
+  if (sliced.length === 0) return []
+  const base = sliced[0]
+  const baseFactor = (cum: number | null | undefined): number =>
+    1 + (cum ?? 0)
+  const factors = {
+    twr: baseFactor(base.twr_cum),
+    twr_bruto: baseFactor(base.twr_cum_bruto),
+    cdi: baseFactor(base.cdi_cum),
+    ibov: baseFactor(base.ibov_cum),
+    sp500: baseFactor(base.sp500_cum),
+    ivvb: baseFactor(base.ivvb11_cum),
+  }
+  const rebase = (cum: number | null | undefined,
+                  base_f: number): number | undefined =>
+    cum == null ? undefined : ((1 + cum) / base_f - 1) * 100
+
   return sliced.map(s => {
-    // YYYY-MM-DD -> dd/MM/yyyy (matches the date format used by the live series)
     const [yyyy, mm, dd] = s.month_end.split('-')
     const date = `${dd}/${mm}/${yyyy}`
     return {
       date,
       _s: `${yyyy}${mm}${dd}`,
-      cdi: pct(s.cdi_cum),
-      ibov: pct(s.ibov_cum),
-      sp500: pct(s.sp500_cum),
-      ivvb: pct(s.ivvb11_cum),
-      twr: pct(s.twr_cum),
-      twr_bruto: pct(s.twr_cum_bruto),
+      cdi: rebase(s.cdi_cum, factors.cdi),
+      ibov: rebase(s.ibov_cum, factors.ibov),
+      sp500: rebase(s.sp500_cum, factors.sp500),
+      ivvb: rebase(s.ivvb11_cum, factors.ivvb),
+      twr: rebase(s.twr_cum, factors.twr),
+      twr_bruto: rebase(s.twr_cum_bruto, factors.twr_bruto),
     }
   })
 }

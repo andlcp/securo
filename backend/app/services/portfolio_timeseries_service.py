@@ -33,14 +33,16 @@ from decimal import Decimal
 from typing import Optional
 import uuid
 
-from sqlalchemy import and_, select
+from decimal import Decimal
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.asset import Asset
 from app.models.asset_transaction import AssetTransaction
 from app.models.asset_value import AssetValue
-from app.models.fx_rate import FxRate
 from app.models.user import User
+from app.services import fx_rate_service
 
 logger = logging.getLogger(__name__)
 
@@ -73,29 +75,18 @@ async def _user_primary_currency(session: AsyncSession,
 
 async def _fx_rate(session: AsyncSession, ccy_from: str,
                    ccy_to: str, on: date) -> float:
+    """Returns the FX rate from ccy_from to ccy_to at `on`. 1.0 for parity
+    or when no rate is available (the FX cache may not have a row for
+    every (currency, date) pair). Delegates to fx_rate_service which
+    knows how to invert / chain rates against the OER USD base."""
     if ccy_from == ccy_to:
         return 1.0
-    # Find latest FX rate <= date (FxRate is daily snapshots)
-    stmt = (select(FxRate)
-            .where(FxRate.from_currency == ccy_from,
-                   FxRate.to_currency == ccy_to,
-                   FxRate.date <= on)
-            .order_by(FxRate.date.desc())
-            .limit(1))
-    row = (await session.execute(stmt)).scalar_one_or_none()
-    if row:
-        return float(row.rate)
-    # Try inverse
-    stmt2 = (select(FxRate)
-             .where(FxRate.from_currency == ccy_to,
-                    FxRate.to_currency == ccy_from,
-                    FxRate.date <= on)
-             .order_by(FxRate.date.desc())
-             .limit(1))
-    row2 = (await session.execute(stmt2)).scalar_one_or_none()
-    if row2 and row2.rate and float(row2.rate) > 0:
-        return 1.0 / float(row2.rate)
-    return 1.0  # fallback (parity)
+    try:
+        _, rate = await fx_rate_service.convert(
+            session, Decimal("1"), ccy_from, ccy_to, on)
+        return float(rate)
+    except Exception:
+        return 1.0
 
 
 async def _load_assets(session: AsyncSession, user_id: uuid.UUID,

@@ -801,12 +801,16 @@ export default function AssetsPage() {
                   const invested = (asset.purchase_price ?? 0) * (asset.units ?? 0)
                   const pct = invested > 0 ? (asset.gain_loss / invested) * 100 : null
                   return (
-                    <p className={`text-xs font-medium tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                      {mask(`${asset.gain_loss >= 0 ? '+' : ''}${formatCurrency(asset.gain_loss, asset.currency, locale)}`)}
+                    <>
+                      <p className={`text-xs font-medium tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                        {mask(`${asset.gain_loss >= 0 ? '+' : ''}${formatCurrency(asset.gain_loss, asset.currency, locale)}`)}
+                      </p>
                       {pct != null && (
-                        <span className="text-[10px] ml-1">({pct >= 0 ? '+' : ''}{pct.toFixed(2)}% P&L)</span>
+                        <p className={`text-[10px] tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                          ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}% P&L)
+                        </p>
                       )}
-                    </p>
+                    </>
                   )
                 })()}
                 {totalPortfolioValue > 0 && (asset.current_value_primary ?? asset.current_value ?? 0) > 0 && (() => {
