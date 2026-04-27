@@ -33,6 +33,7 @@ class AssetCreate(BaseModel):
     # ticker/name; the frontend Add Asset form sends it explicitly.
     asset_class: Optional[str] = None
     maturity_date: Optional[date] = None
+    custodian: Optional[str] = None
 
 
 class AssetUpdate(BaseModel):
@@ -59,6 +60,7 @@ class AssetUpdate(BaseModel):
     ticker_exchange: Optional[str] = None
     asset_class: Optional[str] = None
     maturity_date: Optional[date] = None
+    custodian: Optional[str] = None
 
 
 class AssetRead(BaseModel):
@@ -95,6 +97,7 @@ class AssetRead(BaseModel):
     last_price_at: Optional[datetime] = None
     logo_url: Optional[str] = None
     asset_class: Optional[str] = None
+    custodian: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

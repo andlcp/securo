@@ -596,6 +596,13 @@ export const assets = {
   deleteTransaction: async (txId: string): Promise<void> => {
     await api.delete(`/assets/transactions/${txId}`)
   },
+  priceHistory: async (id: string, range = '1y'): Promise<{
+    asset_id: string; ticker: string | null; currency: string;
+    range: string; data: { date: string; close: number }[]
+  }> => {
+    const { data } = await api.get(`/assets/${id}/price-history`, { params: { range } })
+    return data
+  },
   portfolioTrend: async (): Promise<{ assets: { id: string; name: string; type: string; group_id: string | null }[]; trend: Record<string, unknown>[]; total: number }> => {
     const { data } = await api.get('/assets/portfolio-trend')
     return data
@@ -693,6 +700,14 @@ export const portfolioTimeseries = {
     if (params.assetClasses && params.assetClasses.length) q.asset_classes = params.assetClasses.join(',')
     if (params.groupIds && params.groupIds.length) q.group_ids = params.groupIds.join(',')
     const { data } = await api.get('/portfolio/timeseries', { params: q })
+    return data
+  },
+  assetTwr: async (assetId: string, months = 12, sinceStart = false): Promise<{
+    twr_cum: number; v_start: number; v_end: number
+  }> => {
+    const q: Record<string, unknown> = { months }
+    if (sinceStart) q.since_start = true
+    const { data } = await api.get(`/portfolio/timeseries/asset/${assetId}`, { params: q })
     return data
   },
 }

@@ -152,6 +152,30 @@ async def _portfolio_start(session: AsyncSession,
     return min(candidates) if candidates else None
 
 
+async def get_asset_twr(session: AsyncSession, user: User,
+                        asset_id: uuid.UUID,
+                        months: Optional[int] = None,
+                        since_start: bool = False) -> dict:
+    """Modified Dietz TWR for a single asset over a window. Used by the
+    "Rent. TWR" column in the Patrimônio list.
+
+    Returns {"twr_cum": float, "v_start": float, "v_end": float}.
+    """
+    series = await get_timeseries(
+        session, user,
+        months=months, since_start=since_start,
+        asset_ids=[asset_id],
+    )
+    if not series:
+        return {"twr_cum": 0.0, "v_start": 0.0, "v_end": 0.0}
+    last = series[-1]
+    return {
+        "twr_cum": last.get("twr_cum", 0.0) or 0.0,
+        "v_start": series[0].get("v_end", 0.0),
+        "v_end": last.get("v_end", 0.0),
+    }
+
+
 async def get_timeseries(session: AsyncSession, user: User,
                          months: Optional[int] = None,
                          since_start: bool = False,

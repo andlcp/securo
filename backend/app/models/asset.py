@@ -54,6 +54,11 @@ class Asset(Base):
     # FIIS, CRIPTO, OUTRO. Validated at the schema layer (not the DB).
     asset_class: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
+    # Broker / custodian that holds the position (XP Investimentos,
+    # BTG Pactual, Interactive Brokers, ...). Display-only: shown as a column
+    # on the Patrimônio list. Free-text — no FK to a brokers table.
+    custodian: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     # Optional parent group ("wallet"). NULL means ungrouped. Deleting a
     # group nullifies this field rather than removing the asset.
     group_id: Mapped[Optional[uuid.UUID]] = mapped_column(

@@ -326,6 +326,7 @@ export interface Asset {
   last_price_at: string | null
   logo_url: string | null
   asset_class: AssetClass | null
+  custodian: string | null
 }
 
 /** Explicit asset-class taxonomy used for grouping/filtering. */

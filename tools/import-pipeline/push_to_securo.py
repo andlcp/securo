@@ -174,8 +174,40 @@ def _classify_b3_class(ticker: str) -> str:
     return "RENDA_VARIAVEL_BR"
 
 
+def _custodian_from_b3_trades(trades: list[dict]) -> dict[str, str]:
+    """{ticker -> most-recent instituicao} so we can stamp Asset.custodian
+    on every B3 RV asset we create."""
+    latest: dict[str, dict] = {}
+    for t in trades:
+        tk = (t.get("ticker") or "").strip()
+        inst = (t.get("instituicao") or "").strip()
+        d = (t.get("data") or "")
+        if not tk or not inst:
+            continue
+        prev = latest.get(tk)
+        if prev is None or d > prev["d"]:
+            latest[tk] = {"d": d, "inst": inst}
+    return {tk: v["inst"] for tk, v in latest.items()}
+
+
+def _custodian_from_rf_trades(trades: list[dict]) -> dict[str, str]:
+    """{titulo -> most-recent instituicao}."""
+    latest: dict[str, dict] = {}
+    for t in trades:
+        titulo = (t.get("titulo") or "").strip()
+        inst = (t.get("instituicao") or "").strip()
+        d = (t.get("data") or "")
+        if not titulo or not inst:
+            continue
+        prev = latest.get(titulo)
+        if prev is None or d > prev["d"]:
+            latest[titulo] = {"d": d, "inst": inst}
+    return {tk: v["inst"] for tk, v in latest.items()}
+
+
 def build_b3_rv_assets(holdings_final: list[dict],
                        prices: dict[str, dict[str, float]],
+                       custodians: dict[str, str],
                        group_id_rv: str,
                        group_id_fii: str) -> list[dict]:
     """One Asset per ticker in holdings_final. Routes FIIs to FIIs group."""
@@ -207,12 +239,14 @@ def build_b3_rv_assets(holdings_final: list[dict],
                 "group_id": gid,
                 "source": "csv_import",
                 "asset_class": cls,
+                "custodian": custodians.get(tk),
             }
         })
     return out
 
 
 def build_rf_assets(rf_final: list[dict], rf_trades: list[dict],
+                    custodians: dict[str, str],
                     group_id: str) -> list[dict]:
     """For each open RF position, look up its earliest BUY in rf_trades to
     populate purchase_date + purchase_price (PU). Without those, the
@@ -257,6 +291,7 @@ def build_rf_assets(rf_final: list[dict], rf_trades: list[dict],
                 "source": "csv_import",
                 "external_id": codigo or None,
                 "asset_class": "RENDA_FIXA",
+                "custodian": custodians.get(titulo),
             }
         })
     return out
@@ -285,6 +320,7 @@ def build_us_assets(us_final: list[dict], group_id: str) -> list[dict]:
                 "group_id": group_id,
                 "source": "csv_import",
                 "asset_class": "STOCKS_US",
+                "custodian": "Interactive Brokers",
             }
         })
     return out
@@ -625,7 +661,10 @@ def main() -> int:
     rf_final = read_csv(base / "rf_final.csv")
     us_final = read_csv(base / "us_final.csv")
     rf_trades = read_csv(base / "rf_trades.csv")
+    rv_trades = read_csv(base / "trades.csv")
     prices = load_prices_cache(base / "prices_cache.csv")
+    rv_custodians = _custodian_from_b3_trades(rv_trades)
+    rf_custodians = _custodian_from_rf_trades(rf_trades)
     holdings_monthly = read_csv(base / "holdings_monthly.csv") if not args.no_history else []
     rf_monthly = read_csv(base / "rf_holdings_monthly.csv") if not args.no_history else []
     us_monthly = read_csv(base / "us_holdings_monthly.csv") if not args.no_history else []
@@ -642,8 +681,8 @@ def main() -> int:
     # In --dry-run we don't hit the API at all; just preview.
     if args.dry_run:
         rv_assets = build_b3_rv_assets(holdings_final, prices,
-                                       "<rv>", "<fiis>")
-        rf_assets = build_rf_assets(rf_final, rf_trades, "<rf>")
+                                       rv_custodians, "<rv>", "<fiis>")
+        rf_assets = build_rf_assets(rf_final, rf_trades, rf_custodians, "<rf>")
         us_assets = build_us_assets(us_final, "<us>")
         n_arch_b3 = n_arch_rf = 0
         if args.include_archived:
@@ -718,8 +757,10 @@ def main() -> int:
 
     # Build asset payloads
     rv_assets = build_b3_rv_assets(holdings_final, prices,
+                                    rv_custodians,
                                     group_ids["rv_br"], group_ids["fiis"])
-    rf_assets = build_rf_assets(rf_final, rf_trades, group_ids["rf"])
+    rf_assets = build_rf_assets(rf_final, rf_trades, rf_custodians,
+                                 group_ids["rf"])
     us_assets = build_us_assets(us_final, group_ids["us"])
 
     if args.include_archived:

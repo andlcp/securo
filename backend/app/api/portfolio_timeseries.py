@@ -78,3 +78,19 @@ async def get_timeseries(
         asset_classes=_parse_csv(asset_classes),
         group_ids=_parse_uuid_csv(group_ids),
     )
+
+
+@router.get("/asset/{asset_id}")
+async def get_asset_timeseries(
+    asset_id: uuid.UUID,
+    months: int = Query(12, ge=1, le=240),
+    since_start: bool = Query(False),
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """TWR for a single asset over a window — feeds the Rent. TWR column
+    on the Patrimônio list."""
+    return await portfolio_timeseries_service.get_asset_twr(
+        session, user, asset_id,
+        months=months, since_start=since_start,
+    )

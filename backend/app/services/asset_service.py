@@ -141,6 +141,7 @@ def _asset_to_read(asset: Asset, latest_value: Optional[AssetValue], value_count
         last_price_at=asset.last_price_at,
         logo_url=asset.logo_url,
         asset_class=asset.asset_class,
+        custodian=asset.custodian,
     )
 
 
@@ -258,6 +259,7 @@ async def create_asset(
         source="yfinance" if data.valuation_method == "market_price" else "manual",
         asset_class=data.asset_class,
         maturity_date=data.maturity_date,
+        custodian=data.custodian,
     )
     session.add(asset)
     await session.flush()
