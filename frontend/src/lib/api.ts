@@ -710,6 +710,14 @@ export const portfolioTimeseries = {
     const { data } = await api.get(`/portfolio/timeseries/asset/${assetId}`, { params: q })
     return data
   },
+  twrByAsset: async (months = 12, sinceStart = false): Promise<
+    Record<string, { twr_cum: number; v_start: number; v_end: number; invested: number }>
+  > => {
+    const q: Record<string, unknown> = { months }
+    if (sinceStart) q.since_start = true
+    const { data } = await api.get('/portfolio/timeseries/by-asset', { params: q })
+    return data
+  },
 }
 
 // Portfolio Snapshots — historical TWR + benchmarks (CSV import from offline pipeline)

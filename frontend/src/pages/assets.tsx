@@ -652,6 +652,14 @@ export default function AssetsPage() {
     staleTime: 1000 * 60,
   })
 
+  // TWR per asset for the Rent. TWR column. ONE call returns the map.
+  const { data: twrByAsset } = useQuery({
+    queryKey: ['portfolio-twr-by-asset', kpiPeriod.months, kpiPeriod.sinceStart],
+    queryFn: () => portfolioTimeseries.twrByAsset(
+      kpiPeriod.months, kpiPeriod.sinceStart),
+    staleTime: 1000 * 60,
+  })
+
   const kpiResult = useMemo(() => {
     if (!kpiSeries || kpiSeries.length < 2) return null
     const first = kpiSeries[0]
@@ -762,6 +770,26 @@ export default function AssetsPage() {
               </p>
             </div>
           </div>
+          {/* Rent. TWR column — Modified Dietz over the selected period.
+              Source: bulk endpoint /api/portfolio/timeseries/by-asset.
+              When the period is shorter than the asset's first cashflow,
+              TWR is approximate (Modified Dietz still works but the
+              denominator is small). */}
+          <div className="hidden lg:block text-right shrink-0 min-w-[80px]">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Rent. TWR</p>
+            {(() => {
+              const t = twrByAsset?.[asset.id]
+              if (!t) return <p className="text-xs text-muted-foreground">—</p>
+              const v = t.twr_cum
+              return (
+                <p className={`text-xs font-semibold tabular-nums ${
+                  v >= 0 ? 'text-emerald-600' : 'text-rose-500'
+                }`}>
+                  {mask(`${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)}
+                </p>
+              )
+            })()}
+          </div>
           <div className="text-right shrink-0 min-w-[110px]">
             {asset.current_value != null ? (
               <>
@@ -780,7 +808,7 @@ export default function AssetsPage() {
                     <p className={`text-xs font-medium tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
                       {mask(`${asset.gain_loss >= 0 ? '+' : ''}${formatCurrency(asset.gain_loss, asset.currency, locale)}`)}
                       {pct != null && (
-                        <span className="text-[10px] ml-1">({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)</span>
+                        <span className="text-[10px] ml-1">({pct >= 0 ? '+' : ''}{pct.toFixed(2)}% P&L)</span>
                       )}
                     </p>
                   )

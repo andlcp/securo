@@ -103,11 +103,21 @@ def _generate_growth_values(
 
 
 def _asset_to_read(asset: Asset, latest_value: Optional[AssetValue], value_count: int) -> AssetRead:
-    """Convert an Asset model + computed fields to AssetRead schema."""
+    """Convert an Asset model + computed fields to AssetRead schema.
+
+    `gain_loss` is the absolute P&L of the position:
+        current_value (qty × last_price) MINUS the total invested capital
+        (avg purchase_price × units). The previous formula subtracted the
+        per-unit average price from the total current value, which is
+        dimensionally wrong and produced 100×+ inflated returns for any
+        asset with units > 1.
+    """
     current_value = _compute_current_value(asset, latest_value)
     gain_loss = None
     if current_value is not None and asset.purchase_price is not None:
-        gain_loss = current_value - float(asset.purchase_price)
+        units = float(asset.units) if asset.units is not None else 1.0
+        invested_total = float(asset.purchase_price) * units
+        gain_loss = current_value - invested_total
 
     return AssetRead(
         id=asset.id,

@@ -88,9 +88,21 @@ async def get_asset_timeseries(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
-    """TWR for a single asset over a window — feeds the Rent. TWR column
-    on the Patrimônio list."""
+    """TWR for a single asset over a window."""
     return await portfolio_timeseries_service.get_asset_twr(
         session, user, asset_id,
         months=months, since_start=since_start,
+    )
+
+
+@router.get("/by-asset")
+async def get_twr_by_asset(
+    months: int = Query(12, ge=1, le=240),
+    since_start: bool = Query(False),
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Bulk TWR by asset — single round-trip for the Patrimônio list."""
+    return await portfolio_timeseries_service.get_twr_by_asset(
+        session, user, months=months, since_start=since_start,
     )

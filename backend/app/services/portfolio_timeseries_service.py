@@ -152,6 +152,41 @@ async def _portfolio_start(session: AsyncSession,
     return min(candidates) if candidates else None
 
 
+async def get_twr_by_asset(session: AsyncSession, user: User,
+                           months: Optional[int] = None,
+                           since_start: bool = False) -> dict[str, dict]:
+    """Returns {asset_id: {twr_cum, v_start, v_end, invested}} for every
+    non-archived asset of the user. Used by the Patrimônio list to render
+    a Rent. TWR column without N+1 round-trips.
+
+    Implementation note: we just iterate `get_timeseries` over each asset
+    individually (the backend cost is dominated by AssetValue / FxRate
+    lookups, not by HTTP/protocol overhead), but expose it as ONE network
+    call so the frontend doesn't fan out 70 requests.
+    """
+    assets = await _load_assets(session, user.id)
+    out: dict[str, dict] = {}
+    for asset in assets:
+        if asset.is_archived:
+            continue
+        try:
+            r = await get_asset_twr(session, user, asset.id,
+                                    months=months, since_start=since_start)
+            invested = 0.0
+            if asset.purchase_price is not None and asset.units is not None:
+                invested = float(asset.purchase_price) * float(asset.units)
+            out[str(asset.id)] = {
+                "twr_cum": r["twr_cum"],
+                "v_start": r["v_start"],
+                "v_end": r["v_end"],
+                "invested": round(invested, 2),
+            }
+        except Exception:
+            logger.exception("twr-by-asset failed for asset %s", asset.id)
+            continue
+    return out
+
+
 async def get_asset_twr(session: AsyncSession, user: User,
                         asset_id: uuid.UUID,
                         months: Optional[int] = None,
