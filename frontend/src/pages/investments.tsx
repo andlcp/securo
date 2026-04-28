@@ -314,6 +314,19 @@ export default function InvestmentsPage() {
     staleTime: 1000 * 60,
   })
 
+  // Always-since-inception series — used only to power the lifetime TWR
+  // KPI ("TWR cumulativo"), independent of the selected 3M/6M/1A window.
+  const { data: tsLifetime } = useQuery<PortfolioPoint[]>({
+    queryKey: ['portfolio-timeseries-lifetime', classesParam, groupsParam],
+    queryFn: () => portfolioTimeseries.series({
+      months: 12,
+      sinceStart: true,
+      assetClasses: classesParam,
+      groupIds: groupsParam,
+    }),
+    staleTime: 1000 * 60,
+  })
+
   async function handleImportFile(file: File) {
     setImporting(true)
     setImportMessage(null)
@@ -367,6 +380,7 @@ export default function InvestmentsPage() {
   // Latest snapshot — used to show TWR badges from imported data.
   const latestSnap = hasSnapshots && snapshots ? snapshots[snapshots.length - 1] : null
   const latestTs = tsData && tsData.length > 0 ? tsData[tsData.length - 1] : null
+  const latestTsLifetime = tsLifetime && tsLifetime.length > 0 ? tsLifetime[tsLifetime.length - 1] : null
 
   const groups = groupsList ?? []
   const consolidated = returnsData?.consolidated
@@ -514,14 +528,12 @@ export default function InvestmentsPage() {
               TWR (cumulativo)
             </p>
             <p className={`text-base font-bold tabular-nums ${
-              (latestTs?.twr_cum ?? latestSnap?.twr_cum ?? 0) >= 0
+              (latestTsLifetime?.twr_cum ?? latestSnap?.twr_cum ?? 0) >= 0
                 ? 'text-emerald-600' : 'text-rose-500'
             }`}>
-              {privacyMode ? MASK : fmtPct((latestTs?.twr_cum ?? latestSnap?.twr_cum ?? 0) * 100)}
+              {privacyMode ? MASK : fmtPct((latestTsLifetime?.twr_cum ?? latestSnap?.twr_cum ?? 0) * 100)}
             </p>
-            <p className="text-[10px] text-muted-foreground mt-0.5">
-              {sinceStart ? 'desde o início' : `últimos ${months}m`}
-            </p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">desde o início</p>
           </div>
           <div className="rounded-xl border border-border bg-card p-4">
             <p className="text-[11px] text-muted-foreground uppercase tracking-wider">No período</p>

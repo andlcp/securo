@@ -314,7 +314,23 @@ async def get_timeseries(session: AsyncSession, user: User,
     # Walk months
     out: list[dict] = []
     cum = 1.0
+
+    # Seed prev_v_end with the portfolio value at the month-end *before* the
+    # window starts. Otherwise, the first month's Modified Dietz return uses
+    # prev_v_end=0 even though the user already owned assets, which inflates
+    # the cumulative TWR by the entire pre-window value.
+    if start_m == 1:
+        prev_y, prev_m = start_y - 1, 12
+    else:
+        prev_y, prev_m = start_y, start_m - 1
+    prev_me = _month_end(prev_y, prev_m)
     prev_v_end = 0.0
+    for a in assets:
+        v_native = value_at_for_asset(a, prev_me)
+        if v_native == 0:
+            continue
+        rate = await _fx_rate(session, a.currency, user_ccy, prev_me)
+        prev_v_end += v_native * rate
 
     for (y, m) in _iter_months(date(start_y, start_m, 1),
                                 date(end_y, end_m, 1)):
