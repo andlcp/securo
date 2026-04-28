@@ -22,6 +22,16 @@ import { PageHeader } from '@/components/page-header'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
 import { useAuth } from '@/contexts/auth-context'
 import type { AssetGroup } from '@/types'
+import { Wallet, ChevronDown, Check } from 'lucide-react'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuCheckboxItem,
+  DropdownMenuSeparator,
+  DropdownMenuLabel,
+} from '@/components/ui/dropdown-menu'
 
 interface BenchmarkPoint {
   date: string
@@ -530,6 +540,71 @@ export default function InvestmentsPage() {
         </div>
       )}
 
+      {/* Wallet selector (primary axis) */}
+      {groups.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Carteira:</span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-lg border border-border bg-card hover:bg-muted/50 text-foreground transition-colors min-w-[180px]"
+              >
+                <Wallet size={13} className="text-muted-foreground" />
+                <span className="flex-1 text-left truncate">
+                  {selectedGroups.size === 0
+                    ? `${t('investments.consolidated')} (todas)`
+                    : selectedGroups.size === 1
+                      ? groups.find((g: AssetGroup) => selectedGroups.has(g.id))?.name ?? ''
+                      : `${selectedGroups.size} carteiras`}
+                </span>
+                <ChevronDown size={13} className="text-muted-foreground" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-[220px]">
+              <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-normal">
+                Selecionar carteiras
+              </DropdownMenuLabel>
+              <DropdownMenuItem
+                onSelect={(e) => {
+                  e.preventDefault()
+                  setSelectedGroups(new Set())
+                }}
+                className="gap-2"
+              >
+                <span className="w-4 flex-shrink-0">
+                  {selectedGroups.size === 0 && <Check size={14} />}
+                </span>
+                <span className="font-medium">{t('investments.consolidated')} (todas)</span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {groups.map((g: AssetGroup) => (
+                <DropdownMenuCheckboxItem
+                  key={g.id}
+                  checked={selectedGroups.has(g.id)}
+                  onCheckedChange={() => toggleGroup(g.id)}
+                  onSelect={(e) => e.preventDefault()}
+                  className="gap-2"
+                >
+                  <span
+                    className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: g.color }}
+                  />
+                  <span className="truncate">{g.name}</span>
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {selectedGroups.size > 0 && (
+            <button
+              onClick={() => setSelectedGroups(new Set())}
+              className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              limpar
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Filter chips by asset class */}
       <div className="flex flex-wrap items-center gap-2 mb-5">
         <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Classe:</span>
@@ -563,35 +638,6 @@ export default function InvestmentsPage() {
         ))}
       </div>
 
-      {/* Wallet filter chips */}
-      {groups.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-5">
-          <button
-            onClick={() => setSelectedGroups(new Set())}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-              selectedGroups.size === 0
-                ? 'bg-primary text-primary-foreground border-primary'
-                : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted/50'
-            }`}
-          >
-            {t('investments.consolidated')}
-          </button>
-          {groups.map((g: AssetGroup) => (
-            <button
-              key={g.id}
-              onClick={() => toggleGroup(g.id)}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                selectedGroups.has(g.id)
-                  ? 'border-transparent text-white'
-                  : 'border-border text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
-              style={selectedGroups.has(g.id) ? { backgroundColor: g.color } : {}}
-            >
-              {g.name}
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* Benchmark + Portfolio line chart */}
       <div className="bg-card rounded-xl border border-border shadow-sm mb-5">
