@@ -48,6 +48,7 @@
     "settings": "Configurações",
     "recurring": "Recorrentes",
     "assets": "Patrimônio",
+    "assetsV2": "Patrimônio V2",
     "investments": "Investimentos",
     "payees": "Beneficiários",
     "goals": "Metas",
@@ -611,6 +612,9 @@
     "processError": "Erro ao processar arquivo",
     "importError": "Erro ao importar transações",
     "previewInfo": "{{count}} transações · formato {{format}}"
+  },
+  "assetsV2": {
+    "title": "Patrimônio V2"
   },
   "assets": {
     "title": "Patrimônio",

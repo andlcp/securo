@@ -48,6 +48,7 @@
     "settings": "Settings",
     "recurring": "Recurring",
     "assets": "Assets",
+    "assetsV2": "Assets V2",
     "investments": "Investments",
     "payees": "Payees",
     "goals": "Goals",
@@ -611,6 +612,9 @@
     "processError": "Error processing file",
     "importError": "Error importing transactions",
     "previewInfo": "{{count}} transactions · format {{format}}"
+  },
+  "assetsV2": {
+    "title": "Assets V2"
   },
   "assets": {
     "title": "Assets",

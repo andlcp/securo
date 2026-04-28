@@ -73,6 +73,7 @@ const navItems: NavItem[] = [
   { type: 'separator', labelKey: 'nav.groupAnalysis' },
   { type: 'link', key: 'reports',      path: '/reports',      icon: BarChart3 },
   { type: 'link', key: 'assets',       path: '/assets',       icon: Landmark },
+  { type: 'link', key: 'assetsV2',     path: '/assets-v2',    icon: Landmark },
   { type: 'link', key: 'investments',  path: '/investments',  icon: TrendingUp },
   { type: 'separator', labelKey: 'nav.groupSetup' },
   { type: 'link', key: 'budgets',      path: '/budgets',      icon: PiggyBank },

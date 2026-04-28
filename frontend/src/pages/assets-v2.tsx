@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { assets, assetGroups, currencies as currenciesApi } from '@/lib/api'
+import { assets, assetGroups, currencies as currenciesApi, portfolioTimeseries } from '@/lib/api'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,7 +16,8 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { DatePickerInput } from '@/components/ui/date-picker-input'
-import type { Asset, AssetGroup, AssetValue, MarketSymbolMatch, MarketSymbolQuote } from '@/types'
+import type { Asset, AssetGroup, MarketSymbolMatch, MarketSymbolQuote } from '@/types'
+import { ASSET_CLASS_OPTIONS } from '@/types'
 import {
   Home,
   Car,
@@ -166,7 +167,7 @@ const VALUATION_METHODS = ['manual', 'growth_rule', 'market_price'] as const
 const GROWTH_TYPES = ['percentage', 'absolute'] as const
 const GROWTH_FREQUENCIES = ['daily', 'weekly', 'monthly', 'yearly'] as const
 
-export default function AssetsPage() {
+export default function AssetsV2Page() {
   const { t, i18n } = useTranslation()
   const locale = i18n.language === 'en' ? 'en-US' : i18n.language
   const { mask } = usePrivacyMode()
@@ -185,6 +186,10 @@ export default function AssetsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [pendingGrowthSave, setPendingGrowthSave] = useState<Record<string, unknown> | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  // Period selector for KPIs at the top (30d / 6M / 1A / Tudo)
+  const [kpiPeriod, setKpiPeriod] = useState<{ label: string; months: number; sinceStart: boolean }>(
+    { label: '1A', months: 12, sinceStart: false }
+  )
 
   // Wallet (AssetGroup) dialog state
   const [walletDialogOpen, setWalletDialogOpen] = useState(false)
@@ -202,6 +207,7 @@ export default function AssetsPage() {
   const [formType, setFormType] = useState<string>('other')
   const [formCurrency, setFormCurrency] = useState(userCurrency)
   const [formMethod, setFormMethod] = useState<string>('manual')
+  const [formAssetClass, setFormAssetClass] = useState<string>('')  // empty = unset
   const [formPurchaseDate, setFormPurchaseDate] = useState<string>('')
   const [formPurchasePrice, setFormPurchasePrice] = useState('')
   const [formSellDate, setFormSellDate] = useState<string>('')
@@ -455,6 +461,7 @@ export default function AssetsPage() {
     setFormType('other')
     setFormCurrency(userCurrency)
     setFormMethod('manual')
+    setFormAssetClass('')
     setFormPurchaseDate('')
     setFormPurchasePrice('')
     setFormSellDate('')
@@ -474,6 +481,7 @@ export default function AssetsPage() {
     setFormType(asset.type)
     setFormCurrency(asset.currency)
     setFormMethod(asset.valuation_method)
+    setFormAssetClass(asset.asset_class ?? '')
     setFormPurchaseDate(asset.purchase_date ?? '')
     setFormPurchasePrice(asset.purchase_price?.toString() ?? '')
     setFormSellDate(asset.sell_date ?? '')
@@ -532,6 +540,10 @@ export default function AssetsPage() {
       payload.current_value = parseFloat(formCurrentValue)
     }
 
+    if (formAssetClass) {
+      payload.asset_class = formAssetClass
+    }
+
     return payload
   }
 
@@ -570,6 +582,101 @@ export default function AssetsPage() {
     setPendingGrowthSave(null)
   }
 
+  // ----- Subgroup helpers (Ações / ETFs / FIIs / Renda Fixa / Stocks US / ...)
+  // Used to give each wallet section a 2nd-level breakdown by asset_class.
+
+  // Hard-coded mapping in the absence of an explicit asset_class on every
+  // record: tickers ending in 11 NOT in the known-ETF list are FIIs.
+  const KNOWN_BR_ETFS = new Set([
+    'IVVB11', 'BOVA11', 'SMAL11', 'SPXI11', 'HASH11', 'GOLD11',
+    'NTNB11', 'IRFM11', 'DIVO11', 'FIND11', 'GOVE11', 'MATB11',
+    'BOVB11', 'BOVS11', 'BOVV11', 'ECOO11', 'ISUS11', 'PIBB11',
+  ])
+
+  function inferDisplayClass(asset: Asset): string {
+    if (asset.asset_class === 'FIIS') return 'FIIs'
+    if (asset.asset_class === 'STOCKS_US') return 'Stocks (Ações Americanas)'
+    if (asset.asset_class === 'CRIPTO') return 'Criptomoedas'
+    if (asset.asset_class === 'RENDA_FIXA') return 'Renda Fixa'
+    if (asset.asset_class === 'OUTRO') return 'Outro'
+    if (asset.asset_class === 'RENDA_VARIAVEL_BR') {
+      const tk = (asset.ticker || asset.name).replace('.SA', '').toUpperCase()
+      if (KNOWN_BR_ETFS.has(tk)) return 'ETFs'
+      if (/11$/.test(tk)) return 'FIIs'
+      return 'Ações'
+    }
+    return 'Outro'
+  }
+
+  // Order in which subgroups should appear inside a wallet section.
+  const SUBGROUP_ORDER = [
+    'Ações', 'ETFs', 'FIIs', 'Stocks (Ações Americanas)',
+    'Renda Fixa', 'Criptomoedas', 'Outro',
+  ]
+
+  function groupByDisplayClass(list: Asset[]): { name: string; assets: Asset[] }[] {
+    const buckets = new Map<string, Asset[]>()
+    for (const a of list) {
+      const key = inferDisplayClass(a)
+      if (!buckets.has(key)) buckets.set(key, [])
+      buckets.get(key)!.push(a)
+    }
+    return SUBGROUP_ORDER
+      .filter(k => buckets.has(k))
+      .map(k => ({ name: k, assets: buckets.get(k)! }))
+      .concat(
+        Array.from(buckets.keys())
+          .filter(k => !SUBGROUP_ORDER.includes(k))
+          .map(k => ({ name: k, assets: buckets.get(k)! }))
+      )
+  }
+
+  // Total active value across all wallets — used for "% do portfólio".
+  // Uses current_value_primary when present (already FX-converted) so the
+  // ratio is consistent across currencies.
+  const totalPortfolioValue = useMemo(() => {
+    return (assetsList ?? []).reduce((sum: number, a: Asset) => {
+      if (a.is_archived || a.sell_date) return sum
+      const v = a.current_value_primary ?? a.current_value ?? 0
+      return sum + (typeof v === 'number' ? v : 0)
+    }, 0)
+  }, [assetsList])
+
+  // Portfolio timeseries for the KPI bar (Resultado período).
+  const { data: kpiSeries } = useQuery({
+    queryKey: ['portfolio-ts-kpi', kpiPeriod.months, kpiPeriod.sinceStart],
+    queryFn: () => portfolioTimeseries.series({
+      months: kpiPeriod.months,
+      sinceStart: kpiPeriod.sinceStart,
+    }),
+    staleTime: 1000 * 60,
+  })
+
+  // TWR per asset for the Rent. TWR column. ONE call returns the map.
+  const { data: twrByAsset } = useQuery({
+    queryKey: ['portfolio-twr-by-asset', kpiPeriod.months, kpiPeriod.sinceStart],
+    queryFn: () => portfolioTimeseries.twrByAsset(
+      kpiPeriod.months, kpiPeriod.sinceStart),
+    staleTime: 1000 * 60,
+  })
+
+  const kpiResult = useMemo(() => {
+    if (!kpiSeries || kpiSeries.length < 2) return null
+    const first = kpiSeries[0]
+    const last = kpiSeries[kpiSeries.length - 1]
+    const baseFactor = 1 + (first.twr_cum ?? 0)
+    const lastFactor = 1 + (last.twr_cum ?? 0)
+    const twrPeriod = lastFactor / baseFactor - 1
+    return {
+      v_end: last.v_end ?? 0,
+      v_start: first.v_end ?? 0,
+      delta: (last.v_end ?? 0) - (first.v_end ?? 0),
+      twr_period: twrPeriod,
+      first_month: first.month,
+      last_month: last.month,
+    }
+  }, [kpiSeries])
+
   function renderAssetCard(asset: Asset) {
     const config = getTypeConfig(asset.type)
     const Icon = config.icon
@@ -586,7 +693,7 @@ export default function AssetsPage() {
     return (
       <div key={asset.id} className="border border-border rounded-xl bg-card shadow-sm overflow-hidden">
         <div
-          className="flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-muted/30 transition-colors"
+          className="flex items-center gap-6 px-5 py-4 cursor-pointer hover:bg-muted/30 transition-colors"
           onClick={() => setExpandedId(isExpanded ? null : asset.id)}
         >
           <AssetIcon
@@ -638,27 +745,83 @@ export default function AssetsPage() {
               )}
             </div>
           </div>
-          <div className="text-right shrink-0">
+          {/* Each column has a FIXED width (w-[…], not min-w-[…]) so the
+              labels and values align vertically across all rows in the
+              wallet/subgroup. */}
+          <div className="hidden md:block text-right shrink-0 w-[80px] tabular-nums">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Qtd</p>
+            <p className="text-xs font-semibold text-foreground">
+              {asset.units != null
+                ? asset.units.toLocaleString(locale, { maximumFractionDigits: 4 })
+                : '—'}
+            </p>
+          </div>
+          <div className="hidden md:block text-right shrink-0 w-[110px] tabular-nums">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Investido</p>
+            <p className="text-xs font-semibold text-foreground">
+              {asset.purchase_price != null && asset.units != null
+                ? mask(formatCurrency(asset.purchase_price * asset.units, asset.currency, locale))
+                : '—'}
+            </p>
+          </div>
+          <div className="hidden md:block text-right shrink-0 w-[180px]">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Custodiante</p>
+            <p className="text-xs font-medium text-muted-foreground truncate"
+               title={asset.custodian ?? ''}>
+              {asset.custodian || '—'}
+            </p>
+          </div>
+          <div className="hidden lg:block text-right shrink-0 w-[90px] tabular-nums">
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Rent. TWR</p>
+            {(() => {
+              const t = twrByAsset?.[asset.id]
+              if (!t) return <p className="text-xs text-muted-foreground">—</p>
+              const v = t.twr_cum
+              return (
+                <p className={`text-xs font-semibold ${
+                  v >= 0 ? 'text-emerald-600' : 'text-rose-500'
+                }`}>
+                  {mask(`${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)}
+                </p>
+              )
+            })()}
+          </div>
+          <div className="text-right shrink-0 w-[140px]">
             {asset.current_value != null ? (
               <>
                 <p className="text-sm font-bold tabular-nums text-foreground">
                   {mask(formatCurrency(asset.current_value, asset.currency, locale))}
-                  {asset.current_value_primary != null && (
-                    <span className="text-[10px] font-medium text-muted-foreground ml-1">
-                      ({mask(formatCurrency(asset.current_value_primary, userCurrency, locale))})
-                    </span>
-                  )}
                 </p>
-                {asset.gain_loss != null && (
-                  <p className={`text-xs font-medium tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                    {mask(`${asset.gain_loss >= 0 ? '+' : ''}${formatCurrency(asset.gain_loss, asset.currency, locale)}`)}
-                    {asset.gain_loss_primary != null && (
-                      <span className="text-[10px] text-muted-foreground ml-1">
-                        ({mask(formatCurrency(asset.gain_loss_primary, userCurrency, locale))})
-                      </span>
-                    )}
+                {asset.current_value_primary != null && asset.currency !== userCurrency && (
+                  <p className="text-[10px] text-muted-foreground tabular-nums">
+                    ≈ {mask(formatCurrency(asset.current_value_primary, userCurrency, locale))}
                   </p>
                 )}
+                {asset.gain_loss != null && (() => {
+                  const invested = (asset.purchase_price ?? 0) * (asset.units ?? 0)
+                  const pct = invested > 0 ? (asset.gain_loss / invested) * 100 : null
+                  return (
+                    <>
+                      <p className={`text-xs font-medium tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                        {mask(`${asset.gain_loss >= 0 ? '+' : ''}${formatCurrency(asset.gain_loss, asset.currency, locale)}`)}
+                      </p>
+                      {pct != null && (
+                        <p className={`text-[10px] tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                          ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}% P&L)
+                        </p>
+                      )}
+                    </>
+                  )
+                })()}
+                {totalPortfolioValue > 0 && (asset.current_value_primary ?? asset.current_value ?? 0) > 0 && (() => {
+                  const v = asset.current_value_primary ?? asset.current_value ?? 0
+                  const pct = (v / totalPortfolioValue) * 100
+                  return (
+                    <p className="text-[10px] text-muted-foreground tabular-nums">
+                      {pct.toFixed(2)}% do portfólio
+                    </p>
+                  )
+                })()}
               </>
             ) : (
               <p className="text-sm text-muted-foreground">—</p>
@@ -817,8 +980,32 @@ export default function AssetsPage() {
           )}
         </div>
         {!isCollapsed && walletAssets.length > 0 && (
-          <div className="space-y-2 pl-4">
-            {walletAssets.map(renderAssetCard)}
+          <div className="space-y-3 pl-4">
+            {groupByDisplayClass(walletAssets).map(({ name, assets: subAssets }) => (
+              <div key={name} className="space-y-2">
+                {/* Subgroup header — only shown when there's more than one
+                    subgroup in the wallet (otherwise it's redundant). */}
+                {groupByDisplayClass(walletAssets).length > 1 && (
+                  <div className="flex items-center justify-between px-1 pt-1 border-l-2 border-muted-foreground/20 pl-3">
+                    <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      {name}
+                      <span className="text-[10px] text-muted-foreground/70 ml-2 normal-case">
+                        ({subAssets.length})
+                      </span>
+                    </span>
+                    <span className="text-[11px] font-bold tabular-nums text-muted-foreground">
+                      {mask(formatCurrency(
+                        subAssets.reduce((sum, a) =>
+                          sum + (a.current_value_primary ?? a.current_value ?? 0), 0),
+                        userCurrency, locale))}
+                    </span>
+                  </div>
+                )}
+                <div className="space-y-2">
+                  {subAssets.map(renderAssetCard)}
+                </div>
+              </div>
+            ))}
           </div>
         )}
         {!isCollapsed && walletAssets.length === 0 && (
@@ -833,8 +1020,8 @@ export default function AssetsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        section={t('assets.title')}
-        title={t('assets.title')}
+        section={t('assetsV2.title')}
+        title={t('assetsV2.title')}
         action={
           <div className="flex items-center gap-2">
             <Button onClick={openCreateWallet} variant="outline" className="gap-1.5">
@@ -849,8 +1036,56 @@ export default function AssetsPage() {
         }
       />
 
+      {/* KPI bar: Patrimônio em hoje + Resultado (período) + período selector */}
+      <div className="bg-card rounded-xl border border-border p-5 flex flex-wrap items-center gap-x-8 gap-y-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
+            Patrimônio em {new Date().toLocaleDateString(locale)}
+          </p>
+          <p className="text-2xl font-bold tabular-nums text-foreground">
+            {mask(formatCurrency(totalPortfolioValue, userCurrency, locale))}
+          </p>
+        </div>
+        {kpiResult && (
+          <div>
+            <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
+              Resultado ({kpiPeriod.label})
+            </p>
+            <p className={`text-xl font-bold tabular-nums ${
+              kpiResult.delta >= 0 ? 'text-emerald-600' : 'text-rose-500'
+            }`}>
+              {mask(`${kpiResult.delta >= 0 ? '+' : ''}${formatCurrency(kpiResult.delta, userCurrency, locale)}`)}
+              <span className="text-sm font-medium ml-2">
+                ({kpiResult.twr_period >= 0 ? '+' : ''}{(kpiResult.twr_period * 100).toFixed(2)}%)
+              </span>
+            </p>
+          </div>
+        )}
+        <div className="ml-auto flex items-center rounded-lg border border-border bg-muted/30 overflow-hidden">
+          {([
+            { label: '30d', months: 1, sinceStart: false },
+            { label: '6M',  months: 6, sinceStart: false },
+            { label: '1A',  months: 12, sinceStart: false },
+            { label: '2A',  months: 24, sinceStart: false },
+            { label: 'Tudo', months: 12, sinceStart: true },
+          ] as const).map(p => (
+            <button
+              key={p.label}
+              onClick={() => setKpiPeriod({ ...p })}
+              className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                kpiPeriod.label === p.label
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Portfolio Stacked Area Chart */}
-      {portfolioData && portfolioData.trend.length > 0 && (
+      {portfolioData && portfolioData.trend.length > 1 && (
         <PortfolioChart
           data={portfolioData}
           wallets={sortedWallets}
@@ -872,13 +1107,31 @@ export default function AssetsPage() {
               {sortedWallets.map(w => renderWalletSection(w, assetsByGroup.get(w.id) ?? []))}
 
               {ungroupedAssets.length > 0 && (
-                <div className="space-y-2">
+                <div className="space-y-3">
                   <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
                     {sortedWallets.length > 0 ? t('assets.ungrouped') : t('assets.activeAssets')}
                   </h3>
-                  <div className="space-y-2">
-                    {ungroupedAssets.map(renderAssetCard)}
-                  </div>
+                  {groupByDisplayClass(ungroupedAssets).map(({ name, assets: subAssets }) => (
+                    <div key={name} className="space-y-2">
+                      {groupByDisplayClass(ungroupedAssets).length > 1 && (
+                        <div className="flex items-center justify-between px-1 pt-1 border-l-2 border-muted-foreground/20 pl-3">
+                          <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                            {name}
+                            <span className="text-[10px] text-muted-foreground/70 ml-2 normal-case">
+                              ({subAssets.length})
+                            </span>
+                          </span>
+                          <span className="text-[11px] font-bold tabular-nums text-muted-foreground">
+                            {mask(formatCurrency(
+                              subAssets.reduce((sum, a) =>
+                                sum + (a.current_value_primary ?? a.current_value ?? 0), 0),
+                              userCurrency, locale))}
+                          </span>
+                        </div>
+                      )}
+                      <div className="space-y-2">{subAssets.map(renderAssetCard)}</div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -947,6 +1200,21 @@ export default function AssetsPage() {
                   ))}
                 </select>
               </div>
+            </div>
+
+            {/* Asset class — explicit taxonomy used by Investments dashboard */}
+            <div className="space-y-2">
+              <Label>Classe do ativo</Label>
+              <select
+                className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
+                value={formAssetClass}
+                onChange={e => setFormAssetClass(e.target.value)}
+              >
+                <option value="">— selecionar —</option>
+                {ASSET_CLASS_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Valuation Method — locked on edit */}
@@ -1622,15 +1890,32 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
 
   const [valueAmount, setValueAmount] = useState('')
   const [valueDate, setValueDate] = useState(new Date().toISOString().slice(0, 10))
+  const [priceRange, setPriceRange] = useState<'1mo' | '3mo' | '6mo' | '1y' | '2y' | '5y' | 'max'>('1y')
 
-  const { data: values, isLoading: valuesLoading } = useQuery({
-    queryKey: ['asset-values', assetId],
-    queryFn: () => assets.values(assetId),
-  })
+  // Transaction form state (BUY/SELL/DIVIDEND/JCP/RENDIMENTO/RESGATE)
+  const [txDate, setTxDate] = useState(new Date().toISOString().slice(0, 10))
+  const [txType, setTxType] = useState<string>('BUY')
+  const [txQty, setTxQty] = useState('')
+  const [txPrice, setTxPrice] = useState('')
+  const [txValue, setTxValue] = useState('')
+  const [txNotes, setTxNotes] = useState('')
+
+  // The asset-values list query was removed when we hid the
+  // "Histórico de Valores" section. The trend query below still feeds
+  // the legacy chart for manual assets.
 
   const { data: trend } = useQuery({
     queryKey: ['asset-trend', assetId],
     queryFn: () => assets.valueTrend(assetId),
+    enabled: valuationMethod === 'manual',  // only used for manual assets fallback chart
+  })
+
+  // For market_priced assets: live cotação chart from Yahoo via backend.
+  const { data: priceHistory, isLoading: priceHistoryLoading } = useQuery({
+    queryKey: ['asset-price-history', assetId, priceRange],
+    queryFn: () => assets.priceHistory(assetId, priceRange),
+    enabled: valuationMethod === 'market_price',
+    staleTime: 1000 * 60 * 30,
   })
 
   // Build full trend: purchase point + stored values
@@ -1648,21 +1933,7 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
     return result
   }, [trend, purchasePrice, purchaseDate])
 
-  // Build value history with purchase as the initial entry
-  const valuesWithPurchase = useMemo(() => {
-    if (!values) return []
-    if (!purchasePrice || !purchaseDate) return values
-    const hasPurchaseValue = values.some(v => v.date === purchaseDate && v.amount === purchasePrice)
-    if (hasPurchaseValue) return values
-    const purchaseEntry: AssetValue = {
-      id: 'purchase',
-      asset_id: assetId,
-      amount: purchasePrice,
-      date: purchaseDate,
-      source: 'purchase',
-    }
-    return [...values, purchaseEntry]
-  }, [values, purchasePrice, purchaseDate, assetId])
+  // valuesWithPurchase removed when we hid the Histórico de Valores section.
 
   const addValueMutation = useMutation({
     mutationFn: ({ assetId: id, ...data }: { assetId: string; amount: number; date: string }) =>
@@ -1671,7 +1942,6 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
       queryClient.refetchQueries({ queryKey: ['assets'] })
       queryClient.refetchQueries({ queryKey: ['asset-values', assetId] })
       queryClient.refetchQueries({ queryKey: ['asset-trend', assetId] })
-      queryClient.refetchQueries({ queryKey: ['portfolio-trend'] })
       queryClient.refetchQueries({ queryKey: ['dashboard'] })
       setValueAmount('')
       toast.success(t('assets.valueAdded'))
@@ -1679,18 +1949,65 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
     onError: () => toast.error(t('common.error')),
   })
 
-  const deleteValueMutation = useMutation({
-    mutationFn: (valueId: string) => assets.deleteValue(valueId),
+  // deleteValueMutation removed with the Histórico de Valores section.
+
+  const { data: transactions, isLoading: transactionsLoading } = useQuery({
+    queryKey: ['asset-transactions', assetId],
+    queryFn: () => assets.transactions(assetId),
+  })
+
+  const invalidateAfterTx = () => {
+    queryClient.refetchQueries({ queryKey: ['asset-transactions', assetId] })
+    queryClient.refetchQueries({ queryKey: ['portfolio-timeseries'] })
+    queryClient.refetchQueries({ queryKey: ['assets'] })
+  }
+
+  const addTxMutation = useMutation({
+    mutationFn: (tx: {
+      date: string; type: string;
+      qty?: number | null; price?: number | null; value?: number | null;
+      notes?: string | null;
+    }) => assets.addTransaction(assetId, tx),
     onSuccess: () => {
-      queryClient.refetchQueries({ queryKey: ['assets'] })
-      queryClient.refetchQueries({ queryKey: ['asset-values', assetId] })
-      queryClient.refetchQueries({ queryKey: ['asset-trend', assetId] })
-      queryClient.refetchQueries({ queryKey: ['portfolio-trend'] })
-      queryClient.refetchQueries({ queryKey: ['dashboard'] })
-      toast.success(t('assets.valueDeleted'))
+      setTxQty(''); setTxPrice(''); setTxValue(''); setTxNotes('')
+      invalidateAfterTx()
+      toast.success('Transação registrada')
     },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg || 'Falha ao registrar transação')
+    },
+  })
+
+  const deleteTxMutation = useMutation({
+    mutationFn: (txId: string) => assets.deleteTransaction(txId),
+    onSuccess: () => { invalidateAfterTx(); toast.success('Transação removida') },
     onError: () => toast.error(t('common.error')),
   })
+
+  function submitTransaction() {
+    const qty = txQty ? parseFloat(txQty) : null
+    const price = txPrice ? parseFloat(txPrice) : null
+    let value = txValue ? parseFloat(txValue) : null
+    // For BUY/SELL, derive value from qty * price if not provided
+    if (!value && qty && price) value = qty * price
+    if (!value && (txType === 'DIVIDEND' || txType === 'JCP' || txType === 'RENDIMENTO' || txType === 'RESGATE')) {
+      toast.error('Informe o valor recebido')
+      return
+    }
+    if (!value && (txType === 'BUY' || txType === 'SELL')) {
+      toast.error('Informe quantidade e preço (ou valor total)')
+      return
+    }
+    addTxMutation.mutate({
+      date: txDate,
+      type: txType,
+      qty,
+      price,
+      value,
+      notes: txNotes || null,
+    })
+  }
 
   // Determine chart color based on trend direction
   const trendIsPositive = trendWithPurchase.length >= 2
@@ -1698,12 +2015,107 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
     : true
   const chartColor = trendIsPositive ? '#10B981' : '#F43F5E'
 
+  // Determine the price chart's color from its own first/last close (so the
+  // line is green only when the cotação rose during the selected range).
+  const priceData = priceHistory?.data ?? []
+  const priceIsPositive = priceData.length >= 2
+    ? priceData[priceData.length - 1].close >= priceData[0].close
+    : true
+  const priceColor = priceIsPositive ? '#10B981' : '#F43F5E'
+
   return (
     <div className="border-t border-border px-5 py-5 space-y-5 bg-muted/5">
-      {/* Value Trend Chart */}
-      {trendWithPurchase.length > 1 && (
+      {/* Cotação chart — for market_priced assets, fetch daily closes from
+          Yahoo via backend. For manual assets (CDB / Tesouro), fall back to
+          the user's value trend (the asset has no public quote). */}
+      {valuationMethod === 'market_price' ? (
         <div>
-          <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-3">{t('assets.valueTrend')}</p>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+              Cotação {priceHistory?.ticker ? `(${priceHistory.ticker})` : ''}
+            </p>
+            <div className="flex items-center rounded-lg border border-border bg-card overflow-hidden">
+              {(['1mo', '3mo', '6mo', '1y', '2y', '5y', 'max'] as const).map(r => (
+                <button
+                  key={r}
+                  onClick={() => setPriceRange(r)}
+                  className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                    priceRange === r
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                  }`}
+                >
+                  {r === 'max' ? 'Tudo' : r.toUpperCase().replace('MO', 'M').replace('Y', 'A')}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="h-44 -mx-1">
+            {priceHistoryLoading ? (
+              <Skeleton className="h-full w-full rounded" />
+            ) : priceData.length > 1 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={priceData} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id={`pgradient-${assetId}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={priceColor} stopOpacity={0.18} />
+                      <stop offset="100%" stopColor={priceColor} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false}
+                    stroke="var(--border)" strokeOpacity={0.5} />
+                  <XAxis dataKey="date"
+                    tick={{ fontSize: 10, fill: 'var(--muted-foreground)' }}
+                    axisLine={false} tickLine={false}
+                    tickFormatter={(v: string) =>
+                      new Date(v + 'T00:00:00').toLocaleDateString(loc,
+                        { month: 'short', year: '2-digit' })}
+                    minTickGap={40}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: 'var(--muted-foreground)' }}
+                    axisLine={false} tickLine={false} width={56}
+                    domain={['auto', 'auto']}
+                    tickFormatter={(v: number) =>
+                      v >= 1000 ? v.toLocaleString(loc, { maximumFractionDigits: 0 })
+                        : v.toFixed(2)}
+                  />
+                  <RechartsTooltip
+                    formatter={(value: number | undefined) => [
+                      formatCurrency(value ?? 0,
+                        priceHistory?.currency || currency, loc),
+                      'Cotação',
+                    ]}
+                    labelFormatter={(label: unknown) =>
+                      new Date(String(label) + 'T00:00:00').toLocaleDateString(
+                        loc, { day: 'numeric', month: 'long', year: 'numeric' })}
+                    contentStyle={{
+                      background: 'var(--card)', color: 'var(--foreground)',
+                      border: '1px solid var(--border)',
+                      borderRadius: '0.75rem', fontSize: '12px',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+                    }}
+                  />
+                  <Area type="monotone" dataKey="close" stroke={priceColor}
+                    strokeWidth={2} fill={`url(#pgradient-${assetId})`}
+                    dot={false}
+                    activeDot={{ r: 4, strokeWidth: 2, fill: 'var(--card)',
+                      stroke: priceColor }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="text-xs text-muted-foreground py-12 text-center">
+                Sem cotação histórica disponível
+              </p>
+            )}
+          </div>
+        </div>
+      ) : trendWithPurchase.length > 1 && (
+        <div>
+          <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+            Evolução de valor
+          </p>
           <div className="h-44 -mx-1">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={trendWithPurchase} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
@@ -1714,18 +2126,14 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" strokeOpacity={0.5} />
-                <XAxis
-                  dataKey="date"
+                <XAxis dataKey="date"
                   tick={{ fontSize: 10, fill: 'var(--muted-foreground)' }}
-                  axisLine={false}
-                  tickLine={false}
+                  axisLine={false} tickLine={false}
                   tickFormatter={(v: string) => new Date(v + 'T00:00:00').toLocaleDateString(loc, { month: 'short', year: '2-digit' })}
                 />
                 <YAxis
                   tick={{ fontSize: 10, fill: 'var(--muted-foreground)' }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={56}
+                  axisLine={false} tickLine={false} width={56}
                   domain={['dataMin', 'dataMax']}
                   tickFormatter={(v: number) => {
                     const abs = Math.abs(v)
@@ -1737,23 +2145,17 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
                   }}
                 />
                 <RechartsTooltip
-                  formatter={(value: number | undefined) => [mask(formatCurrency(value ?? 0, currency, loc)), t('assets.currentValue')]}
+                  formatter={(value: number | undefined) => [mask(formatCurrency(value ?? 0, currency, loc)), 'Valor']}
                   labelFormatter={(label: unknown) => new Date(String(label) + 'T00:00:00').toLocaleDateString(loc, { day: 'numeric', month: 'long', year: 'numeric' })}
                   contentStyle={{
-                    background: 'var(--card)',
-                    color: 'var(--foreground)',
+                    background: 'var(--card)', color: 'var(--foreground)',
                     border: '1px solid var(--border)',
-                    borderRadius: '0.75rem',
-                    fontSize: '12px',
+                    borderRadius: '0.75rem', fontSize: '12px',
                     boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
                   }}
                 />
-                <Area
-                  type="monotone"
-                  dataKey="amount"
-                  stroke={chartColor}
-                  strokeWidth={2}
-                  fill={`url(#gradient-${assetId})`}
+                <Area type="monotone" dataKey="amount" stroke={chartColor}
+                  strokeWidth={2} fill={`url(#gradient-${assetId})`}
                   dot={false}
                   activeDot={{ r: 4, strokeWidth: 2, fill: 'var(--card)', stroke: chartColor }}
                 />
@@ -1799,58 +2201,155 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
         </Button>
       </div>}
 
-      {/* Value History */}
+      {/* Transactions — BUY / SELL / DIVIDEND / JCP / RENDIMENTO / RESGATE */}
       <div>
-        <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('assets.valueHistory')}</p>
-        {valuesLoading ? (
-          <Skeleton className="h-20 w-full rounded-lg" />
-        ) : valuesWithPurchase.length > 0 ? (
-          <div className="rounded-lg border border-border overflow-hidden divide-y divide-border">
-            {valuesWithPurchase.map((v: AssetValue, idx: number) => {
-              const isPurchase = v.source === 'purchase'
-              // Calculate change from previous entry (next in array since sorted desc)
-              const prev = valuesWithPurchase[idx + 1]
-              const change = prev ? v.amount - prev.amount : null
-              const changePct = prev && prev.amount !== 0 ? (change! / prev.amount) * 100 : null
+        <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+          Transações
+        </p>
+        <p className="text-[11px] text-muted-foreground mb-3">
+          Registre compras, vendas e proventos para que a aba Investimentos
+          calcule o TWR automaticamente. As transações alimentam o Modified
+          Dietz mensal — o gráfico atualiza após cada lançamento.
+        </p>
 
+        {/* Add transaction form */}
+        <div className="grid grid-cols-12 gap-2 items-end mb-3">
+          <div className="col-span-3">
+            <Label className="text-[11px] text-muted-foreground">Data</Label>
+            <DatePickerInput value={txDate} onChange={setTxDate} />
+          </div>
+          <div className="col-span-3">
+            <Label className="text-[11px] text-muted-foreground">Tipo</Label>
+            <select
+              className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-2 py-2 rounded-lg text-foreground text-sm w-full h-9"
+              value={txType}
+              onChange={e => setTxType(e.target.value)}
+            >
+              <option value="BUY">Compra</option>
+              <option value="SELL">Venda</option>
+              <option value="DIVIDEND">Dividendo</option>
+              <option value="JCP">JCP</option>
+              <option value="RENDIMENTO">Rendimento (FII)</option>
+              <option value="RESGATE">Resgate</option>
+            </select>
+          </div>
+          {(txType === 'BUY' || txType === 'SELL') && (
+            <>
+              <div className="col-span-2">
+                <Label className="text-[11px] text-muted-foreground">Qtd.</Label>
+                <Input
+                  type="number" step="any"
+                  value={txQty} onChange={e => setTxQty(e.target.value)}
+                  placeholder="0" className="h-9 text-sm"
+                />
+              </div>
+              <div className="col-span-2">
+                <Label className="text-[11px] text-muted-foreground">Preço unit.</Label>
+                <Input
+                  type="number" step="any"
+                  value={txPrice} onChange={e => setTxPrice(e.target.value)}
+                  placeholder="0.00" className="h-9 text-sm"
+                />
+              </div>
+            </>
+          )}
+          <div className={(txType === 'BUY' || txType === 'SELL') ? 'col-span-2' : 'col-span-6'}>
+            <Label className="text-[11px] text-muted-foreground">
+              Valor total {(txType === 'BUY' || txType === 'SELL') ? '(opcional)' : ''}
+            </Label>
+            <Input
+              type="number" step="any"
+              value={txValue} onChange={e => setTxValue(e.target.value)}
+              placeholder="0.00" className="h-9 text-sm"
+            />
+          </div>
+        </div>
+        <div className="flex items-end gap-2 mb-4">
+          <div className="flex-1">
+            <Label className="text-[11px] text-muted-foreground">Nota (opcional)</Label>
+            <Input
+              value={txNotes} onChange={e => setTxNotes(e.target.value)}
+              placeholder="ex: corretagem, observação..."
+              className="h-9 text-sm"
+            />
+          </div>
+          <Button
+            size="sm"
+            onClick={submitTransaction}
+            disabled={addTxMutation.isPending}
+          >
+            <Plus size={14} className="mr-1" />
+            Registrar
+          </Button>
+        </div>
+
+        {/* Transactions list */}
+        {transactionsLoading ? (
+          <Skeleton className="h-16 w-full rounded-lg" />
+        ) : transactions && transactions.length > 0 ? (
+          <div className="rounded-lg border border-border overflow-hidden divide-y divide-border max-h-72 overflow-y-auto">
+            {[...transactions].sort((a, b) => b.date.localeCompare(a.date)).map(tx => {
+              const isInflow = tx.type === 'SELL' || tx.type === 'DIVIDEND'
+                || tx.type === 'JCP' || tx.type === 'RENDIMENTO'
+                || tx.type === 'RESGATE'
               return (
-                <div key={v.id} className={`flex items-center justify-between py-2 px-3 transition-colors ${isPurchase ? 'bg-primary/5' : 'hover:bg-muted/30'}`}>
+                <div key={tx.id} className="flex items-center justify-between py-2 px-3 hover:bg-muted/30 transition-colors">
                   <div className="flex items-center gap-3 min-w-0">
-                    <span className="text-sm tabular-nums font-semibold text-foreground">
-                      {mask(formatCurrency(v.amount, currency, loc))}
+                    <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
+                      isInflow ? 'border-emerald-500/40 text-emerald-700'
+                        : tx.type === 'BUY' ? 'border-blue-500/40 text-blue-700'
+                          : ''
+                    }`}>
+                      {tx.type}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {new Date(tx.date + 'T00:00:00').toLocaleDateString(loc)}
                     </span>
-                    {change != null && (
-                      <span className={`text-[11px] tabular-nums font-medium ${change >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                        {change >= 0 ? '+' : ''}{mask(formatCurrency(change, currency, loc))}
-                        {changePct != null && ` (${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%)`}
+                    {tx.qty != null && (
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        qty {tx.qty}
+                        {tx.price != null && ` @ ${formatCurrency(tx.price, currency, loc)}`}
+                      </span>
+                    )}
+                    {tx.notes && (
+                      <span className="text-[11px] text-muted-foreground italic truncate max-w-[200px]">
+                        {tx.notes}
                       </span>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <Badge variant={isPurchase ? 'default' : 'outline'} className={`text-[10px] px-1.5 py-0 ${isPurchase ? 'bg-primary/15 text-primary border-primary/30' : ''}`}>
-                      {t(`assets.source${v.source.charAt(0).toUpperCase() + v.source.slice(1)}`)}
-                    </Badge>
-                    <span className="text-[11px] text-muted-foreground tabular-nums">
-                      {new Date(v.date + 'T00:00:00').toLocaleDateString(loc)}
+                    <span className={`text-sm tabular-nums font-semibold ${
+                      isInflow ? 'text-emerald-600' : 'text-foreground'
+                    }`}>
+                      {tx.value != null ? mask(formatCurrency(tx.value, currency, loc)) : '—'}
                     </span>
-                    {valuationMethod === 'manual' && v.source === 'manual' && (
-                      <button
-                        onClick={() => deleteValueMutation.mutate(v.id)}
-                        className="p-1 rounded text-muted-foreground/40 hover:text-rose-600 transition-colors"
-                        disabled={deleteValueMutation.isPending}
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    )}
+                    <button
+                      onClick={() => {
+                        if (confirm('Remover esta transação?')) {
+                          deleteTxMutation.mutate(tx.id)
+                        }
+                      }}
+                      className="p-1 rounded text-muted-foreground/40 hover:text-rose-600 transition-colors"
+                      disabled={deleteTxMutation.isPending}
+                    >
+                      <Trash2 size={12} />
+                    </button>
                   </div>
                 </div>
               )
             })}
           </div>
         ) : (
-          <p className="text-xs text-muted-foreground py-3 text-center">{t('dashboard.noData')}</p>
+          <p className="text-xs text-muted-foreground py-3 text-center">
+            Nenhuma transação registrada
+          </p>
         )}
       </div>
+
+      {/* Histórico de Valores intentionally hidden — cotações individuais
+          não são informação relevante pro usuário (vinham do import inicial
+          ou do refresh diário do Yahoo). O gráfico de cotação acima e a
+          seção Transações já cobrem tudo que importa. */}
     </div>
   )
 }
