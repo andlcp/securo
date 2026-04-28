@@ -208,12 +208,16 @@ async def get_timeseries(session: AsyncSession, user: User,
                          asset_ids: Optional[list[uuid.UUID]] = None,
                          asset_classes: Optional[list[str]] = None,
                          group_ids: Optional[list[uuid.UUID]] = None,
+                         granularity: str = "monthly",
                          ) -> list[dict]:
     """Return [{month_end, v_end, cashflow, income, return_month, twr_cum}]
     for the (optionally filtered) portfolio.
 
     months: window in months ending today (default 12)
     since_start: include from earliest data point
+    granularity: "monthly" (one row per month-end) or "daily" (one row per
+        calendar day in the window). Daily is useful for short windows
+        (1–3 months) where a monthly TWR has too few points.
     """
     user_ccy = await _user_primary_currency(session, user)
     assets = await _load_assets(session, user.id, asset_ids, asset_classes,
@@ -239,8 +243,8 @@ async def get_timeseries(session: AsyncSession, user: User,
             y -= 1
         start_y, start_m = y, m
 
-    # Pull all AssetTransactions in window for these assets, indexed by
-    # (asset_id, ym).
+    # Pull all AssetTransactions for these assets. Index by either
+    # year-month (monthly mode) or exact date (daily mode).
     asset_ids_use = [a.id for a in assets]
     asset_by_id = {a.id: a for a in assets}
     cf_idx: dict[tuple[uuid.UUID, str], dict] = defaultdict(
@@ -260,8 +264,8 @@ async def get_timeseries(session: AsyncSession, user: User,
             continue
         rate = await _fx_rate(session, a.currency, user_ccy, tx.date)
         amount = float(tx.value) * rate
-        ym = tx.date.strftime("%Y-%m")
-        bucket = cf_idx[(a.id, ym)]
+        key = tx.date.isoformat() if granularity == "daily" else tx.date.strftime("%Y-%m")
+        bucket = cf_idx[(a.id, key)]
         if tx.type in _BUY_TYPES:
             bucket["buy"] += amount
         elif tx.type in _SELL_TYPES:
@@ -311,10 +315,78 @@ async def get_timeseries(session: AsyncSession, user: User,
             return float(asset.last_price) * float(asset.units)
         return latest_amount
 
-    # Walk months
     out: list[dict] = []
     cum = 1.0
 
+    if granularity == "daily":
+        # Daily mode: walk one row per calendar day. Useful for short
+        # windows (1M, 3M) where monthly granularity gives too few points.
+        start_d = date(start_y, start_m, 1)
+        # Cap to window months back from today (not start of month) so
+        # "1M" really means last ~30 days, not "from the 1st of last month".
+        if not since_start and months:
+            start_d = max(start_d, today_d - timedelta(days=int(months) * 30))
+
+        # Seed prev_v_end with the portfolio value the day before window start.
+        prev_d = start_d - timedelta(days=1)
+        prev_v_end = 0.0
+        for a in assets:
+            v_native = value_at_for_asset(a, prev_d)
+            if v_native == 0:
+                continue
+            rate = await _fx_rate(session, a.currency, user_ccy, prev_d)
+            prev_v_end += v_native * rate
+
+        d = start_d
+        while d <= today_d:
+            v_end_total = 0.0
+            per_class: dict[str, float] = defaultdict(float)
+            for a in assets:
+                v_native = value_at_for_asset(a, d)
+                if v_native == 0:
+                    continue
+                rate = await _fx_rate(session, a.currency, user_ccy, d)
+                v_user = v_native * rate
+                v_end_total += v_user
+                per_class[a.asset_class or "OUTRO"] += v_user
+
+            iso = d.isoformat()
+            cf_buy = cf_sell = inc = 0.0
+            for a in assets:
+                b = cf_idx.get((a.id, iso))
+                if b:
+                    cf_buy += b["buy"]
+                    cf_sell += b["sell"]
+                    inc += b["income"]
+            cf = cf_buy - cf_sell
+
+            denom = prev_v_end + 0.5 * cf
+            if denom <= 1e-3:
+                r_d: Optional[float] = 0.0 if (v_end_total + inc) <= 1e-3 else None
+            else:
+                r_d = (v_end_total + inc - prev_v_end - cf) / denom
+
+            if r_d is not None:
+                # Per-day cap is tighter than monthly: ±50%/day handles even
+                # extreme single-day moves and clips obvious data glitches.
+                cum *= (1.0 + max(min(r_d, 0.5), -0.5))
+
+            out.append({
+                "month_end": iso,
+                "month": d.strftime("%Y-%m"),
+                "v_end": round(v_end_total, 2),
+                "cashflow": round(cf, 2),
+                "income": round(inc, 2),
+                "return_month": round(r_d, 6) if r_d is not None else None,
+                "twr_cum": round(cum - 1.0, 6),
+                "by_class": {k: round(v, 2) for k, v in per_class.items()},
+            })
+            prev_v_end = v_end_total
+            d += timedelta(days=1)
+
+        return out
+
+    # Monthly mode (default): walk one row per month-end.
     # Seed prev_v_end with the portfolio value at the month-end *before* the
     # window starts. Otherwise, the first month's Modified Dietz return uses
     # prev_v_end=0 even though the user already owned assets, which inflates

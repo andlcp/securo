@@ -67,6 +67,7 @@ async def get_timeseries(
     asset_ids: Optional[str] = Query(None, description="Comma-separated asset UUIDs"),
     asset_classes: Optional[str] = Query(None, description="Comma-separated class codes"),
     group_ids: Optional[str] = Query(None, description="Comma-separated AssetGroup UUIDs"),
+    granularity: str = Query("monthly", regex="^(monthly|daily)$"),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
@@ -77,6 +78,7 @@ async def get_timeseries(
         asset_ids=_parse_uuid_csv(asset_ids),
         asset_classes=_parse_csv(asset_classes),
         group_ids=_parse_uuid_csv(group_ids),
+        granularity=granularity,
     )
 
 

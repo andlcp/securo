@@ -692,6 +692,7 @@ export const portfolioTimeseries = {
   series: async (params: {
     months?: number; sinceStart?: boolean;
     assetIds?: string[]; assetClasses?: string[]; groupIds?: string[];
+    granularity?: 'monthly' | 'daily';
   } = {}): Promise<PortfolioPoint[]> => {
     const q: Record<string, unknown> = {}
     if (params.months) q.months = params.months
@@ -699,6 +700,7 @@ export const portfolioTimeseries = {
     if (params.assetIds && params.assetIds.length) q.asset_ids = params.assetIds.join(',')
     if (params.assetClasses && params.assetClasses.length) q.asset_classes = params.assetClasses.join(',')
     if (params.groupIds && params.groupIds.length) q.group_ids = params.groupIds.join(',')
+    if (params.granularity) q.granularity = params.granularity
     const { data } = await api.get('/portfolio/timeseries', { params: q })
     return data
   },

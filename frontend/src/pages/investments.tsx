@@ -174,11 +174,16 @@ function timeseriesToChartData(
   bench: BenchmarkData | undefined,
   windowMonths: number,
   sinceStart: boolean,
+  granularity: 'monthly' | 'daily' = 'monthly',
 ): MergedRow[] {
   if (!points || points.length === 0) return []
 
   // 1. Slice the portfolio series to the requested window.
-  const sliced = sinceStart ? points : points.slice(-windowMonths - 1)
+  // Daily series already comes scoped to the window from the backend;
+  // only the monthly mode benefits from a tail slice here (defensive).
+  const sliced = (sinceStart || granularity === 'daily')
+    ? points
+    : points.slice(-windowMonths - 1)
   if (sliced.length === 0) return []
 
   // 2. Build a row per month_end with TWR (rebased to 0 % at first row).
@@ -319,13 +324,19 @@ export default function InvestmentsPage() {
     () => Array.from(selectedGroups),
     [selectedGroups]
   )
+  // Use daily granularity for short windows so the chart has enough points
+  // to actually show movement. Long windows stay monthly (one row per
+  // month-end) to keep the response size and computation reasonable.
+  const granularity: 'monthly' | 'daily' = (!sinceStart && months <= 3) ? 'daily' : 'monthly'
+
   const { data: tsData, isLoading: tsLoading } = useQuery<PortfolioPoint[]>({
-    queryKey: ['portfolio-timeseries', months, sinceStart, classesParam, groupsParam],
+    queryKey: ['portfolio-timeseries', months, sinceStart, classesParam, groupsParam, granularity],
     queryFn: () => portfolioTimeseries.series({
       months,
       sinceStart,
       assetClasses: classesParam,
       groupIds: groupsParam,
+      granularity,
     }),
     staleTime: 1000 * 60,
   })
@@ -384,14 +395,14 @@ export default function InvestmentsPage() {
     // Fall back to the imported portfolio_snapshots only if the user has no
     // assets yet (shouldn't happen after migration, but defensive).
     if (tsData && tsData.length > 0) {
-      return timeseriesToChartData(tsData, benchmarkData, months, sinceStart)
+      return timeseriesToChartData(tsData, benchmarkData, months, sinceStart, granularity)
     }
     if (hasSnapshots && snapshots) {
       return snapshotsToChartData(snapshots, months, sinceStart)
     }
     if (!benchmarkData) return []
     return mergeSeries(benchmarkData.cdi, benchmarkData.ibov, benchmarkData.sp500)
-  }, [tsData, benchmarkData, hasSnapshots, snapshots, months, sinceStart])
+  }, [tsData, benchmarkData, hasSnapshots, snapshots, months, sinceStart, granularity])
 
   // Latest snapshot — used to show TWR badges from imported data.
   const latestSnap = hasSnapshots && snapshots ? snapshots[snapshots.length - 1] : null
@@ -465,7 +476,7 @@ export default function InvestmentsPage() {
               {importing ? 'Importando…' : 'Importar TWR (CSV)'}
             </button>
             <div className="flex items-center rounded-lg border border-border bg-card overflow-hidden">
-              {([3, 6, 12, 24] as const).map(m => (
+              {([1, 3, 6, 12, 24] as const).map(m => (
                 <button
                   key={m}
                   onClick={() => { setMonths(m); setSinceStart(false) }}
