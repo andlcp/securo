@@ -196,37 +196,52 @@ function timeseriesToChartData(
     }
   })
 
-  // 3. Merge benchmark series by date label. Each benchmark is rebased to
-  //    its own start-of-window value, so all lines start at 0%.
+  // 3. Merge benchmark series into portfolio rows using as-of lookup.
+  //    Benchmark series are daily (business days only), but portfolio rows
+  //    are calendar month-ends — sometimes weekends/holidays. For each row
+  //    we take the LATEST benchmark value at-or-before that date, then
+  //    rebase against the as-of value at the first row so lines start at 0%.
   if (bench) {
-    const rebaseSeries = (series: BenchmarkPoint[]) => {
-      // Keep only points whose date is between rows[0] and rows[last].
-      const startKey = rows[0]?._s
-      const endKey = rows[rows.length - 1]?._s
-      if (!startKey || !endKey) return new Map<string, number>()
-      const filtered = series.filter(p => {
-        const k = parseDateKey(p.date)
-        return k >= startKey && k <= endKey
-      })
-      if (filtered.length === 0) return new Map<string, number>()
-      // Each benchmark series stores cumulative % since its own start.
-      // To rebase to the chart window, divide each (1 + v/100) by the
-      // first value's (1 + v/100). Output back as %.
-      const baseFactor = 1 + filtered[0].value / 100
-      return new Map(
-        filtered.map(p => {
-          const f = 1 + p.value / 100
-          return [p.date, (f / baseFactor - 1) * 100]
-        })
-      )
+    // Sort benchmark series by date key once (input is already chronological,
+    // but sort defensively).
+    const indexSeries = (series: BenchmarkPoint[]) =>
+      series
+        .map(p => ({ k: parseDateKey(p.date), v: p.value }))
+        .sort((a, b) => (a.k < b.k ? -1 : a.k > b.k ? 1 : 0))
+
+    const valueAsOf = (idx: { k: string; v: number }[], target: string): number | null => {
+      // Last entry with k <= target. Linear walk is fine — chart has at most
+      // ~7000 daily points (20+ years), and rows is ≤ a few hundred months.
+      let last: number | null = null
+      for (const p of idx) {
+        if (p.k > target) break
+        last = p.v
+      }
+      return last
     }
-    const cdiMap = rebaseSeries(bench.cdi)
-    const ibovMap = rebaseSeries(bench.ibov)
-    const sp500Map = rebaseSeries(bench.sp500)
+
+    const cdiIdx = indexSeries(bench.cdi)
+    const ibovIdx = indexSeries(bench.ibov)
+    const sp500Idx = indexSeries(bench.sp500)
+
+    const baseKey = rows[0]._s
+    const cdiBase = valueAsOf(cdiIdx, baseKey)
+    const ibovBase = valueAsOf(ibovIdx, baseKey)
+    const sp500Base = valueAsOf(sp500Idx, baseKey)
+
+    const rebaseAt = (idx: { k: string; v: number }[], base: number | null, key: string): number | undefined => {
+      if (base == null) return undefined
+      const v = valueAsOf(idx, key)
+      if (v == null) return undefined
+      const f = 1 + v / 100
+      const bf = 1 + base / 100
+      return (f / bf - 1) * 100
+    }
+
     for (const r of rows) {
-      r.cdi = cdiMap.get(r.date)
-      r.ibov = ibovMap.get(r.date)
-      r.sp500 = sp500Map.get(r.date)
+      r.cdi = rebaseAt(cdiIdx, cdiBase, r._s)
+      r.ibov = rebaseAt(ibovIdx, ibovBase, r._s)
+      r.sp500 = rebaseAt(sp500Idx, sp500Base, r._s)
     }
   }
   return rows
@@ -265,6 +280,7 @@ export default function InvestmentsPage() {
   const [sinceStart, setSinceStart] = useState(false)
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
   const [selectedClasses, setSelectedClasses] = useState<Set<AssetClass>>(new Set())
+  const [visibleBenchmarks, setVisibleBenchmarks] = useState<Set<'cdi' | 'ibov' | 'sp500'>>(new Set(['cdi']))
   const [importing, setImporting] = useState(false)
   const [importMessage, setImportMessage] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -656,22 +672,45 @@ export default function InvestmentsPage() {
         <div className="px-5 pt-5 pb-2 flex flex-wrap items-center gap-x-5 gap-y-2">
           <p className="text-sm font-semibold text-foreground">{t('investments.benchmarks')}</p>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 ml-auto">
-            {[
-              ...((tsData && tsData.length > 0) || hasSnapshots ? [
-                { label: 'TWR Carteira', color: TWR_COLOR, dashed: false },
-              ] : []),
-              { label: 'CDI', color: CDI_COLOR, dashed: false },
-              { label: 'IBOV', color: IBOV_COLOR, dashed: false },
-              { label: 'S&P 500', color: SP500_COLOR, dashed: false },
-              ...((tsData && tsData.length > 0) || hasSnapshots ? []
-                : portfolioRefLines.map(rl => ({ label: rl.label, color: rl.color, dashed: true }))),
-            ].map(item => (
-              <div key={item.label} className="flex items-center gap-1.5">
+            {((tsData && tsData.length > 0) || hasSnapshots) && (
+              <div className="flex items-center gap-1.5">
+                <div className="w-5 border-t-2" style={{ borderColor: TWR_COLOR }} />
+                <span className="text-[11px] text-muted-foreground">TWR Carteira</span>
+              </div>
+            )}
+            {([
+              { key: 'cdi' as const, label: 'CDI', color: CDI_COLOR },
+              { key: 'ibov' as const, label: 'IBOV', color: IBOV_COLOR },
+              { key: 'sp500' as const, label: 'S&P 500', color: SP500_COLOR },
+            ]).map(item => {
+              const visible = visibleBenchmarks.has(item.key)
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setVisibleBenchmarks(prev => {
+                    const next = new Set(prev)
+                    if (next.has(item.key)) next.delete(item.key)
+                    else next.add(item.key)
+                    return next
+                  })}
+                  className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded transition-opacity ${
+                    visible ? 'opacity-100 hover:bg-muted/50' : 'opacity-40 hover:opacity-70'
+                  }`}
+                  title={visible ? 'Ocultar' : 'Mostrar'}
+                >
+                  <div className="w-5 border-t-2" style={{ borderColor: item.color }} />
+                  <span className="text-[11px] text-muted-foreground">{item.label}</span>
+                </button>
+              )
+            })}
+            {!(tsData && tsData.length > 0) && !hasSnapshots && portfolioRefLines.map(rl => (
+              <div key={rl.label} className="flex items-center gap-1.5">
                 <div
                   className="w-5 border-t-2"
-                  style={{ borderColor: item.color, borderStyle: item.dashed ? 'dashed' : 'solid' }}
+                  style={{ borderColor: rl.color, borderStyle: 'dashed' }}
                 />
-                <span className="text-[11px] text-muted-foreground">{item.label}</span>
+                <span className="text-[11px] text-muted-foreground">{rl.label}</span>
               </div>
             ))}
           </div>
@@ -706,9 +745,15 @@ export default function InvestmentsPage() {
                   contentStyle={tooltipStyle}
                 />
                 <ReferenceLine y={0} stroke="var(--border)" />
-                <Line type="monotone" dataKey="cdi" stroke={CDI_COLOR} strokeWidth={1.5} dot={false} name="CDI" connectNulls />
-                <Line type="monotone" dataKey="ibov" stroke={IBOV_COLOR} strokeWidth={1.5} dot={false} name="IBOV" connectNulls />
-                <Line type="monotone" dataKey="sp500" stroke={SP500_COLOR} strokeWidth={1.5} dot={false} name="S&P 500" connectNulls />
+                {visibleBenchmarks.has('cdi') && (
+                  <Line type="monotone" dataKey="cdi" stroke={CDI_COLOR} strokeWidth={1.5} dot={false} name="CDI" connectNulls />
+                )}
+                {visibleBenchmarks.has('ibov') && (
+                  <Line type="monotone" dataKey="ibov" stroke={IBOV_COLOR} strokeWidth={1.5} dot={false} name="IBOV" connectNulls />
+                )}
+                {visibleBenchmarks.has('sp500') && (
+                  <Line type="monotone" dataKey="sp500" stroke={SP500_COLOR} strokeWidth={1.5} dot={false} name="S&P 500" connectNulls />
+                )}
                 {((tsData && tsData.length > 0) || hasSnapshots) && (
                   <Line type="monotone" dataKey="twr" stroke={TWR_COLOR} strokeWidth={2.5} dot={false} name="TWR Carteira" connectNulls />
                 )}
