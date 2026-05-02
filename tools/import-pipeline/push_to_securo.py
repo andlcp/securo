@@ -891,6 +891,9 @@ def main() -> int:
         tx_ok = tx_fail = 0
         for tx in all_tx:
             aid = tx.pop("_asset_id")
+            # Tag every pipeline-imported transaction so the events log can
+            # distinguish them from rows the user typed in by hand.
+            tx.setdefault("source", "csv_import")
             try:
                 c.post(f"/api/assets/{aid}/transactions", tx)
                 tx_ok += 1
