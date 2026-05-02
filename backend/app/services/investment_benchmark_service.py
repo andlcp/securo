@@ -71,6 +71,53 @@ async def _fetch_cdi(start: date, end: date) -> list[dict]:
         return []
 
 
+async def fetch_yahoo_dividends(symbol: str, start: date, end: date) -> list[dict]:
+    """Historical dividend events from Yahoo Finance for a symbol/date range.
+
+    Returns [{date: "YYYY-MM-DD", amount: float}, ...] sorted chronologically.
+    Yahoo lumps Brazilian JCP and ordinary dividends together into the
+    `dividends` event stream — that's fine for TWR purposes since Modified
+    Dietz only cares about the cash amount, not the tax label.
+    """
+    period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    period2 = int(datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            r = await client.get(
+                f"{YAHOO_BASE}/{symbol}",
+                params={
+                    "interval": "1d",
+                    "events": "div",
+                    "period1": period1,
+                    "period2": period2,
+                },
+                headers=YAHOO_HEADERS,
+            )
+            r.raise_for_status()
+            data = r.json()
+        result = data.get("chart", {}).get("result") or []
+        if not result:
+            return []
+        events = result[0].get("events", {}) or {}
+        divs = events.get("dividends", {}) or {}
+        out: list[dict] = []
+        for entry in divs.values():
+            ts = entry.get("date")
+            amount = entry.get("amount")
+            if ts is None or amount is None:
+                continue
+            try:
+                d = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
+                out.append({"date": d, "amount": float(amount)})
+            except (TypeError, ValueError):
+                continue
+        out.sort(key=lambda e: e["date"])
+        return out
+    except Exception as exc:
+        logger.warning("Yahoo dividends %s fetch failed: %s", symbol, exc)
+        return []
+
+
 async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict[str, float]:
     """Daily unadjusted close prices for a symbol over a date range.
 

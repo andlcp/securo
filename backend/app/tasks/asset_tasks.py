@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.models.asset import Asset
 from app.models.asset_value import AssetValue
 from app.services.asset_service import refresh_all_market_prices
+from app.services.dividend_sync_service import sync_all_users_dividends
 
 logger = logging.getLogger(__name__)
 
@@ -160,5 +161,33 @@ def refresh_market_prices() -> dict:
         result.get("refreshed", 0),
         result.get("skipped", 0),
         result.get("rate_limited", 0),
+    )
+    return result
+
+
+async def _sync_dividends() -> dict:
+    """Async body for the Celery dividend-sync task. Runs the sync per-user
+    against Yahoo and inserts new AssetTransaction(type=DIVIDEND) rows."""
+    session_maker = _make_session_maker()
+    return await sync_all_users_dividends(session_maker)
+
+
+@celery_app.task(name="app.tasks.asset_tasks.sync_dividends")
+def sync_dividends() -> dict:
+    """Celery task: sync dividend events from Yahoo Finance for every
+    market-priced asset across all users. Idempotent — re-runs skip events
+    that are already represented (matching external_id or same date).
+    """
+    try:
+        result = asyncio.run(_sync_dividends())
+    except Exception:
+        logger.exception("Dividend sync failed")
+        return {"error": True, "users": 0, "created": 0, "skipped": 0}
+    logger.info(
+        "Dividend sync complete: %d users, %d created, %d skipped, %d failures",
+        result.get("users", 0),
+        result.get("created", 0),
+        result.get("skipped", 0),
+        result.get("failures", 0),
     )
     return result

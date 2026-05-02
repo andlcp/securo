@@ -39,6 +39,13 @@ celery_app.conf.beat_schedule = {
         # AssetValue so history stays at one row per day per asset.
         "schedule": 60 * 60 * 24,
     },
+    "sync-dividends-daily": {
+        "task": "app.tasks.asset_tasks.sync_dividends",
+        # Yahoo dividend events. Daily is enough — ex-dates only change
+        # once per asset per quarter or so, and the task is idempotent
+        # (dedupes by external_id and same-date guard).
+        "schedule": 60 * 60 * 24,
+    },
     "refresh-tesouro-daily": {
         "task": "app.tasks.rf_tasks.refresh_tesouro_assets",
         # Tesouro Transparente publishes the daily PU. Once a day is fine —

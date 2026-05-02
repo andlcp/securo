@@ -16,6 +16,7 @@ from app.core.auth import current_active_user
 from app.core.database import get_async_session
 from app.models.user import User
 from app.services import asset_transaction_service
+from app.services import dividend_sync_service
 
 router = APIRouter(prefix="/api/asset-transactions",
                    tags=["asset-transactions"])
@@ -69,3 +70,18 @@ async def list_all(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post("/sync-dividends")
+async def sync_dividends(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Trigger an on-demand Yahoo dividend sync for the authenticated user.
+
+    Mirrors what the daily Celery task does — fetches dividend events from
+    Yahoo for each market-priced asset and inserts new
+    AssetTransaction(type=DIVIDEND) rows (deduped by external_id and same
+    asset/date). Returns counts so the UI can show a toast.
+    """
+    return await dividend_sync_service.sync_user_dividends(session, user.id)

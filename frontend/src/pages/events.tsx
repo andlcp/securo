@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { assetTransactions, assetGroups, type AssetTransactionLogItem } from '@/lib/api'
 import type { AssetGroup } from '@/types'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -13,7 +14,7 @@ import { DatePickerInput } from '@/components/ui/date-picker-input'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
 import { useAuth } from '@/contexts/auth-context'
-import { Search, Filter, X, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Search, Filter, X, ChevronDown, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -82,9 +83,26 @@ export default function EventsPage() {
   const [dateTo, setDateTo] = useState('')
   const [page, setPage] = useState(0)
 
+  const queryClient = useQueryClient()
+
   const { data: groupsList } = useQuery<AssetGroup[]>({
     queryKey: ['asset-groups'],
     queryFn: () => assetGroups.list(),
+  })
+
+  const syncDividendsMutation = useMutation({
+    mutationFn: () => assetTransactions.syncDividends(),
+    onSuccess: (data) => {
+      const { created, skipped, fetched } = data
+      if (created > 0) {
+        toast.success(t('events.syncSuccess', { count: created }))
+      } else {
+        toast.info(t('events.syncNothingNew', { fetched, skipped }))
+      }
+      queryClient.invalidateQueries({ queryKey: ['asset-tx-log'] })
+      queryClient.invalidateQueries({ queryKey: ['portfolio-timeseries'] })
+    },
+    onError: () => toast.error(t('events.syncFailed')),
   })
 
   const typesParam = useMemo(() => Array.from(selectedTypes), [selectedTypes])
@@ -137,11 +155,25 @@ export default function EventsPage() {
       <PageHeader
         section={t('nav.groupAnalysis')}
         title={t('events.title')}
-        action={total > 0 && (
-          <p className="text-xs text-muted-foreground">
-            {total.toLocaleString(locale)} {t('events.eventsTotal')}
-          </p>
-        )}
+        action={
+          <div className="flex items-center gap-3">
+            {total > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {total.toLocaleString(locale)} {t('events.eventsTotal')}
+              </p>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={syncDividendsMutation.isPending}
+              onClick={() => syncDividendsMutation.mutate()}
+              className="gap-1.5"
+            >
+              <RefreshCw size={13} className={syncDividendsMutation.isPending ? 'animate-spin' : ''} />
+              {syncDividendsMutation.isPending ? t('events.syncing') : t('events.syncDividends')}
+            </Button>
+          </div>
+        }
       />
 
       {/* Filters */}

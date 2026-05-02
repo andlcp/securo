@@ -639,7 +639,12 @@
     "emptyFiltered": "Nenhum evento corresponde aos filtros selecionados.",
     "of": "de",
     "prev": "Anterior",
-    "next": "Próximo"
+    "next": "Próximo",
+    "syncDividends": "Sincronizar dividendos",
+    "syncing": "Sincronizando…",
+    "syncSuccess": "{{count}} dividendo(s) novo(s) importado(s) do Yahoo.",
+    "syncNothingNew": "Nada novo. {{fetched}} eventos verificados, {{skipped}} já existiam.",
+    "syncFailed": "Falha ao sincronizar dividendos. Veja o console pra detalhes."
   },
   "assets": {
     "title": "Patrimônio",

@@ -695,6 +695,14 @@ export const assetTransactions = {
     const { data } = await api.get('/asset-transactions', { params: q })
     return data
   },
+  syncDividends: async (): Promise<{
+    created: number; skipped: number; fetched: number;
+    assets: { asset_id: string; ticker: string; name: string;
+              created: number; skipped: number; fetched: number }[]
+  }> => {
+    const { data } = await api.post('/asset-transactions/sync-dividends')
+    return data
+  },
 }
 
 // Investment Benchmarks

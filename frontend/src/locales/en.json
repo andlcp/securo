@@ -639,7 +639,12 @@
     "emptyFiltered": "No events match the selected filters.",
     "of": "of",
     "prev": "Previous",
-    "next": "Next"
+    "next": "Next",
+    "syncDividends": "Sync dividends",
+    "syncing": "Syncing…",
+    "syncSuccess": "Imported {{count}} new dividend(s) from Yahoo.",
+    "syncNothingNew": "Nothing new. {{fetched}} events checked, {{skipped}} already on file.",
+    "syncFailed": "Dividend sync failed. Check the console for details."
   },
   "assets": {
     "title": "Assets",
