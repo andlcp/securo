@@ -22,6 +22,7 @@ The frontend rebases each line to 0% at the start of the selected window
 
 import logging
 import uuid
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -68,6 +69,8 @@ async def get_timeseries(
     asset_classes: Optional[str] = Query(None, description="Comma-separated class codes"),
     group_ids: Optional[str] = Query(None, description="Comma-separated AssetGroup UUIDs"),
     granularity: str = Query("monthly", regex="^(monthly|daily)$"),
+    date_from: Optional[date] = Query(None, description="ISO date — start of custom range"),
+    date_to: Optional[date] = Query(None, description="ISO date — end of custom range"),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
@@ -79,6 +82,8 @@ async def get_timeseries(
         asset_classes=_parse_csv(asset_classes),
         group_ids=_parse_uuid_csv(group_ids),
         granularity=granularity,
+        date_from=date_from,
+        date_to=date_to,
     )
 
 

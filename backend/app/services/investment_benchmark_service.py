@@ -118,14 +118,16 @@ async def get_portfolio_start_date(session: AsyncSession, user_id) -> Optional[d
 async def get_benchmark_series(
     months: int = 12,
     start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
 ) -> dict:
     """Return CDI, IBOV and S&P 500 cumulative return series (fetched concurrently)."""
     today = date.today()
+    end = min(end_date, today) if end_date else today
     start = start_date if start_date else today - timedelta(days=months * 31)
     cdi, ibov, sp500 = await asyncio.gather(
-        _fetch_cdi(start, today),
-        _fetch_yahoo_index("%5EBVSP", start, today),
-        _fetch_yahoo_index("%5EGSPC", start, today),
+        _fetch_cdi(start, end),
+        _fetch_yahoo_index("%5EBVSP", start, end),
+        _fetch_yahoo_index("%5EGSPC", start, end),
     )
     return {"cdi": cdi, "ibov": ibov, "sp500": sp500}
 

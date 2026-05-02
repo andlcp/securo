@@ -22,7 +22,11 @@ import { PageHeader } from '@/components/page-header'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
 import { useAuth } from '@/contexts/auth-context'
 import type { AssetGroup } from '@/types'
-import { Wallet, ChevronDown, Check } from 'lucide-react'
+import { Wallet, ChevronDown, Check, CalendarRange, X } from 'lucide-react'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { DatePickerInput } from '@/components/ui/date-picker-input'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -87,6 +91,12 @@ function classColor(name: string, idx: number) {
 function parseDateKey(d: string) {
   const [dd, mm, yy] = d.split('/')
   return `${yy}${mm}${dd}`
+}
+
+function formatRangeLabel(iso: string) {
+  // iso is yyyy-mm-dd from DatePickerInput.
+  const [yy, mm, dd] = iso.split('-')
+  return `${dd}/${mm}/${yy.slice(2)}`
 }
 
 type MergedRow = {
@@ -286,6 +296,12 @@ export default function InvestmentsPage() {
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
   const [selectedClasses, setSelectedClasses] = useState<Set<AssetClass>>(new Set())
   const [visibleBenchmarks, setVisibleBenchmarks] = useState<Set<'cdi' | 'ibov' | 'sp500'>>(new Set(['cdi']))
+  // Custom date range — overrides months/sinceStart when both ends are set.
+  const [customRange, setCustomRange] = useState<{ from: string; to: string } | null>(null)
+  // Draft state for the date-range popover (committed via "Aplicar").
+  const [rangeOpen, setRangeOpen] = useState(false)
+  const [draftFrom, setDraftFrom] = useState('')
+  const [draftTo, setDraftTo] = useState('')
   const [importing, setImporting] = useState(false)
   const [importMessage, setImportMessage] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -308,8 +324,13 @@ export default function InvestmentsPage() {
   const hasSnapshots = (snapshots?.length ?? 0) > 0
 
   const { data: benchmarkData, isLoading: benchmarkLoading } = useQuery<BenchmarkData>({
-    queryKey: ['inv-benchmarks-series', sinceStart ? 'start' : months],
-    queryFn: () => investmentBenchmarks.series(months, sinceStart),
+    queryKey: ['inv-benchmarks-series', customRange ? `range:${customRange.from}:${customRange.to}` : sinceStart ? 'start' : months],
+    queryFn: () => investmentBenchmarks.series(
+      months,
+      sinceStart && !customRange,
+      customRange?.from,
+      customRange?.to,
+    ),
     staleTime: 1000 * 60 * 30,
   })
 
@@ -327,16 +348,24 @@ export default function InvestmentsPage() {
   // Use daily granularity for short windows so the chart has enough points
   // to actually show movement. Long windows stay monthly (one row per
   // month-end) to keep the response size and computation reasonable.
-  const granularity: 'monthly' | 'daily' = (!sinceStart && months <= 3) ? 'daily' : 'monthly'
+  const granularity: 'monthly' | 'daily' = useMemo(() => {
+    if (customRange) {
+      const days = (Date.parse(customRange.to) - Date.parse(customRange.from)) / 86_400_000
+      return days <= 120 ? 'daily' : 'monthly'
+    }
+    return (!sinceStart && months <= 3) ? 'daily' : 'monthly'
+  }, [customRange, sinceStart, months])
 
   const { data: tsData, isLoading: tsLoading } = useQuery<PortfolioPoint[]>({
-    queryKey: ['portfolio-timeseries', months, sinceStart, classesParam, groupsParam, granularity],
+    queryKey: ['portfolio-timeseries', customRange ? `range:${customRange.from}:${customRange.to}` : `${sinceStart}-${months}`, classesParam, groupsParam, granularity],
     queryFn: () => portfolioTimeseries.series({
       months,
-      sinceStart,
+      sinceStart: sinceStart && !customRange,
       assetClasses: classesParam,
       groupIds: groupsParam,
       granularity,
+      dateFrom: customRange?.from,
+      dateTo: customRange?.to,
     }),
     staleTime: 1000 * 60,
   })
@@ -479,9 +508,9 @@ export default function InvestmentsPage() {
               {([1, 3, 6, 12, 24] as const).map(m => (
                 <button
                   key={m}
-                  onClick={() => { setMonths(m); setSinceStart(false) }}
+                  onClick={() => { setMonths(m); setSinceStart(false); setCustomRange(null) }}
                   className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                    !sinceStart && months === m
+                    !sinceStart && !customRange && months === m
                       ? 'bg-primary text-primary-foreground'
                       : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                   }`}
@@ -490,15 +519,81 @@ export default function InvestmentsPage() {
                 </button>
               ))}
               <button
-                onClick={() => setSinceStart(true)}
+                onClick={() => { setSinceStart(true); setCustomRange(null) }}
                 className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
-                  sinceStart
+                  sinceStart && !customRange
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                 }`}
               >
                 {t('investments.sinceStart')}
               </button>
+              <Popover open={rangeOpen} onOpenChange={(o) => {
+                setRangeOpen(o)
+                if (o) {
+                  // Pre-fill with current custom range (or empty).
+                  setDraftFrom(customRange?.from ?? '')
+                  setDraftTo(customRange?.to ?? '')
+                }
+              }}>
+                <PopoverTrigger asChild>
+                  <button
+                    className={`px-3 py-1.5 text-xs font-semibold transition-colors inline-flex items-center gap-1.5 border-l border-border ${
+                      customRange
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                    }`}
+                    title="Período personalizado"
+                  >
+                    <CalendarRange size={13} />
+                    {customRange
+                      ? `${formatRangeLabel(customRange.from)} → ${formatRangeLabel(customRange.to)}`
+                      : 'Personalizado'}
+                    {customRange && (
+                      <X
+                        size={13}
+                        className="opacity-80 hover:opacity-100"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setCustomRange(null)
+                        }}
+                      />
+                    )}
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-auto p-4 space-y-3">
+                  <div className="flex flex-col gap-1.5">
+                    <Label className="text-xs">De</Label>
+                    <DatePickerInput value={draftFrom} onChange={setDraftFrom} />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <Label className="text-xs">Até</Label>
+                    <DatePickerInput value={draftTo} onChange={setDraftTo} />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setCustomRange(null)
+                        setRangeOpen(false)
+                      }}
+                    >
+                      Limpar
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={!draftFrom || !draftTo || draftFrom > draftTo}
+                      onClick={() => {
+                        setCustomRange({ from: draftFrom, to: draftTo })
+                        setRangeOpen(false)
+                      }}
+                    >
+                      Aplicar
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
             </div>
           </div>
         }

@@ -654,13 +654,20 @@ export const reports = {
 
 // Investment Benchmarks
 export const investmentBenchmarks = {
-  series: async (months = 12, sinceStart = false): Promise<{
+  series: async (
+    months = 12,
+    sinceStart = false,
+    dateFrom?: string,
+    dateTo?: string,
+  ): Promise<{
     cdi: { date: string; value: number }[]
     ibov: { date: string; value: number }[]
     sp500: { date: string; value: number }[]
   }> => {
     const params: Record<string, unknown> = { months }
     if (sinceStart) params.since_start = true
+    if (dateFrom) params.date_from = dateFrom
+    if (dateTo) params.date_to = dateTo
     const { data } = await api.get('/investment-benchmarks/series', { params })
     return data
   },
@@ -693,6 +700,7 @@ export const portfolioTimeseries = {
     months?: number; sinceStart?: boolean;
     assetIds?: string[]; assetClasses?: string[]; groupIds?: string[];
     granularity?: 'monthly' | 'daily';
+    dateFrom?: string; dateTo?: string;
   } = {}): Promise<PortfolioPoint[]> => {
     const q: Record<string, unknown> = {}
     if (params.months) q.months = params.months
@@ -701,6 +709,8 @@ export const portfolioTimeseries = {
     if (params.assetClasses && params.assetClasses.length) q.asset_classes = params.assetClasses.join(',')
     if (params.groupIds && params.groupIds.length) q.group_ids = params.groupIds.join(',')
     if (params.granularity) q.granularity = params.granularity
+    if (params.dateFrom) q.date_from = params.dateFrom
+    if (params.dateTo) q.date_to = params.dateTo
     const { data } = await api.get('/portfolio/timeseries', { params: q })
     return data
   },

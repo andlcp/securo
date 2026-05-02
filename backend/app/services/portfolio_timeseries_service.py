@@ -209,6 +209,8 @@ async def get_timeseries(session: AsyncSession, user: User,
                          asset_classes: Optional[list[str]] = None,
                          group_ids: Optional[list[uuid.UUID]] = None,
                          granularity: str = "monthly",
+                         date_from: Optional[date] = None,
+                         date_to: Optional[date] = None,
                          ) -> list[dict]:
     """Return [{month_end, v_end, cashflow, income, return_month, twr_cum}]
     for the (optionally filtered) portfolio.
@@ -218,6 +220,9 @@ async def get_timeseries(session: AsyncSession, user: User,
     granularity: "monthly" (one row per month-end) or "daily" (one row per
         calendar day in the window). Daily is useful for short windows
         (1–3 months) where a monthly TWR has too few points.
+    date_from / date_to: explicit window override. When both are set, they
+        take precedence over months/since_start. Daily granularity is forced
+        for ranges shorter than 4 months.
     """
     user_ccy = await _user_primary_currency(session, user)
     assets = await _load_assets(session, user.id, asset_ids, asset_classes,
@@ -228,7 +233,16 @@ async def get_timeseries(session: AsyncSession, user: User,
     # Determine window
     today = date.today()
     end_y, end_m = today.year, today.month
-    if since_start:
+    custom_range = date_from is not None and date_to is not None
+    if custom_range:
+        # Clamp date_to to today; allow date_from to be any past date.
+        end_d = min(date_to, today)
+        end_y, end_m = end_d.year, end_d.month
+        start_y, start_m = date_from.year, date_from.month
+        # Auto-pick daily for short ranges to give a useful chart.
+        if (end_d - date_from).days <= 120 and granularity == "monthly":
+            granularity = "daily"
+    elif since_start:
         start = await _portfolio_start(session, user.id, assets)
         if not start:
             return []
@@ -285,6 +299,11 @@ async def get_timeseries(session: AsyncSession, user: User,
         av_by_asset[av.asset_id].append(av)
 
     today_d = date.today()
+    # When a custom date range is supplied, the chart window ends at
+    # date_to (not today). Used as a cap below for daily walk + month-end
+    # labels, and so the daily seed reads V_end at date_from - 1, not at
+    # the calendar month start of `start_y/start_m`.
+    window_end = date_to if (custom_range and date_to is not None) else today_d
 
     def value_at_for_asset(asset: Asset, on: date) -> float:
         """Return V_end at month-end `on` in the asset's native currency.
@@ -321,11 +340,14 @@ async def get_timeseries(session: AsyncSession, user: User,
     if granularity == "daily":
         # Daily mode: walk one row per calendar day. Useful for short
         # windows (1M, 3M) where monthly granularity gives too few points.
-        start_d = date(start_y, start_m, 1)
-        # Cap to window months back from today (not start of month) so
-        # "1M" really means last ~30 days, not "from the 1st of last month".
-        if not since_start and months:
-            start_d = max(start_d, today_d - timedelta(days=int(months) * 30))
+        # Use a rolling N*30-day window so "1M on May 2" really means the
+        # last 30 days (Apr 2 → May 2), not just the calendar month-to-date.
+        if custom_range and date_from is not None:
+            start_d = date_from
+        elif since_start:
+            start_d = date(start_y, start_m, 1)
+        else:
+            start_d = today_d - timedelta(days=int(months or 1) * 30)
 
         # Seed prev_v_end with the portfolio value the day before window start.
         prev_d = start_d - timedelta(days=1)
@@ -338,7 +360,7 @@ async def get_timeseries(session: AsyncSession, user: User,
             prev_v_end += v_native * rate
 
         d = start_d
-        while d <= today_d:
+        while d <= window_end:
             v_end_total = 0.0
             per_class: dict[str, float] = defaultdict(float)
             for a in assets:
@@ -411,7 +433,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         # month-end as if it had already happened. The cashflow / value
         # math above uses `me` (and value_at_for_asset already caps at
         # today), so only the display label needs trimming here.
-        label_date = min(me, today_d)
+        label_date = min(me, window_end)
         ym = me.strftime("%Y-%m")
         # Sum V_end across assets, converting each to user_ccy
         v_end_total = 0.0

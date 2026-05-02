@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -15,9 +16,15 @@ router = APIRouter(prefix="/api/investment-benchmarks", tags=["investment-benchm
 async def get_benchmark_series(
     months: int = Query(12, ge=1, le=120),
     since_start: bool = Query(False),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
+    if date_from is not None:
+        return await investment_benchmark_service.get_benchmark_series(
+            months=months, start_date=date_from, end_date=date_to,
+        )
     start_date = None
     if since_start:
         start_date = await investment_benchmark_service.get_portfolio_start_date(session, user.id)
