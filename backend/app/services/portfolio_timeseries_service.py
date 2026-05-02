@@ -26,6 +26,7 @@ of each month. This is consistent with how Securo's Net Worth report
 already handles multi-currency.
 """
 
+import asyncio
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -43,6 +44,7 @@ from app.models.asset_transaction import AssetTransaction
 from app.models.asset_value import AssetValue
 from app.models.user import User
 from app.services import fx_rate_service
+from app.services.investment_benchmark_service import fetch_yahoo_close_history
 
 logger = logging.getLogger(__name__)
 
@@ -349,11 +351,75 @@ async def get_timeseries(session: AsyncSession, user: User,
         else:
             start_d = today_d - timedelta(days=int(months or 1) * 30)
 
+        # Pre-fetch daily Yahoo Finance close history for every market-priced
+        # asset. Without this the daily V_end is flat between AssetValue
+        # snapshots, which causes spurious negative returns on transaction
+        # days (the cashflow registers but V_end doesn't reflect new units).
+        # Fetch a few days before start_d so the seed-day lookup has data.
+        market_assets = [a for a in assets
+                         if a.valuation_method == "market_price" and a.ticker]
+        history_results = await asyncio.gather(*[
+            fetch_yahoo_close_history(a.ticker, start_d - timedelta(days=10), window_end)
+            for a in market_assets
+        ]) if market_assets else []
+        # Convert each {iso_date: close} dict into a sorted list of
+        # (iso_date, price) tuples for cheap "as-of" lookup.
+        price_history: dict[uuid.UUID, list[tuple[str, float]]] = {}
+        for a, hist in zip(market_assets, history_results):
+            if hist:
+                price_history[a.id] = sorted(hist.items())
+
+        # Sort all transactions per asset once, ascending by date — used by
+        # units_at(asset, d) to compute the share count owned at end of day d.
+        tx_by_asset: dict[uuid.UUID, list[AssetTransaction]] = defaultdict(list)
+        for tx in txs:
+            if tx.type in _BUY_TYPES or tx.type in _SELL_TYPES:
+                tx_by_asset[tx.asset_id].append(tx)
+        for lst in tx_by_asset.values():
+            lst.sort(key=lambda t: t.date)
+
+        def units_at(asset: Asset, on: date) -> float:
+            """Walk transactions backwards from current units, undoing those
+            that happened after `on`. Returns share count owned at end of `on`."""
+            u = float(asset.units or 0)
+            for tx in reversed(tx_by_asset.get(asset.id, [])):
+                if tx.date <= on:
+                    break
+                q = float(tx.qty or 0)
+                if tx.type in _BUY_TYPES:
+                    u -= q
+                elif tx.type in _SELL_TYPES:
+                    u += q
+            return u
+
+        def price_at(asset: Asset, on: date) -> Optional[float]:
+            """Most recent close <= on. None if no history fetched/available."""
+            hist = price_history.get(asset.id)
+            if not hist:
+                return None
+            target = on.isoformat()
+            last: Optional[float] = None
+            for d_iso, p in hist:
+                if d_iso > target:
+                    break
+                last = p
+            return last
+
+        def daily_v_native(asset: Asset, on: date) -> float:
+            """Preferred daily-mode value: units * yfinance close. Falls back
+            to the AssetValue snapshot when no history is available (RF and
+            non-market-priced assets, or if the fetch failed)."""
+            if asset.valuation_method == "market_price":
+                p = price_at(asset, on)
+                if p is not None:
+                    return units_at(asset, on) * p
+            return value_at_for_asset(asset, on)
+
         # Seed prev_v_end with the portfolio value the day before window start.
         prev_d = start_d - timedelta(days=1)
         prev_v_end = 0.0
         for a in assets:
-            v_native = value_at_for_asset(a, prev_d)
+            v_native = daily_v_native(a, prev_d)
             if v_native == 0:
                 continue
             rate = await _fx_rate(session, a.currency, user_ccy, prev_d)
@@ -364,7 +430,7 @@ async def get_timeseries(session: AsyncSession, user: User,
             v_end_total = 0.0
             per_class: dict[str, float] = defaultdict(float)
             for a in assets:
-                v_native = value_at_for_asset(a, d)
+                v_native = daily_v_native(a, d)
                 if v_native == 0:
                     continue
                 rate = await _fx_rate(session, a.currency, user_ccy, d)

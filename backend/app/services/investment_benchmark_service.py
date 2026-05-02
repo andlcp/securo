@@ -71,6 +71,40 @@ async def _fetch_cdi(start: date, end: date) -> list[dict]:
         return []
 
 
+async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict[str, float]:
+    """Daily unadjusted close prices for a symbol over a date range.
+
+    Returns {iso_date: close} keyed on the trading day. Non-business days
+    are absent — callers should hold-last-known when filling gaps.
+    Used by the portfolio timeseries to compute daily V_end for
+    market-priced assets without relying on sparse AssetValue snapshots.
+    """
+    period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    period2 = int(datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            r = await client.get(
+                f"{YAHOO_BASE}/{symbol}",
+                params={"interval": "1d", "period1": period1, "period2": period2},
+                headers=YAHOO_HEADERS,
+            )
+            r.raise_for_status()
+            data = r.json()
+        chart = data["chart"]["result"][0]
+        timestamps = chart["timestamp"]
+        closes = chart["indicators"]["quote"][0]["close"]
+        out: dict[str, float] = {}
+        for ts, close in zip(timestamps, closes):
+            if close is None:
+                continue
+            d = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+            out[d] = float(close)
+        return out
+    except Exception as exc:
+        logger.warning("Yahoo history %s fetch failed: %s", symbol, exc)
+        return {}
+
+
 async def _fetch_yahoo_index(symbol: str, start: date, end: date) -> list[dict]:
     """Normalised % return series (base=0) from Yahoo Finance using Unix timestamps."""
     period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
