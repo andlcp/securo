@@ -59,21 +59,15 @@ def _units_at(asset_units: float, txs: list[AssetTransaction], on: date) -> floa
     return u
 
 
-async def _sync_one_asset(
+async def _process_asset_events(
     session: AsyncSession,
     asset: Asset,
+    events: list[dict],
 ) -> dict:
-    """Sync dividends for a single asset. Returns counts."""
-    if not asset.ticker or asset.valuation_method != "market_price":
-        return {"created": 0, "skipped": 0, "fetched": 0}
-
-    # Fetch range: from purchase_date (or today-2y as a safe floor) to today.
-    today = date.today()
-    start = asset.purchase_date or date(today.year - 2, today.month, today.day)
-    if start > today:
-        start = today
-
-    events = await fetch_yahoo_dividends(asset.ticker, start, today)
+    """Apply already-fetched Yahoo dividend events for one asset to the
+    database. Caller is responsible for awaiting this sequentially across
+    assets — SQLAlchemy AsyncSession is NOT safe to use from multiple
+    coroutines concurrently (you get "Session is already flushing")."""
     if not events:
         return {"created": 0, "skipped": 0, "fetched": 0}
 
@@ -164,7 +158,9 @@ async def sync_user_dividends(
     """Sync dividends for every market-priced asset owned by a user.
 
     Returns aggregate counts plus a per-asset breakdown the UI can show
-    after a manual run.
+    after a manual run. Yahoo HTTP fetches run in parallel (the slow
+    part), then the DB writes are applied sequentially against the
+    shared session (SQLAlchemy AsyncSession isn't concurrency-safe).
     """
     stmt = select(Asset).where(
         and_(
@@ -178,7 +174,19 @@ async def sync_user_dividends(
     if not assets:
         return {"created": 0, "skipped": 0, "fetched": 0, "assets": []}
 
-    results = await asyncio.gather(*[_sync_one_asset(session, a) for a in assets])
+    today = date.today()
+
+    async def _fetch_one(a: Asset) -> list[dict]:
+        start = a.purchase_date or date(today.year - 2, today.month, today.day)
+        if start > today:
+            start = today
+        return await fetch_yahoo_dividends(a.ticker, start, today)
+
+    events_per_asset = await asyncio.gather(*[_fetch_one(a) for a in assets])
+
+    results: list[dict] = []
+    for asset, events in zip(assets, events_per_asset):
+        results.append(await _process_asset_events(session, asset, events))
     await session.commit()
 
     total_created = sum(r["created"] for r in results)
