@@ -19,6 +19,7 @@ from app.api.rules import router as rules_router
 from app.api.assets import router as assets_router
 from app.api.asset_groups import router as asset_groups_router
 from app.api.investment_benchmarks import router as investment_benchmarks_router
+from app.api.asset_transactions import router as asset_transactions_router
 from app.api.portfolio_snapshots import router as portfolio_snapshots_router
 from app.api.portfolio_timeseries import router as portfolio_timeseries_router
 from app.api.asset_prices import router as asset_prices_router
@@ -119,6 +120,7 @@ app.include_router(goals_router)
 app.include_router(assets_router)
 app.include_router(asset_groups_router)
 app.include_router(investment_benchmarks_router)
+app.include_router(asset_transactions_router)
 app.include_router(portfolio_snapshots_router)
 app.include_router(portfolio_timeseries_router)
 app.include_router(asset_prices_router)

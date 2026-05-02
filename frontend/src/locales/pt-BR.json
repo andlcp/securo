@@ -50,6 +50,7 @@
     "assets": "Patrimônio",
     "assetsV2": "Patrimônio V2",
     "investments": "Investimentos",
+    "events": "Eventos",
     "payees": "Beneficiários",
     "goals": "Metas",
     "reports": "Relatórios",
@@ -615,6 +616,30 @@
   },
   "assetsV2": {
     "title": "Patrimônio V2"
+  },
+  "events": {
+    "title": "Eventos da carteira",
+    "eventsTotal": "eventos no total",
+    "searchPlaceholder": "Buscar ativo, ticker, nota…",
+    "type": "Tipo",
+    "wallet": "Carteira",
+    "source": "Fonte",
+    "dateRange": "Período",
+    "from": "De",
+    "to": "Até",
+    "clear": "Limpar",
+    "clearAll": "Limpar filtros",
+    "date": "Data",
+    "asset": "Ativo",
+    "qty": "Qtd",
+    "price": "Preço",
+    "value": "Valor",
+    "notes": "Nota",
+    "empty": "Nenhum evento registrado ainda. Compras, vendas e proventos vão aparecer aqui.",
+    "emptyFiltered": "Nenhum evento corresponde aos filtros selecionados.",
+    "of": "de",
+    "prev": "Anterior",
+    "next": "Próximo"
   },
   "assets": {
     "title": "Patrimônio",

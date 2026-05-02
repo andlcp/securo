@@ -25,6 +25,7 @@ const AssetsPage = lazy(() => import('@/pages/assets'))
 const AssetsV2Page = lazy(() => import('@/pages/assets-v2'))
 const ReportsPage = lazy(() => import('@/pages/reports'))
 const InvestmentsPage = lazy(() => import('@/pages/investments'))
+const EventsPage = lazy(() => import('@/pages/events'))
 const PayeesPage = lazy(() => import('@/pages/payees'))
 const AdminSettingsPage = lazy(() => import('@/pages/admin/settings'))
 
@@ -77,6 +78,7 @@ function App() {
                   <Route path="/assets-v2" element={<AssetsV2Page />} />
                   <Route path="/reports" element={<ReportsPage />} />
                   <Route path="/investments" element={<InvestmentsPage />} />
+                  <Route path="/events" element={<EventsPage />} />
                   <Route path="/payees" element={<PayeesPage />} />
                   <Route path="/admin" element={<AdminRoute><AdminSettingsPage /></AdminRoute>} />
                 </Route>

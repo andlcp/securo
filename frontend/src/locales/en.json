@@ -50,6 +50,7 @@
     "assets": "Assets",
     "assetsV2": "Assets V2",
     "investments": "Investments",
+    "events": "Events",
     "payees": "Payees",
     "goals": "Goals",
     "reports": "Reports",
@@ -615,6 +616,30 @@
   },
   "assetsV2": {
     "title": "Assets V2"
+  },
+  "events": {
+    "title": "Portfolio events",
+    "eventsTotal": "events total",
+    "searchPlaceholder": "Search asset, ticker, note…",
+    "type": "Type",
+    "wallet": "Wallet",
+    "source": "Source",
+    "dateRange": "Date range",
+    "from": "From",
+    "to": "To",
+    "clear": "Clear",
+    "clearAll": "Clear filters",
+    "date": "Date",
+    "asset": "Asset",
+    "qty": "Qty",
+    "price": "Price",
+    "value": "Value",
+    "notes": "Note",
+    "empty": "No events yet. Buys, sells and dividends will show up here.",
+    "emptyFiltered": "No events match the selected filters.",
+    "of": "of",
+    "prev": "Previous",
+    "next": "Next"
   },
   "assets": {
     "title": "Assets",

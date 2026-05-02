@@ -652,6 +652,51 @@ export const reports = {
   },
 }
 
+// Asset Transactions — user-wide events log (all transactions across assets).
+export interface AssetTransactionLogItem {
+  id: string
+  asset_id: string
+  date: string
+  type: string
+  qty: number | null
+  price: number | null
+  value: number | null
+  fees: number
+  notes: string | null
+  source: string
+  external_id: string | null
+  created_at: string | null
+  asset: {
+    name: string
+    ticker: string | null
+    currency: string
+    group_id: string | null
+    group_name: string | null
+    group_color: string | null
+  }
+}
+
+export const assetTransactions = {
+  list: async (params: {
+    types?: string[]; assetIds?: string[]; groupIds?: string[];
+    sources?: string[]; dateFrom?: string; dateTo?: string;
+    q?: string; limit?: number; offset?: number;
+  } = {}): Promise<{ items: AssetTransactionLogItem[]; total: number }> => {
+    const q: Record<string, unknown> = {}
+    if (params.types?.length) q.types = params.types.join(',')
+    if (params.assetIds?.length) q.asset_ids = params.assetIds.join(',')
+    if (params.groupIds?.length) q.group_ids = params.groupIds.join(',')
+    if (params.sources?.length) q.sources = params.sources.join(',')
+    if (params.dateFrom) q.date_from = params.dateFrom
+    if (params.dateTo) q.date_to = params.dateTo
+    if (params.q) q.q = params.q
+    if (params.limit) q.limit = params.limit
+    if (params.offset) q.offset = params.offset
+    const { data } = await api.get('/asset-transactions', { params: q })
+    return data
+  },
+}
+
 // Investment Benchmarks
 export const investmentBenchmarks = {
   series: async (
