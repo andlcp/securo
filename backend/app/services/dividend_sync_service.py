@@ -152,6 +152,18 @@ async def _process_asset_events(
     existing_external_ids = {tx.external_id for tx in txs if tx.external_id}
     asset_units_today = float(asset.units or 0)
 
+    # CSV-first authority: if the user imported a dividend history via
+    # csv_import (i.e. push_to_securo from the broker statement), treat
+    # it as ground truth for the past and let auto-sync only fill in
+    # events strictly newer than the last CSV row. This avoids the case
+    # where Yahoo reports gross while XP records net for the same payout
+    # and the values differ enough to slip past the value-match dedupe.
+    csv_dividend_dates = [
+        tx.date for tx in txs
+        if tx.type in _DIVIDEND_LIKE and tx.source == "csv_import"
+    ]
+    csv_cutoff = max(csv_dividend_dates) if csv_dividend_dates else None
+
     created = 0
     skipped = 0
     new_rows: list[AssetTransaction] = []
@@ -171,6 +183,14 @@ async def _process_asset_events(
 
         external_id = f"{source_label}-{ev_type.lower()}-{asset.ticker}-{ev['date']}"
         if external_id in existing_external_ids:
+            skipped += 1
+            continue
+
+        # CSV-first: skip anything dated on/before the user's last
+        # csv_import dividend for this asset. Their broker statement is
+        # the trusted source for that period; we only let the auto-sync
+        # add events that postdate it.
+        if csv_cutoff is not None and ev_date <= csv_cutoff:
             skipped += 1
             continue
 
