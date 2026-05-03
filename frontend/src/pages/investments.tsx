@@ -362,16 +362,13 @@ export default function InvestmentsPage() {
     () => Array.from(selectedGroups),
     [selectedGroups]
   )
-  // Use daily granularity for short windows so the chart has enough points
-  // to actually show movement. Long windows stay monthly (one row per
-  // month-end) to keep the response size and computation reasonable.
-  const granularity: 'monthly' | 'daily' = useMemo(() => {
-    if (customRange) {
-      const days = (Date.parse(customRange.to) - Date.parse(customRange.from)) / 86_400_000
-      return days <= 120 ? 'daily' : 'monthly'
-    }
-    return (!sinceStart && months <= 3) ? 'daily' : 'monthly'
-  }, [customRange, sinceStart, months])
+  // Always daily. Monthly Modified Dietz buckets cashflows together with
+  // price action in the same calendar month; whenever a non-trivial buy/
+  // sell collided with a volatile day the result was distorted (the user
+  // saw +140 % cumulative on a portfolio whose true daily TWR was +73 %).
+  // Daily is heavier on the backend for long windows but the chart and
+  // KPIs all match each other now, which is the more important property.
+  const granularity: 'monthly' | 'daily' = 'daily'
 
   const { data: tsData, isLoading: tsLoading } = useQuery<PortfolioPoint[]>({
     queryKey: ['portfolio-timeseries', customRange ? `range:${customRange.from}:${customRange.to}` : `${sinceStart}-${months}`, classesParam, groupsParam, granularity],
@@ -389,6 +386,9 @@ export default function InvestmentsPage() {
 
   // Always-since-inception series — used only to power the lifetime TWR
   // KPI ("TWR cumulativo"), independent of the selected 3M/6M/1A window.
+  // Daily granularity matches the chart and the per-asset Rent. TWR; the
+  // monthly walk distorted long windows whenever a buy/sell coincided
+  // with a volatile day in the same month.
   const { data: tsLifetime } = useQuery<PortfolioPoint[]>({
     queryKey: ['portfolio-timeseries-lifetime', classesParam, groupsParam],
     queryFn: () => portfolioTimeseries.series({
@@ -396,6 +396,7 @@ export default function InvestmentsPage() {
       sinceStart: true,
       assetClasses: classesParam,
       groupIds: groupsParam,
+      granularity: 'daily',
     }),
     staleTime: 1000 * 60,
   })
