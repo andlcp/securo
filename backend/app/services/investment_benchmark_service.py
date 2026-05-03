@@ -228,83 +228,147 @@ def _asset_return(asset: Asset) -> tuple[float, float]:
     return invested, current
 
 
+def _window_return_from_series(series: list[dict]) -> dict:
+    """Pick V_start, V_end and rebased TWR from a portfolio_timeseries series.
+
+    The series is the same monthly Modified-Dietz output used by the chart.
+    return_pct = ((1 + last.twr_cum) / (1 + first.twr_cum) - 1) * 100, which
+    is the window-rebased percentage that matches the chart's last point."""
+    if not series:
+        return {"invested": 0.0, "current": 0.0, "return_pct": None}
+    first = series[0]
+    last = series[-1]
+    base_factor = 1.0 + float(first.get("twr_cum") or 0.0)
+    end_factor = 1.0 + float(last.get("twr_cum") or 0.0)
+    if base_factor <= 1e-9:
+        return {
+            "invested": round(float(first.get("v_end") or 0.0), 2),
+            "current": round(float(last.get("v_end") or 0.0), 2),
+            "return_pct": None,
+        }
+    rebased = (end_factor / base_factor - 1.0) * 100.0
+    return {
+        "invested": round(float(first.get("v_end") or 0.0), 2),
+        "current": round(float(last.get("v_end") or 0.0), 2),
+        "return_pct": round(rebased, 2),
+    }
+
+
 async def get_portfolio_returns(
     session: AsyncSession,
     user_id,
+    user=None,
     group_ids: Optional[list[str]] = None,
+    months: int = 12,
+    since_start: bool = False,
+    date_from=None,
+    date_to=None,
 ) -> dict:
-    """Compute returns per group, per asset class, and consolidated."""
-    stmt = (
-        select(Asset)
-        .where(Asset.user_id == user_id, Asset.is_archived.is_(False), Asset.sell_date.is_(None))
-    )
-    if group_ids:
-        import uuid as _uuid
-        ids = [_uuid.UUID(g) for g in group_ids if g]
-        stmt = stmt.where(Asset.group_id.in_(ids))
+    """Compute window-aware TWR returns for the consolidated portfolio,
+    each AssetGroup, and each distinct asset_class in the user's
+    holdings. Reuses portfolio_timeseries.get_timeseries (Modified
+    Dietz) so the percentages match what the chart line shows.
 
-    result = await session.execute(stmt)
-    assets = list(result.scalars().all())
+    Per-group/class TWR comes from one timeseries call per bucket. The
+    cost is N+M+1 calls, but each is a small in-process computation —
+    fine for ~5–10 groups + ~5 classes typical of a personal portfolio.
+    """
+    # Local import to avoid a hard cycle with portfolio_timeseries_service,
+    # which imports `fetch_yahoo_close_history` from this file.
+    from app.services import portfolio_timeseries_service
+    from app.models.user import User
+
+    if user is None:
+        # Older callers passed only user_id. Fetch the User row so the
+        # timeseries service can read the FX-display preference.
+        user = (await session.execute(
+            select(User).where(User.id == user_id)
+        )).scalar_one_or_none()
+        if user is None:
+            return {
+                "consolidated": {"invested": 0.0, "current": 0.0, "return_pct": None},
+                "by_group": [],
+                "by_class": [],
+            }
+
+    import uuid as _uuid
+    parsed_group_ids = None
+    if group_ids:
+        parsed_group_ids = [_uuid.UUID(g) for g in group_ids if g]
+
+    # Discover the assets that match the (optional) group filter so we can
+    # enumerate the relevant groups/classes for the per-bucket calls.
+    asset_stmt = (
+        select(Asset)
+        .where(Asset.user_id == user_id, Asset.is_archived.is_(False),
+               Asset.sell_date.is_(None))
+    )
+    if parsed_group_ids:
+        asset_stmt = asset_stmt.where(Asset.group_id.in_(parsed_group_ids))
+    assets = list((await session.execute(asset_stmt)).scalars().all())
 
     group_rows = await session.execute(
         select(AssetGroup).where(AssetGroup.user_id == user_id)
     )
     groups_by_id = {str(g.id): g.name for g in group_rows.scalars().all()}
 
-    by_group: dict[str, dict] = {}
-    by_class: dict[str, dict] = {}
-    total_invested = total_current = 0.0
+    # Distinct group_ids and asset_classes actually present in the filter.
+    present_group_ids: list[str] = []
+    seen_groups: set[str] = set()
+    present_classes: list[str] = []
+    seen_classes: set[str] = set()
+    for a in assets:
+        if a.group_id:
+            gid = str(a.group_id)
+            if gid not in seen_groups:
+                seen_groups.add(gid)
+                present_group_ids.append(gid)
+        cls = a.asset_class or "OUTRO"
+        if cls not in seen_classes:
+            seen_classes.add(cls)
+            present_classes.append(cls)
 
-    for asset in assets:
-        invested, current = _asset_return(asset)
-        total_invested += invested
-        total_current += current
+    async def _series_for(filter_groups=None, filter_classes=None):
+        return await portfolio_timeseries_service.get_timeseries(
+            session, user,
+            months=months,
+            since_start=since_start,
+            asset_classes=filter_classes,
+            group_ids=filter_groups,
+            date_from=date_from,
+            date_to=date_to,
+        )
 
-        gid = str(asset.group_id) if asset.group_id else "_ungrouped"
-        gname = groups_by_id.get(gid, "Sem carteira")
-        if gid not in by_group:
-            by_group[gid] = {"id": gid, "name": gname, "invested": 0.0, "current": 0.0}
-        by_group[gid]["invested"] += invested
-        by_group[gid]["current"] += current
+    # Consolidated (respect the incoming group_ids filter — same as before).
+    consolidated_series = await _series_for(filter_groups=parsed_group_ids)
+    consolidated = _window_return_from_series(consolidated_series)
 
-        cls = detect_asset_class(asset.ticker, asset.name)
-        if cls not in by_class:
-            by_class[cls] = {"name": cls, "invested": 0.0, "current": 0.0}
-        by_class[cls]["invested"] += invested
-        by_class[cls]["current"] += current
+    # By group — one call per group present in the filtered set.
+    by_group_out = []
+    for gid in present_group_ids:
+        try:
+            g_uuid = _uuid.UUID(gid)
+        except ValueError:
+            continue
+        s = await _series_for(filter_groups=[g_uuid])
+        result = _window_return_from_series(s)
+        by_group_out.append({
+            "id": gid,
+            "name": groups_by_id.get(gid, "Sem carteira"),
+            **result,
+        })
 
-    def _pct(inv: float, cur: float) -> Optional[float]:
-        if inv <= 0:
-            return None
-        return round((cur - inv) / inv * 100, 2)
-
-    groups_out = [
-        {
-            "id": v["id"],
-            "name": v["name"],
-            "invested": round(v["invested"], 2),
-            "current": round(v["current"], 2),
-            "return_pct": _pct(v["invested"], v["current"]),
-        }
-        for v in by_group.values()
-    ]
-
-    classes_out = [
-        {
-            "name": v["name"],
-            "invested": round(v["invested"], 2),
-            "current": round(v["current"], 2),
-            "return_pct": _pct(v["invested"], v["current"]),
-        }
-        for v in sorted(by_class.values(), key=lambda x: -x["current"])
-    ]
+    # By class — one call per asset_class present in the filtered set.
+    by_class_out = []
+    for cls in present_classes:
+        s = await _series_for(filter_classes=[cls])
+        result = _window_return_from_series(s)
+        by_class_out.append({"name": cls, **result})
+    # Largest current value first, matching the previous ordering.
+    by_class_out.sort(key=lambda x: -(x.get("current") or 0))
 
     return {
-        "consolidated": {
-            "invested": round(total_invested, 2),
-            "current": round(total_current, 2),
-            "return_pct": _pct(total_invested, total_current),
-        },
-        "by_group": groups_out,
-        "by_class": classes_out,
+        "consolidated": consolidated,
+        "by_group": by_group_out,
+        "by_class": by_class_out,
     }

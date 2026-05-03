@@ -415,8 +415,18 @@ export default function InvestmentsPage() {
   const groupIdsParam = selectedGroups.size > 0 ? [...selectedGroups].join(',') : undefined
 
   const { data: returnsData, isLoading: returnsLoading } = useQuery<PortfolioReturns>({
-    queryKey: ['inv-benchmarks-returns', groupIdsParam],
-    queryFn: () => investmentBenchmarks.returns(groupIdsParam),
+    queryKey: [
+      'inv-benchmarks-returns',
+      groupIdsParam,
+      customRange ? `range:${customRange.from}:${customRange.to}` : `${sinceStart}-${months}`,
+    ],
+    queryFn: () => investmentBenchmarks.returns({
+      groupIds: groupIdsParam,
+      months,
+      sinceStart: sinceStart && !customRange,
+      dateFrom: customRange?.from,
+      dateTo: customRange?.to,
+    }),
   })
 
   const chartData = useMemo<MergedRow[]>(() => {

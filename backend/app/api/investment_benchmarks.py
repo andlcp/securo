@@ -34,8 +34,20 @@ async def get_benchmark_series(
 @router.get("/returns")
 async def get_portfolio_returns(
     group_ids: Optional[str] = Query(None, description="Comma-separated group UUIDs"),
+    months: int = Query(12, ge=1, le=240),
+    since_start: bool = Query(False),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
     ids = [g.strip() for g in group_ids.split(",") if g.strip()] if group_ids else None
-    return await investment_benchmark_service.get_portfolio_returns(session, user.id, ids)
+    return await investment_benchmark_service.get_portfolio_returns(
+        session, user.id,
+        user=user,
+        group_ids=ids,
+        months=months,
+        since_start=since_start,
+        date_from=date_from,
+        date_to=date_to,
+    )

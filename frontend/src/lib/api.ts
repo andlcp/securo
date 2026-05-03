@@ -768,14 +768,24 @@ export const investmentBenchmarks = {
     const { data } = await api.get('/investment-benchmarks/series', { params })
     return data
   },
-  returns: async (groupIds?: string): Promise<{
+  returns: async (params: {
+    groupIds?: string;
+    months?: number;
+    sinceStart?: boolean;
+    dateFrom?: string;
+    dateTo?: string;
+  } = {}): Promise<{
     consolidated: { invested: number; current: number; return_pct: number | null }
     by_group: { id: string; name: string; invested: number; current: number; return_pct: number | null }[]
     by_class: { name: string; invested: number; current: number; return_pct: number | null }[]
   }> => {
-    const { data } = await api.get('/investment-benchmarks/returns', {
-      params: groupIds ? { group_ids: groupIds } : {},
-    })
+    const q: Record<string, unknown> = {}
+    if (params.groupIds) q.group_ids = params.groupIds
+    if (params.months) q.months = params.months
+    if (params.sinceStart) q.since_start = true
+    if (params.dateFrom) q.date_from = params.dateFrom
+    if (params.dateTo) q.date_to = params.dateTo
+    const { data } = await api.get('/investment-benchmarks/returns', { params: q })
     return data
   },
 }
