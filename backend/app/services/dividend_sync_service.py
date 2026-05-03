@@ -154,15 +154,17 @@ async def _process_asset_events(
 
     # CSV-first authority: if the user imported a dividend history via
     # csv_import (i.e. push_to_securo from the broker statement), treat
-    # it as ground truth for the past and let auto-sync only fill in
-    # events strictly newer than the last CSV row. This avoids the case
-    # where Yahoo reports gross while XP records net for the same payout
-    # and the values differ enough to slip past the value-match dedupe.
-    csv_dividend_dates = [
-        tx.date for tx in txs
+    # it as ground truth for the past and skip any auto-sync event that
+    # falls in a calendar month already covered by the CSV. This catches
+    # the case where Yahoo's ex-date is one day after the CSV's payment
+    # date (different days, same month, same payout) and avoids the
+    # gross-vs-net value discrepancy that lets duplicates slip past the
+    # ±20-day / 5 %-value dedupe.
+    csv_covered_months: set[tuple[int, int]] = {
+        (tx.date.year, tx.date.month)
+        for tx in txs
         if tx.type in _DIVIDEND_LIKE and tx.source == "csv_import"
-    ]
-    csv_cutoff = max(csv_dividend_dates) if csv_dividend_dates else None
+    }
 
     created = 0
     skipped = 0
@@ -186,11 +188,9 @@ async def _process_asset_events(
             skipped += 1
             continue
 
-        # CSV-first: skip anything dated on/before the user's last
-        # csv_import dividend for this asset. Their broker statement is
-        # the trusted source for that period; we only let the auto-sync
-        # add events that postdate it.
-        if csv_cutoff is not None and ev_date <= csv_cutoff:
+        # CSV-first: skip anything in a calendar month already covered
+        # by the user's csv_import dividend history.
+        if (ev_date.year, ev_date.month) in csv_covered_months:
             skipped += 1
             continue
 
