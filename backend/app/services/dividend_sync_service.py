@@ -47,10 +47,19 @@ _BUY_TYPES = {"BUY", "DEPOSIT"}
 _SELL_TYPES = {"SELL", "WITHDRAWAL"}
 _DIVIDEND_LIKE = {"DIVIDEND", "JCP", "RENDIMENTO"}
 
-# Window (in days) around an existing dividend within which we suppress
-# a new event for the same asset. Yahoo gives ex-date, XP gives payment
-# date — typically 1–5 days apart for the same event.
-_DEDUPE_WINDOW_DAYS = 5
+# Window (in days) around an existing dividend within which a new event
+# is treated as the same payout for dedupe purposes. Brazilian FIIs pay
+# the rendimento ~10–15 days after the ex-date, so anything tighter than
+# this misses the cross-source duplicates between Yahoo (ex-date) and the
+# XP CSV (payment date). 20 days handles every common monthly cadence.
+_DEDUPE_WINDOW_DAYS = 20
+
+# Two events are considered "the same payout" only if their per-share
+# amount is within this absolute *and* relative tolerance. Stops a
+# legitimate JCP near a separate dividend from being suppressed when
+# the values differ.
+_DEDUPE_VALUE_ABS = 0.50  # R$
+_DEDUPE_VALUE_REL = 0.05  # 5 %
 
 # Per-type withholding factor applied to amount × units before storing.
 _FACTOR_BY_TYPE = {
@@ -89,13 +98,32 @@ def _units_at(asset_units: float, txs: list[AssetTransaction], on: date) -> floa
     return u
 
 
+def _values_match(a: float, b: float) -> bool:
+    """True if two per-share dividend values look like the same payout —
+    within an absolute floor (±R$ 0.50) AND a relative tolerance (±5 %).
+    Both checks have to pass so we don't incorrectly merge a small
+    R$ 0.05 dividend with an unrelated R$ 0.10 one."""
+    diff = abs(a - b)
+    if diff > _DEDUPE_VALUE_ABS:
+        return False
+    base = max(abs(a), abs(b), 1e-9)
+    return (diff / base) <= _DEDUPE_VALUE_REL
+
+
 def _has_nearby_existing_dividend(
-    target: date,
-    existing_dates: list[date],
+    target_date: date,
+    target_value: float,
+    existing_events: list[tuple[date, float]],
 ) -> bool:
-    """True if any existing dividend-like row falls within
-    ±_DEDUPE_WINDOW_DAYS of `target`. existing_dates does NOT need to be sorted."""
-    return any(abs((target - d).days) <= _DEDUPE_WINDOW_DAYS for d in existing_dates)
+    """True if any existing dividend-like row falls within both
+    ±_DEDUPE_WINDOW_DAYS of target_date AND has a per-share value matching
+    target_value (per `_values_match`). Catches FII payouts where the
+    Yahoo ex-date is 10-15 days off the XP payment-date but the cash
+    amount is identical."""
+    for d, v in existing_events:
+        if abs((target_date - d).days) <= _DEDUPE_WINDOW_DAYS and _values_match(target_value, v):
+            return True
+    return False
 
 
 async def _process_asset_events(
@@ -114,7 +142,13 @@ async def _process_asset_events(
     ).order_by(AssetTransaction.date)
     txs = list((await session.execute(stmt)).scalars().all())
 
-    existing_div_dates = [tx.date for tx in txs if tx.type in _DIVIDEND_LIKE]
+    # (date, total_value) pairs for every existing dividend-like row on
+    # this asset — used for the cross-source dedupe check below.
+    existing_div_events: list[tuple[date, float]] = [
+        (tx.date, float(tx.value or 0))
+        for tx in txs
+        if tx.type in _DIVIDEND_LIKE and tx.value is not None
+    ]
     existing_external_ids = {tx.external_id for tx in txs if tx.external_id}
     asset_units_today = float(asset.units or 0)
 
@@ -139,11 +173,6 @@ async def _process_asset_events(
         if external_id in existing_external_ids:
             skipped += 1
             continue
-        if _has_nearby_existing_dividend(ev_date, existing_div_dates):
-            # CSV / manual / earlier sync already has a dividend within the
-            # ±5-day window for this asset. Preserve the user's curated row.
-            skipped += 1
-            continue
 
         units = _units_at(asset_units_today, txs, ev_date)
         if units <= 0:
@@ -151,10 +180,20 @@ async def _process_asset_events(
             continue
 
         net_amount = amount_per_share * factor
-        value = round(net_amount * units, 2)
-        if value <= 0:
+        new_total = round(net_amount * units, 2)
+        if new_total <= 0:
             skipped += 1
             continue
+
+        # Cross-source dedupe: skip when an existing dividend-like row on
+        # the same asset has both a nearby date AND a similar total. This
+        # catches FII payouts where Yahoo's ex-date and XP's payment date
+        # are 10-15 days apart but represent the same R$ amount.
+        if _has_nearby_existing_dividend(ev_date, new_total, existing_div_events):
+            skipped += 1
+            continue
+
+        value = new_total
 
         notes_bits = [
             f"{source_label}: {amount_per_share:g}/share × {units:g}",
@@ -178,7 +217,7 @@ async def _process_asset_events(
         )
         new_rows.append(row)
         existing_external_ids.add(external_id)
-        existing_div_dates.append(ev_date)
+        existing_div_events.append((ev_date, value))
         created += 1
 
     if new_rows:
