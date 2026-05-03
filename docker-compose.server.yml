@@ -10,6 +10,7 @@ x-backend-env: &backend-env
   PLUGGY_OAUTH_REDIRECT_URI: ${PLUGGY_OAUTH_REDIRECT_URI:-http://46.225.24.167/oauth/callback}
   REDIS_URL: redis://redis:6379/0
   OPENEXCHANGERATES_APP_ID: ${OPENEXCHANGERATES_APP_ID:-}
+  BRAPI_API_KEY: ${BRAPI_API_KEY:-}
   FX_SYNC_MODE: ${FX_SYNC_MODE:-scheduled}
   STORAGE_LOCAL_PATH: /app/data/attachments
 

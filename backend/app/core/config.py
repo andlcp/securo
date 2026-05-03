@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     # FX Rates
     openexchangerates_app_id: str = ""
+    # BRAPI (Brazilian market data: dividends with JCP/Rendimento separation)
+    brapi_api_key: str = ""
     supported_currencies: str = "USD,EUR,GBP,BRL,CAD,AUD,CHF,ARS,JPY,MXN,INR,SEK"  # comma-separated list
     fx_sync_mode: str = "on_demand"  # "on_demand" or "scheduled"
 
