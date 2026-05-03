@@ -434,7 +434,12 @@ export default function InvestmentsPage() {
   }, [tsData, benchmarkData, hasSnapshots, snapshots, months, sinceStart, granularity])
 
   // Latest snapshot — used to show TWR badges from imported data.
-  const latestSnap = hasSnapshots && snapshots ? snapshots[snapshots.length - 1] : null
+  // Suppressed while the live timeseries query is still loading so the KPI
+  // cards don't flash an older imported value (typically the last
+  // push_to_securo snapshot) before the live numbers arrive.
+  const latestSnap = (hasSnapshots && snapshots && !tsLoading)
+    ? snapshots[snapshots.length - 1]
+    : null
   const latestTs = tsData && tsData.length > 0 ? tsData[tsData.length - 1] : null
   const latestTsLifetime = tsLifetime && tsLifetime.length > 0 ? tsLifetime[tsLifetime.length - 1] : null
 
