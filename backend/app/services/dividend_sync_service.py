@@ -188,24 +188,67 @@ async def _process_asset_events(
     return {"created": created, "skipped": skipped, "fetched": len(events)}
 
 
-async def _fetch_for_asset(asset: Asset, brapi_token: str) -> tuple[list[dict], str]:
+async def _fetch_for_asset(
+    asset: Asset,
+    brapi_token: str,
+    brapi_enabled: bool,
+) -> tuple[list[dict], str]:
     """Fetch dividend events for one asset, picking the source by ticker.
-    Returns (events, source_label) — source_label is what we'll write into
-    AssetTransaction.source so the events log shows where each row came from."""
+
+    For .SA tickers we *prefer* BRAPI (proper JCP/DIVIDEND/RENDIMENTO
+    separation) but transparently fall back to Yahoo if BRAPI is
+    unavailable — common cases:
+
+      - BRAPI dividend module gated behind a paid plan (free tier
+        returns 403 on the ?dividends=true endpoint),
+      - no BRAPI_API_KEY configured,
+      - transient network failure.
+
+    Yahoo lumps every BR cash event into a single "dividends" stream
+    without a type label, so fallbacks come through as DIVIDEND.
+
+    Returns (events, source_label) for AssetTransaction.source so the
+    events log can show where each row originated.
+    """
     today = date.today()
     start = asset.purchase_date or date(today.year - 2, today.month, today.day)
     if start > today:
         start = today
 
     if _is_brazilian_ticker(asset.ticker):
-        events = await fetch_brapi_dividends(_bare_ticker(asset.ticker),
-                                             brapi_token, start, today)
-        return events, "brapi"
-    # Yahoo for everything else (US stocks/ETFs, crypto). Yahoo only
-    # exposes a single "dividends" stream, so events come back without
-    # a type → _process_asset_events defaults them to DIVIDEND.
+        if brapi_enabled and brapi_token:
+            events = await fetch_brapi_dividends(_bare_ticker(asset.ticker),
+                                                 brapi_token, start, today)
+            if events:
+                return events, "brapi"
+            # Empty either because the asset really has no dividends or
+            # the request was gated/blocked — fall through to Yahoo.
+        events = await fetch_yahoo_dividends(asset.ticker, start, today)
+        return events, "yfinance"
+
+    # US stocks/ETFs, crypto — Yahoo is fine.
     events = await fetch_yahoo_dividends(asset.ticker, start, today)
     return events, "yfinance"
+
+
+async def _probe_brapi_dividends(token: str) -> bool:
+    """One-shot probe: does this BRAPI key have access to the dividends
+    endpoint? Returns False on 403 (free tier), network errors, or any
+    other non-success. Caches the result for the rest of the sync run so
+    we don't issue 30+ doomed requests."""
+    if not token:
+        return False
+    try:
+        # PETR4 is on every plan's allowlist; if dividends are gated, we
+        # get a 403 here and skip BRAPI for the whole batch.
+        events = await fetch_brapi_dividends("PETR4", token,
+                                             date.today() - timedelta(days=30),
+                                             date.today())
+    except Exception:
+        return False
+    # fetch_brapi_dividends swallows errors and returns []. We
+    # additionally accept any non-empty result as proof the key works.
+    return bool(events)
 
 
 async def sync_user_dividends(
@@ -231,8 +274,17 @@ async def sync_user_dividends(
     if not assets:
         return {"created": 0, "skipped": 0, "fetched": 0, "assets": []}
 
+    # Probe once before the per-asset fan-out: if the BRAPI key isn't
+    # cleared for the dividend endpoint (free plan returns 403), we'd
+    # otherwise burn a request per BR ticker before falling back. The
+    # probe collapses that to a single wasted call.
+    brapi_enabled = await _probe_brapi_dividends(brapi_token)
+    if not brapi_enabled and brapi_token:
+        logger.info("BRAPI dividend endpoint unavailable for this key — "
+                    "falling back to Yahoo for all .SA tickers.")
+
     fetch_results = await asyncio.gather(*[
-        _fetch_for_asset(a, brapi_token) for a in assets
+        _fetch_for_asset(a, brapi_token, brapi_enabled) for a in assets
     ])
 
     results: list[dict] = []
