@@ -17,6 +17,9 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.account import Account
+from app.models.goal import Goal
+from app.models.import_log import ImportLog
+from app.models.recurring_transaction import RecurringTransaction
 from app.models.transaction import Transaction
 from app.schemas.account import AccountCreate, AccountUpdate
 from app.services.account_service import (
@@ -318,6 +321,128 @@ async def test_delete_account_not_found(session: AsyncSession, test_user):
     assert result is False
 
 
+@pytest.mark.asyncio
+async def test_delete_account_with_import_logs(session: AsyncSession, test_user):
+    """Regression (#110): deleting an account with import_logs must succeed and
+    cascade-delete the orphaned log rows instead of tripping the FK constraint."""
+    from sqlalchemy import select
+
+    account = await _make_account(session, test_user.id, "With Imports")
+    log = ImportLog(
+        id=uuid.uuid4(), user_id=test_user.id, account_id=account.id,
+        filename="stmt.ofx", format="ofx", transaction_count=3,
+    )
+    session.add(log)
+    await session.commit()
+    log_id = log.id
+
+    result = await delete_account(session, account.id, test_user.id)
+    assert result is True
+
+    assert await get_account(session, account.id, test_user.id) is None
+    orphan = await session.execute(
+        select(ImportLog).where(ImportLog.id == log_id)
+    )
+    assert orphan.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_delete_account_with_recurring_transactions(session: AsyncSession, test_user):
+    """Regression (#110, @stanleyndachi): deleting an account with a recurring
+    transaction must succeed; the recurring rows cascade away since a schedule
+    without an account can't post."""
+    from sqlalchemy import select
+
+    account = await _make_account(session, test_user.id, "With Recurring")
+    rec = RecurringTransaction(
+        id=uuid.uuid4(), user_id=test_user.id, account_id=account.id,
+        description="Rent", amount=Decimal("1000.00"), currency="BRL",
+        type="debit", frequency="monthly",
+        start_date=date.today(), next_occurrence=date.today(),
+    )
+    session.add(rec)
+    await session.commit()
+    rec_id = rec.id
+
+    result = await delete_account(session, account.id, test_user.id)
+    assert result is True
+
+    orphan = await session.execute(
+        select(RecurringTransaction).where(RecurringTransaction.id == rec_id)
+    )
+    assert orphan.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_delete_account_with_imported_transactions(session: AsyncSession, test_user):
+    """Regression (#110 v2, @ivancarlosti): deleting an account whose transactions
+    were imported from a file must succeed. The imported rows reference the
+    import_log via transactions.import_id — deleting import_logs first would
+    trip transactions_import_id_fkey until that reference is cleared."""
+    from sqlalchemy import select
+
+    account = await _make_account(session, test_user.id, "Imported Txns")
+    log = ImportLog(
+        id=uuid.uuid4(), user_id=test_user.id, account_id=account.id,
+        filename="stmt.ofx", format="ofx", transaction_count=1,
+    )
+    session.add(log)
+    await session.flush()
+
+    tx = await _add_txn(
+        session, test_user.id, account.id,
+        amount=42.0, txn_type="debit", txn_date=date.today(),
+        source="import",
+    )
+    tx.import_id = log.id
+    await session.commit()
+    log_id = log.id
+    tx_id = tx.id
+
+    result = await delete_account(session, account.id, test_user.id)
+    assert result is True
+
+    assert await get_account(session, account.id, test_user.id) is None
+
+    session.expire_all()
+    orphan_log = await session.execute(
+        select(ImportLog).where(ImportLog.id == log_id)
+    )
+    assert orphan_log.scalar_one_or_none() is None
+    orphan_tx = await session.execute(
+        select(Transaction).where(Transaction.id == tx_id)
+    )
+    assert orphan_tx.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_delete_account_with_linked_goal(session: AsyncSession, test_user):
+    """Regression (#110): deleting an account tracked by a goal must succeed;
+    the goal survives with account_id nulled out (progress history is kept)."""
+    from sqlalchemy import select
+
+    account = await _make_account(session, test_user.id, "Goal Tracked")
+    goal = Goal(
+        id=uuid.uuid4(), user_id=test_user.id, name="Emergency fund",
+        target_amount=Decimal("10000.00"), current_amount=Decimal("2500.00"),
+        currency="BRL", tracking_type="account", account_id=account.id,
+    )
+    session.add(goal)
+    await session.commit()
+    goal_id = goal.id
+
+    result = await delete_account(session, account.id, test_user.id)
+    assert result is True
+
+    session.expire_all()
+    surviving = await session.execute(
+        select(Goal).where(Goal.id == goal_id)
+    )
+    kept = surviving.scalar_one()
+    assert kept.account_id is None
+    assert kept.current_amount == Decimal("2500.00")
+
+
 # ---------------------------------------------------------------------------
 # close_account / reopen_account
 # ---------------------------------------------------------------------------
@@ -335,14 +460,19 @@ async def test_close_account(session: AsyncSession, test_user):
 
 
 @pytest.mark.asyncio
-async def test_close_bank_connected_unlinks(session: AsyncSession, test_user, test_connection):
-    """Closing bank-connected account sets connection_id to None."""
+async def test_close_bank_connected_keeps_link(session: AsyncSession, test_user, test_connection):
+    """Closing a bank-connected account keeps its connection link.
+
+    Sync uses (connection_id, external_id) to find the row; unlinking on close
+    caused sync to create a duplicate active account (issue #90). The is_closed
+    flag alone is enough to keep sync from touching it.
+    """
     account = await _make_account(
         session, test_user.id, "Connected Close",
         connection_id=test_connection.id, external_id="ext-close",
     )
     closed = await close_account(session, account.id, test_user.id)
-    assert closed.connection_id is None
+    assert closed.connection_id == test_connection.id
     assert closed.is_closed is True
 
 

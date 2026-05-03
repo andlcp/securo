@@ -1,6 +1,10 @@
 {
   "app": {
-    "name": "Securo"
+    "name": "Securo",
+    "versionAriaLabel": "Versão em execução {{version}}",
+    "versionLabel": "Versão {{version}}",
+    "updateAvailable": "Atualização disponível",
+    "updateAvailableHint": "Uma nova versão ({{version}}) está disponível no GitHub"
   },
   "cmdk": {
     "title": "Paleta de comandos",
@@ -182,7 +186,7 @@
     "exportError": "Erro ao exportar transações",
     "syncedInfo": "Transação sincronizada — apenas categoria e notas podem ser editadas",
     "uncategorized": "Sem categoria",
-    "selected": "{{count}} selecionadas",
+    "selected": "selecionadas",
     "bulkCategorize": "Aplicar",
     "bulkSuccess": "{{count}} transações categorizadas",
     "selectCategory": "Selecionar categoria...",
@@ -278,7 +282,7 @@
     "title": "Contas",
     "connectBank": "Conectar Banco",
     "confirmDeleteTitle": "Excluir conta?",
-    "confirmDeleteDesc": "Esta ação é irreversível e removerá todas as transações associadas a esta conta.",
+    "confirmDeleteDesc": "Esta ação é irreversível. Também excluirá todas as transações, registros de importação e transações recorrentes vinculadas a esta conta, e desvinculará qualquer meta que estivesse acompanhando-a.",
     "openingBalance": "saldo inicial",
     "notFound": "Conta não encontrada.",
     "balance": "Saldo",
@@ -336,6 +340,8 @@
     "connected": "Banco conectado com sucesso",
     "connectError": "Erro ao conectar banco",
     "disconnected": "Conexão removida",
+    "confirmDisconnectTitle": "Desconectar conexão bancária?",
+    "confirmDisconnectDesc": "Isso vai desvincular {{institution}} e remover do app as contas e transações sincronizadas. Esta ação é irreversível.",
     "viewTransactions": "Ver transações",
     "currentBalance": "Saldo atual",
     "income": "Entradas",
@@ -359,7 +365,12 @@
     "selectConnector": "Selecionar Conector",
     "selectConnectorDesc": "Escolha um provedor de conexão bancária",
     "connectorNotConfigured": "Este conector requer configuração. Configure as credenciais necessárias para habilitá-lo.",
-    "noConnectorsAvailable": "Nenhum conector bancário disponível"
+    "noConnectorsAvailable": "Nenhum conector bancário disponível",
+    "providers": {
+      "pluggy": {
+        "description": "Provedor Open Finance para bancos brasileiros"
+      }
+    }
   },
   "connections": {
     "settings": "Configurações da conexão",
@@ -580,6 +591,7 @@
     "dateFormat": "Formato da data",
     "dateFormatAuto": "Automático (detectar)",
     "flipAmounts": "Inverter valores (trocar entrada/saída)",
+    "detectDuplicates": "Ignorar transações duplicadas",
     "splitColumns": "Separar colunas entrada/saída",
     "inflowColumn": "Coluna de entrada",
     "outflowColumn": "Coluna de saída",
@@ -749,8 +761,10 @@
     "trend": "Ao Longo do Tempo",
     "breakdown": "Composição",
     "noData": "Nenhum dado disponível para este período",
+    "range3m": "3M",
     "range6m": "6M",
     "range1y": "1A",
+    "range12m": "12M",
     "range2y": "2A",
     "intervalDaily": "D",
     "intervalWeekly": "S",
@@ -760,6 +774,15 @@
     "assets": "Ativos",
     "liabilities": "Passivos",
     "vsStart": "vs início do período",
+    "vsToday": "variação projetada",
+    "balance": "Saldo",
+    "inflow": "Entrada",
+    "outflow": "Saída",
+    "inflowOutflow": "Entradas vs Saídas",
+    "startingBalance": "Saldo Atual",
+    "endingBalance": "Saldo Projetado",
+    "projectedIncome": "Receita Projetada",
+    "projectedExpenses": "Despesa Projetada",
     "incomeExpenses": "Receitas vs Despesas",
     "cashFlow": "Fluxo de Caixa",
     "comingSoon": "(em breve)",
@@ -811,6 +834,7 @@
   "common": {
     "save": "Salvar",
     "cancel": "Cancelar",
+    "close": "Fechar",
     "delete": "Excluir",
     "edit": "Editar",
     "loading": "Carregando...",
@@ -845,6 +869,26 @@
     "downloading": "Baixando...",
     "success": "Backup baixado com sucesso",
     "error": "Erro ao baixar backup"
+  },
+  "update": {
+    "title": "Atualização do servidor",
+    "runningLabel": "em execução",
+    "newVersionAvailable": "Nova versão disponível:",
+    "description": "Uma nova versão do Securo está disponível. Considere atualizar se você:",
+    "reasonFeatures": "Quer acessar os recursos e melhorias mais recentes",
+    "reasonBugs": "Está enfrentando problemas que podem ter sido resolvidos na nova versão",
+    "releaseNotesHintBefore": "Recomendamos ler as",
+    "releaseNotesLink": "notas da versão",
+    "releaseNotesHintAfter": "para verificar mudanças incompatíveis antes de atualizar.",
+    "commandLabel": "Comando de atualização",
+    "copyCommand": "Copiar comando",
+    "copied": "Copiado",
+    "copyFailed": "Erro ao copiar para a área de transferência",
+    "autoCheckToggle": "Verificar novas atualizações automaticamente",
+    "autoCheckDisabled": "A verificação automática de atualizações está desligada. Ative-a para saber quando uma nova versão estiver disponível.",
+    "checking": "Verificando atualizações…",
+    "upToDate": "Você está na versão mais recente —",
+    "menuItem": "Verificar atualizações"
   },
   "admin": {
     "users": {
@@ -884,6 +928,9 @@
       "accountingCashDesc": "Compras no cartão contam no dia em que acontecem (padrão).",
       "accountingAccrual": "Regime de competência",
       "accountingAccrualDesc": "Compras no cartão contam na data de vencimento da fatura — reflete o fluxo de caixa real.",
+      "providerCategoriesTitle": "Categorias",
+      "providerCategories": "Usar categorias da integração",
+      "providerCategoriesDesc": "Quando desativado, as transações sincronizadas chegam sem categoria, apenas suas Regras se aplicam.",
       "updated": "Configuração atualizada"
     }
   },

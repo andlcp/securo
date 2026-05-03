@@ -55,3 +55,8 @@ investimentos_consolidado.xlsx
 
 # Session notes (personal)
 CONTEXTO_SESSAO.md
+
+tmp/
+
+# Ignore local configuration files
+.vscode/

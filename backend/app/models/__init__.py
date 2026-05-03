@@ -18,6 +18,7 @@ from app.models.app_settings import AppSetting
 from app.models.goal import Goal
 from app.models.portfolio_snapshot import PortfolioSnapshot
 from app.models.asset_transaction import AssetTransaction
+from app.models.credit_card_bill import CreditCardBill
 
 __all__ = [
     "User",
@@ -41,4 +42,5 @@ __all__ = [
     "Goal",
     "PortfolioSnapshot",
     "AssetTransaction",
+    "CreditCardBill",
 ]

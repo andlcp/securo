@@ -1,6 +1,10 @@
 {
   "app": {
-    "name": "Securo"
+    "name": "Securo",
+    "versionAriaLabel": "Running version {{version}}",
+    "versionLabel": "Version {{version}}",
+    "updateAvailable": "Update Available",
+    "updateAvailableHint": "A newer release ({{version}}) is available on GitHub"
   },
   "cmdk": {
     "title": "Command palette",
@@ -182,7 +186,7 @@
     "exportError": "Failed to export transactions",
     "syncedInfo": "Bank-synced transaction — only category and notes can be edited",
     "uncategorized": "Uncategorized",
-    "selected": "{{count}} selected",
+    "selected": "selected",
     "bulkCategorize": "Apply",
     "bulkSuccess": "{{count}} transactions categorized",
     "selectCategory": "Select category...",
@@ -278,7 +282,7 @@
     "title": "Accounts",
     "connectBank": "Connect Bank",
     "confirmDeleteTitle": "Delete account?",
-    "confirmDeleteDesc": "This action is irreversible and will remove all transactions associated with this account.",
+    "confirmDeleteDesc": "This action is irreversible. It will also delete every transaction, import record and recurring transaction attached to this account, and unlink any goals that were tracking it.",
     "openingBalance": "opening balance",
     "notFound": "Account not found.",
     "balance": "Balance",
@@ -336,6 +340,8 @@
     "connected": "Bank connected successfully",
     "connectError": "Failed to connect bank",
     "disconnected": "Connection removed",
+    "confirmDisconnectTitle": "Disconnect bank connection?",
+    "confirmDisconnectDesc": "This will unlink {{institution}} and remove synced accounts and transactions from the app. This action is irreversible.",
     "viewTransactions": "View transactions",
     "currentBalance": "Current balance",
     "income": "Income",
@@ -359,7 +365,12 @@
     "selectConnector": "Select Connector",
     "selectConnectorDesc": "Choose a bank connection provider",
     "connectorNotConfigured": "This connector requires configuration. Set up the required credentials to enable it.",
-    "noConnectorsAvailable": "No bank connectors available"
+    "noConnectorsAvailable": "No bank connectors available",
+    "providers": {
+      "pluggy": {
+        "description": "Open finance provider for Brazilian banks"
+      }
+    }
   },
   "connections": {
     "settings": "Connection settings",
@@ -580,6 +591,7 @@
     "dateFormat": "Date format",
     "dateFormatAuto": "Auto (detect)",
     "flipAmounts": "Negate amounts (swap income/expense)",
+    "detectDuplicates": "Skip duplicate transactions",
     "splitColumns": "Split inflow/outflow columns",
     "inflowColumn": "Inflow column",
     "outflowColumn": "Outflow column",
@@ -749,8 +761,10 @@
     "trend": "Over Time",
     "breakdown": "Breakdown",
     "noData": "No data available for this period",
+    "range3m": "3M",
     "range6m": "6M",
     "range1y": "1Y",
+    "range12m": "12M",
     "range2y": "2Y",
     "intervalDaily": "D",
     "intervalWeekly": "W",
@@ -760,6 +774,15 @@
     "assets": "Assets",
     "liabilities": "Liabilities",
     "vsStart": "vs start of period",
+    "vsToday": "projected change",
+    "balance": "Balance",
+    "inflow": "Inflow",
+    "outflow": "Outflow",
+    "inflowOutflow": "Inflow vs Outflow",
+    "startingBalance": "Starting Balance",
+    "endingBalance": "Projected Balance",
+    "projectedIncome": "Projected Income",
+    "projectedExpenses": "Projected Expenses",
     "incomeExpenses": "Income vs Expenses",
     "cashFlow": "Cash Flow",
     "comingSoon": "(coming soon)",
@@ -811,6 +834,7 @@
   "common": {
     "save": "Save",
     "cancel": "Cancel",
+    "close": "Close",
     "delete": "Delete",
     "edit": "Edit",
     "loading": "Loading...",
@@ -845,6 +869,26 @@
     "downloading": "Downloading...",
     "success": "Backup downloaded successfully",
     "error": "Failed to download backup"
+  },
+  "update": {
+    "title": "Server update",
+    "runningLabel": "running",
+    "newVersionAvailable": "New version available:",
+    "description": "A new version of Securo is available. Consider updating if you:",
+    "reasonFeatures": "Want to access the latest features and improvements",
+    "reasonBugs": "Are experiencing issues that may be resolved in the new version",
+    "releaseNotesHintBefore": "We recommend reviewing the",
+    "releaseNotesLink": "release notes",
+    "releaseNotesHintAfter": "for any breaking changes before updating.",
+    "commandLabel": "Upgrade command",
+    "copyCommand": "Copy command",
+    "copied": "Copied",
+    "copyFailed": "Failed to copy to clipboard",
+    "autoCheckToggle": "Automatically check for new updates",
+    "autoCheckDisabled": "Automatic update checks are turned off. Turn them on to know when a new version is available.",
+    "checking": "Checking for updates…",
+    "upToDate": "You're on the latest version —",
+    "menuItem": "Check for updates"
   },
   "admin": {
     "users": {
@@ -884,6 +928,9 @@
       "accountingCashDesc": "Credit card purchases count on the day they happen (default).",
       "accountingAccrual": "Accrual basis",
       "accountingAccrualDesc": "Credit card purchases count on the bill's due date — reflects actual cash flow.",
+      "providerCategoriesTitle": "Categories",
+      "providerCategories": "Use integration categories",
+      "providerCategoriesDesc": "When off, synced transactions arrive uncategorized so only your Rules apply.",
       "updated": "Setting updated"
     }
   },

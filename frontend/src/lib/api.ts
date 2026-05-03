@@ -10,6 +10,7 @@ import type {
   ConnectionSettings,
   Account,
   AccountSummary,
+  CreditCardBill,
   Transaction,
   Payee,
   PayeeSummary,
@@ -222,12 +223,16 @@ export const accounts = {
   delete: async (id: string): Promise<void> => {
     await api.delete(`/accounts/${id}`)
   },
-  summary: async (id: string, from?: string, to?: string): Promise<AccountSummary> => {
-    const { data } = await api.get(`/accounts/${id}/summary`, { params: { from, to } })
+  summary: async (id: string, from?: string, to?: string, billId?: string, unbilledOnly?: boolean): Promise<AccountSummary> => {
+    const { data } = await api.get(`/accounts/${id}/summary`, { params: { from, to, bill_id: billId, unbilled_only: unbilledOnly || undefined } })
     return data
   },
   balanceHistory: async (id: string, from?: string, to?: string): Promise<{ date: string; balance: number; balance_primary?: number }[]> => {
     const { data } = await api.get(`/accounts/${id}/balance-history`, { params: { from, to } })
+    return data
+  },
+  bills: async (id: string, limit = 24): Promise<CreditCardBill[]> => {
+    const { data } = await api.get(`/accounts/${id}/bills`, { params: { limit } })
     return data
   },
   close: async (id: string): Promise<Account> => {
@@ -252,11 +257,14 @@ export const transactions = {
     type?: string
     from?: string
     to?: string
+    bill_id?: string
+    unbilled_only?: boolean
     q?: string
     page?: number
     limit?: number
     include_opening_balance?: boolean
     exclude_transfers?: boolean
+    tags?: string[]
   }): Promise<PaginatedResponse<Transaction>> => {
     const { data } = await api.get('/transactions', {
       params,
@@ -298,6 +306,20 @@ export const transactions = {
     })
     return data
   },
+  bulkAddTags: async (transactionIds: string[], tags: string[]): Promise<{ updated: number }> => {
+    const { data } = await api.patch('/transactions/bulk-add-tags', {
+      transaction_ids: transactionIds,
+      tags,
+    })
+    return data
+  },
+  bulkRemoveTags: async (transactionIds: string[], tags: string[]): Promise<{ updated: number }> => {
+    const { data } = await api.patch('/transactions/bulk-remove-tags', {
+      transaction_ids: transactionIds,
+      tags,
+    })
+    return data
+  },
   linkTransfer: async (transactionIds: string[]): Promise<{ debit: Transaction; credit: Transaction; transfer_pair_id: string }> => {
     const { data } = await api.post('/transactions/link-transfer', {
       transaction_ids: transactionIds,
@@ -326,8 +348,26 @@ export const transactions = {
     const { data } = await api.post('/transactions/import/preview', formData)
     return data
   },
-  import: async (account_id: string, transactions: Transaction[], filename: string, detected_format: string): Promise<{ imported: number; skipped: number; import_log_id: string }> => {
-    const { data } = await api.post('/transactions/import', { account_id, transactions, filename, detected_format })
+  import: async (
+    account_id: string,
+    transactions: Transaction[],
+    filename: string,
+    detected_format: string,
+    options?: { detect_duplicates?: boolean },
+  ): Promise<{ imported: number; skipped: number; import_log_id: string }> => {
+    const payload: {
+      account_id: string
+      transactions: Transaction[]
+      filename: string
+      detected_format: string
+      detect_duplicates?: boolean
+    } = { account_id, transactions, filename, detected_format }
+
+    if (typeof options?.detect_duplicates === 'boolean') {
+      payload.detect_duplicates = options.detect_duplicates
+    }
+
+    const { data } = await api.post('/transactions/import', payload)
     return data
   },
   export: async (params?: {
@@ -648,6 +688,10 @@ export const reports = {
   },
   incomeExpenses: async (months = 12, interval = 'monthly'): Promise<ReportResponse> => {
     const { data } = await api.get('/reports/income-expenses', { params: { months, interval } })
+    return data
+  },
+  cashFlow: async (months = 6, interval = 'daily'): Promise<ReportResponse> => {
+    const { data } = await api.get('/reports/cash-flow', { params: { months, interval } })
     return data
   },
 }

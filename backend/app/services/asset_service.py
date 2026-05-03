@@ -70,14 +70,22 @@ def _generate_growth_values(
     growth_frequency: str,
     growth_start_date: Optional[date],
 ) -> list[AssetValue]:
-    """Generate all AssetValue rows from base_date to today using the growth rule."""
+    """Generate all AssetValue rows from base_date to today using the growth rule.
+    When growth_start_date is set, growth iteration begins from that date — not
+    from base_date — so the asset accrues no growth for the gap between
+    purchase and the configured growth start."""
     today = date.today()
     if growth_start_date and today < growth_start_date:
         return []
 
     values: list[AssetValue] = []
     current_amount = base_amount
-    current_date = base_date
+    # Match the frontend preview: `growth_start_date or base_date`. Otherwise
+    # backfill applied growth periods between purchase_date and
+    # growth_start_date that the form said wouldn't accrue, leaving the
+    # list-page total exactly N growth periods higher than the edit
+    # dialog's calculated value.
+    current_date = growth_start_date if growth_start_date else base_date
 
     while True:
         next_due = _next_due_date(current_date, growth_frequency)
@@ -516,12 +524,14 @@ async def get_portfolio_trend(
     session: AsyncSession, user_id: uuid.UUID
 ) -> dict:
     """Get portfolio trend data for stacked area chart.
-    Returns asset metadata + pivoted trend with fill-forward values."""
+    Returns asset metadata + pivoted trend with fill-forward values.
+    Sold assets are included so their pre-sell history still contributes
+    to the historical total; their contribution drops to 0 the day after
+    sell_date."""
     result = await session.execute(
         select(Asset).where(
             Asset.user_id == user_id,
             Asset.is_archived == False,
-            Asset.sell_date.is_(None),
         ).order_by(Asset.position, Asset.name)
     )
     active_assets = list(result.scalars().all())
@@ -532,6 +542,7 @@ async def get_portfolio_trend(
     # Collect all values per asset and all unique dates
     asset_meta = []
     asset_values_map: dict[str, list[tuple[date, float]]] = {}
+    sell_date_by_aid: dict[str, date] = {}
     all_dates: set[date] = set()
 
     # Get user's primary currency for conversion
@@ -558,6 +569,16 @@ async def get_portfolio_trend(
         if asset.purchase_price is not None and asset.purchase_date is not None:
             if not vals or asset.purchase_date < vals[0][0]:
                 vals.insert(0, (asset.purchase_date, float(asset.purchase_price)))
+
+        # If the asset was sold and a sell_price is recorded, treat it as the
+        # asset's terminal value on sell_date so the chart reflects the
+        # realized value before dropping to 0.
+        if asset.sell_date is not None:
+            sell_date_by_aid[aid] = asset.sell_date
+            if asset.sell_price is not None:
+                vals = [(d, v) for d, v in vals if d <= asset.sell_date]
+                if not vals or vals[-1][0] != asset.sell_date:
+                    vals.append((asset.sell_date, float(asset.sell_price)))
 
         # Convert every value to the primary currency at its own date so the
         # stacked areas and the tooltip total are all in the same unit. Before
@@ -608,6 +629,11 @@ async def get_portfolio_trend(
                 val = round(last_known[aid], 2)
             else:
                 val = 0
+            # After sell_date, the asset has been liquidated — drop to 0 so
+            # it stops contributing to the portfolio total going forward.
+            if aid in sell_date_by_aid and d > sell_date_by_aid[aid]:
+                val = 0
+                last_known[aid] = 0.0
             row[aid] = val
             date_total += val
         row["_total"] = round(date_total, 2)

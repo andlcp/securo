@@ -27,6 +27,7 @@ class TransactionCreate(TransactionBase):
     notes: Optional[str] = None
     amount_primary: Optional[Decimal] = None
     fx_rate_used: Optional[Decimal] = None
+    effective_bill_date: Optional[_Date] = None
 
 
 class TransactionUpdate(BaseModel):
@@ -41,6 +42,9 @@ class TransactionUpdate(BaseModel):
     notes: Optional[str] = None
     amount_primary: Optional[Decimal] = None
     fx_rate_used: Optional[Decimal] = None
+    # CC bucketing override (issue #92). Empty string / explicit null clears
+    # it back to auto. Only meaningful for credit-card accounts.
+    effective_bill_date: Optional[_Date] = None
 
 
 class TransactionRead(TransactionBase):
@@ -65,6 +69,8 @@ class TransactionRead(TransactionBase):
     total_installments: Optional[int] = None
     installment_total_amount: Optional[float] = None
     installment_purchase_date: Optional[_Date] = None
+    bill_id: Optional[uuid.UUID] = None
+    effective_bill_date: Optional[_Date] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -88,19 +94,30 @@ class LinkTransferRequest(BaseModel):
     transaction_ids: list[uuid.UUID]
 
 
+class BulkTagsRequest(BaseModel):
+    transaction_ids: list[uuid.UUID]
+    tags: list[str]
+
+
 class TransferRead(BaseModel):
     debit: TransactionRead
     credit: TransactionRead
     transfer_pair_id: uuid.UUID
 
 
+class TransactionImport(TransactionBase):
+    """TransactionBase extended with import-only fields not exposed in read responses."""
+    category_name: Optional[str] = None
+
+
 class TransactionImportPreview(BaseModel):
-    transactions: list[TransactionBase]
+    transactions: list[TransactionImport]
     detected_format: str
 
 
 class TransactionImportRequest(BaseModel):
     account_id: uuid.UUID
-    transactions: list[TransactionBase]
+    transactions: list[TransactionImport]
     filename: str = ""
     detected_format: str = ""
+    detect_duplicates: bool = True
