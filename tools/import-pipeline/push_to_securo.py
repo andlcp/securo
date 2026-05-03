@@ -10,10 +10,13 @@ After running this, the Patrimônio page populates with current positions
 and the Patrimônio Líquido (Net Worth) historical chart renders the full
 month-by-month curve — same data that powers the standalone TWR view.
 
-Three AssetGroups are created (idempotent):
-    "Renda Variável BR"  – B3 stocks/ETFs/FIIs with valuation_method="market_price"
-    "Renda Fixa"         – Tesouro & CDBs with valuation_method="manual"
-    "Ações US"           – IBKR holdings with valuation_method="market_price"
+A single AssetGroup per OWNER is created/reused (idempotent). Each
+ticker is assigned to that group regardless of asset class — class
+separation is handled by the asset_class column at the model level
+(RV BR, FIIs, RF, Stocks US, …). Switching --owner lets two members
+of the same household share the app instance, with each portfolio
+filterable independently and the dropdown "Consolidado" view summing
+both.
 
 For each Asset, monthly AssetValue rows are created from the history files.
 The B3 RV history is valued at qty × close (from prices_cache.csv).
@@ -24,7 +27,8 @@ Usage:
     python tools/import-pipeline/push_to_securo.py \
         --base-url http://46.225.24.167 \
         --email YOU@example.com \
-        [--reset]    # delete existing investments before importing
+        --owner anderson         # or camila
+        [--reset]    # delete existing investments in this owner's group
         [--no-history]  # skip AssetValue monthly rows (current snapshot only)
 
 Run from the repo root so the default --csv-dir=. picks up all the CSVs.
@@ -48,12 +52,15 @@ except ImportError:
 
 
 # --- AssetGroup definitions (created idempotently) -----------------------
+#
+# Group taxonomy is "owner" (the person whose portfolio it is), not asset
+# class — class is already covered by Asset.asset_class. Two members of
+# the same household share the app instance and each gets their own group;
+# the dropdown filter lets you view either alone or consolidated.
 
-GROUPS = {
-    "rv_br": {"name": "Renda Variável BR", "icon": "trending-up", "color": "#6366F1"},
-    "fiis":  {"name": "FIIs",              "icon": "building",   "color": "#F59E0B"},
-    "rf":    {"name": "Renda Fixa",        "icon": "landmark",   "color": "#10B981"},
-    "us":    {"name": "Ações US",          "icon": "globe",      "color": "#3B82F6"},
+OWNERS = {
+    "anderson": {"name": "Anderson", "icon": "user", "color": "#6366F1"},
+    "camila":   {"name": "Camila",   "icon": "user", "color": "#EC4899"},
 }
 
 
@@ -125,30 +132,31 @@ def login(base_url: str, email: str, password: str) -> str:
 
 # --- Group resolution -----------------------------------------------------
 
-def ensure_groups(c: SecuroClient) -> dict[str, str]:
-    """Return {key -> group_id}. Creates missing groups."""
+def ensure_owner_group(c: SecuroClient, owner_key: str) -> str:
+    """Return the AssetGroup id for the given owner, creating it if missing."""
+    spec = OWNERS.get(owner_key)
+    if spec is None:
+        raise SystemExit(f"--owner desconhecido: '{owner_key}'. "
+                         f"Valores válidos: {', '.join(OWNERS)}")
     existing = {g["name"]: g["id"] for g in c.get("/api/asset-groups")}
-    out = {}
-    for key, spec in GROUPS.items():
-        if spec["name"] in existing:
-            out[key] = existing[spec["name"]]
-            print(f"  AssetGroup '{spec['name']}' já existe (id={out[key]})")
-        else:
-            g = c.post("/api/asset-groups", spec)
-            out[key] = g["id"]
-            print(f"  AssetGroup '{spec['name']}' criado (id={out[key]})")
-    return out
+    if spec["name"] in existing:
+        gid = existing[spec["name"]]
+        print(f"  AssetGroup '{spec['name']}' já existe (id={gid})")
+    else:
+        g = c.post("/api/asset-groups", spec)
+        gid = g["id"]
+        print(f"  AssetGroup '{spec['name']}' criado (id={gid})")
+    return gid
 
 
 # --- Optional reset -------------------------------------------------------
 
 def reset_investments(c: SecuroClient, group_ids: list[str]) -> None:
-    """Delete every Asset whose group_id is one of ours."""
+    """Delete every Asset that belongs to one of the given owner groups.
+    Strictly scoped by group_id so resetting one owner can't touch the
+    other's assets."""
     assets = c.get("/api/assets")
-    targets = [a for a in assets
-               if a.get("group_id") in group_ids
-               or (a.get("type") == "investment"
-                   and a.get("source", "") in ("manual", "csv_import"))]
+    targets = [a for a in assets if a.get("group_id") in group_ids]
     print(f"  --reset: removendo {len(targets)} ativo(s) existentes...")
     for a in targets:
         try:
@@ -651,6 +659,10 @@ def main() -> int:
                          "no histórico mas estão zerados hoje (RIVA3, ENBR3, etc). "
                          "Necessário para o gráfico de Patrimônio Líquido refletir "
                          "o valor da carteira em meses passados sem omissões.")
+    ap.add_argument("--owner", default="anderson",
+                    choices=sorted(OWNERS.keys()),
+                    help="Dono da carteira a importar — define o AssetGroup "
+                         "ao qual os ativos serão atribuídos. Default: anderson.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -681,17 +693,17 @@ def main() -> int:
     # In --dry-run we don't hit the API at all; just preview.
     if args.dry_run:
         rv_assets = build_b3_rv_assets(holdings_final, prices,
-                                       rv_custodians, "<rv>", "<fiis>")
-        rf_assets = build_rf_assets(rf_final, rf_trades, rf_custodians, "<rf>")
-        us_assets = build_us_assets(us_final, "<us>")
+                                       rv_custodians, "<owner>", "<owner>")
+        rf_assets = build_rf_assets(rf_final, rf_trades, rf_custodians, "<owner>")
+        us_assets = build_us_assets(us_final, "<owner>")
         n_arch_b3 = n_arch_rf = 0
         if args.include_archived:
             active_tk = {a["payload"]["name"] for a in rv_assets}
             active_tit = {a["payload"]["name"] for a in rf_assets}
             arch_b3 = build_archived_b3_assets(
-                holdings_monthly, active_tk, prices, "<rv>", "<fiis>")
+                holdings_monthly, active_tk, prices, "<owner>", "<owner>")
             arch_rf = build_archived_rf_assets(
-                rf_monthly, active_tit, "<rf>")
+                rf_monthly, active_tit, "<owner>")
             n_arch_b3 = len(arch_b3)
             n_arch_rf = len(arch_rf)
             rv_assets += arch_b3
@@ -747,30 +759,33 @@ def main() -> int:
     print("OK login.")
     c = SecuroClient(args.base_url, token)
 
-    # Groups
-    print("\nGarantindo AssetGroups...")
-    group_ids = ensure_groups(c)
+    # Group — single AssetGroup per owner. The same group_id flows to every
+    # bucket (RV BR, FIIs, RF, US); class-vs-owner separation is handled by
+    # the asset_class column, which the frontend filters independently.
+    print(f"\nGarantindo AssetGroup do dono '{args.owner}'...")
+    owner_gid = ensure_owner_group(c, args.owner)
 
-    # Reset (optional)
+    # Reset (optional) — only nukes assets in the chosen owner's group, so
+    # `--owner camila --reset` can't accidentally wipe Anderson's data.
     if args.reset:
-        reset_investments(c, list(group_ids.values()))
+        reset_investments(c, [owner_gid])
 
     # Build asset payloads
     rv_assets = build_b3_rv_assets(holdings_final, prices,
                                     rv_custodians,
-                                    group_ids["rv_br"], group_ids["fiis"])
+                                    owner_gid, owner_gid)
     rf_assets = build_rf_assets(rf_final, rf_trades, rf_custodians,
-                                 group_ids["rf"])
-    us_assets = build_us_assets(us_final, group_ids["us"])
+                                 owner_gid)
+    us_assets = build_us_assets(us_final, owner_gid)
 
     if args.include_archived:
         active_tk = {(a["payload"]["name"]) for a in rv_assets}
         active_titulo = {(a["payload"]["name"]) for a in rf_assets}
         arch_b3 = build_archived_b3_assets(
             holdings_monthly, active_tk, prices,
-            group_ids["rv_br"], group_ids["fiis"])
+            owner_gid, owner_gid)
         arch_rf = build_archived_rf_assets(
-            rf_monthly, active_titulo, group_ids["rf"])
+            rf_monthly, active_titulo, owner_gid)
         rv_assets += arch_b3
         rf_assets += arch_rf
         print(f"  + {len(arch_b3)} ativos B3 arquivados (já zerados)")
