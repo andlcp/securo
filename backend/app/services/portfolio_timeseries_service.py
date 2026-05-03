@@ -436,6 +436,18 @@ async def get_timeseries(session: AsyncSession, user: User,
             return value_at_for_asset(asset, on)
 
         # Seed prev_v_end with the portfolio value the day before window start.
+        # Per-asset "carried" base value in native currency. For
+        # non-market-priced assets (RF, manual valuation) the AssetValue
+        # row only appears at month-end, so a mid-month BUY would otherwise
+        # be invisible until the snapshot catches up. We carry the
+        # buy-adjusted value forward day-by-day until a higher AV arrives
+        # (interest paid out at month-end), at which point we jump to the
+        # AV figure. Market-priced assets bypass this — units_at × yfinance
+        # already tracks intraday correctly.
+        asset_base_native: dict[uuid.UUID, float] = {}
+        for a in assets:
+            asset_base_native[a.id] = value_at_for_asset(a, start_d - timedelta(days=1))
+
         prev_d = start_d - timedelta(days=1)
         prev_v_end = 0.0
         for a in assets:
@@ -447,37 +459,51 @@ async def get_timeseries(session: AsyncSession, user: User,
 
         d = start_d
         while d <= window_end:
+            iso = d.isoformat()
             v_end_total = 0.0
             per_class: dict[str, float] = defaultdict(float)
+            cf_buy = cf_sell = inc = 0.0
+
             for a in assets:
-                v_native = daily_v_native(a, d)
-                if v_native == 0:
+                # Per-asset cashflow on this day (already in user_ccy, but
+                # for non-market we approximate as native — works when
+                # asset.currency == user_ccy, which holds for every RF
+                # ticker today; market_price assets don't use this path).
+                bucket = cf_idx.get((a.id, iso)) or {}
+                a_buy = bucket.get("buy", 0.0)
+                a_sell = bucket.get("sell", 0.0)
+                a_inc = bucket.get("income", 0.0)
+                cf_buy += a_buy
+                cf_sell += a_sell
+                inc += a_inc
+                a_cf_user = a_buy - a_sell
+
+                if (a.valuation_method == "market_price"
+                        and a.id in price_history):
+                    # Market-priced assets: units_at × yfinance close.
+                    v_native = daily_v_native(a, d)
+                    rate = await _fx_rate(session, a.currency, user_ccy, d)
+                    v_user = v_native * rate
+                else:
+                    # Sparse-AV assets (RF / manual): carry a base value
+                    # forward, absorbing today's cashflow and jumping up
+                    # to a freshly-arrived AV when it exceeds the carried
+                    # base. Native amount, then convert to user_ccy.
+                    base = asset_base_native.get(a.id, 0.0)
+                    base += a_cf_user  # cf is in user_ccy ≈ native for BRL
+                    av_now = value_at_for_asset(a, d)
+                    if av_now > base:
+                        base = av_now
+                    asset_base_native[a.id] = base
+                    rate = await _fx_rate(session, a.currency, user_ccy, d)
+                    v_user = base * rate
+
+                if v_user == 0:
                     continue
-                rate = await _fx_rate(session, a.currency, user_ccy, d)
-                v_user = v_native * rate
                 v_end_total += v_user
                 per_class[a.asset_class or "OUTRO"] += v_user
 
-            iso = d.isoformat()
-            cf_buy = cf_sell = inc = 0.0
-            for a in assets:
-                b = cf_idx.get((a.id, iso))
-                if b:
-                    cf_buy += b["buy"]
-                    cf_sell += b["sell"]
-                    inc += b["income"]
             cf = cf_buy - cf_sell
-
-            # Floor V_end on net-buy days to absorb AssetValue snapshot lag.
-            # Non-market-priced assets (RF, manual valuation) only get a new
-            # AV row at month-end — but the user's BUY transaction lands on
-            # an earlier day. Without this floor the formula reads "added
-            # R$ 50k of cash, V_end didn't move" as a -200 % return (capped
-            # to -50 %/day) which compounds into nonsense over months.
-            # Real price drops on a buy day get slightly muted, but that's
-            # always a smaller distortion than the snapshot-lag catastrophe.
-            if cf > 0 and v_end_total < prev_v_end + cf:
-                v_end_total = prev_v_end + cf
 
             denom = prev_v_end + 0.5 * cf
             if denom <= 1e-3:
