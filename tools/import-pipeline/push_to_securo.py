@@ -602,7 +602,15 @@ def _us_trades_to_transactions(us_trades: list[dict]) -> list[dict]:
             continue
         qty = _f(r.get("qty"))
         preco = _f(r.get("preco_usd"))
-        valor = abs(_f(r.get("basis_usd")) or _f(r.get("proceeds_usd")) or 0)
+        # Pick the right cashflow column for each side: a BUY's "value" is
+        # the cost basis paid (basis_usd); a SELL's is the cash actually
+        # received (proceeds_usd). The previous version used basis_usd
+        # for both, which silently dropped realised gains on sells —
+        # Modified Dietz then redistributed the missing $ as inflated TWR.
+        if side == "SELL":
+            valor = abs(_f(r.get("proceeds_usd")) or _f(r.get("basis_usd")) or 0)
+        else:
+            valor = abs(_f(r.get("basis_usd")) or _f(r.get("proceeds_usd")) or 0)
         if valor <= 0:
             valor = qty * preco
         ext = f"us-{r['data']}-{tk}-{side}-{valor:.2f}-{i}"
