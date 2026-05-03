@@ -88,6 +88,23 @@ function classColor(name: string, idx: number) {
   return CLASS_COLORS[name] ?? FALLBACK_COLORS[idx % FALLBACK_COLORS.length]
 }
 
+// Compact human-readable labels for the "Por classe de ativo" chart axis.
+// The full ASSET_CLASS_LABELS strings (e.g. "Stocks (Ações Americanas)")
+// don't fit in the YAxis width — these abbreviations preserve meaning
+// while staying short enough to render without truncation.
+const CLASS_AXIS_LABELS: Record<string, string> = {
+  RENDA_VARIAVEL_BR: 'Renda Variável Brasil',
+  RENDA_FIXA: 'Renda Fixa',
+  STOCKS_US: 'Stocks US',
+  FIIS: 'FIIs',
+  CRIPTO: 'Criptomoedas',
+  OUTRO: 'Outro',
+}
+
+function classAxisLabel(code: string) {
+  return CLASS_AXIS_LABELS[code] ?? code
+}
+
 function parseDateKey(d: string) {
   const [dd, mm, yy] = d.split('/')
   return `${yy}${mm}${dd}`
@@ -492,7 +509,7 @@ export default function InvestmentsPage() {
     : 1
 
   const barData = byClass.map((c: ClassReturn, i: number) => ({
-    name: c.name,
+    name: classAxisLabel(c.name),
     value: c.return_pct ?? 0,
     fill: classColor(c.name, i),
   }))
@@ -977,7 +994,7 @@ export default function InvestmentsPage() {
                       tick={{ fontSize: 11, fill: 'var(--foreground)' }}
                       axisLine={false}
                       tickLine={false}
-                      width={68}
+                      width={130}
                     />
                     <Tooltip
                       formatter={(value: unknown) => [
