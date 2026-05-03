@@ -243,6 +243,23 @@ async def get_timeseries(session: AsyncSession, user: User,
     if not assets:
         return []
 
+    # In-request FX cache — daily mode walks ~1800 days × N assets and
+    # _fx_rate hits the DB (and on-demand sync) every call. Without
+    # caching, "Início" daily for a multi-currency portfolio took ~30 s
+    # and timed out the chart query. Hot path is just dict lookup.
+    fx_cache: dict[tuple[str, str, str], float] = {}
+
+    async def fx(ccy_from: str, ccy_to: str, on: date) -> float:
+        if ccy_from == ccy_to:
+            return 1.0
+        key = (ccy_from, ccy_to, on.isoformat())
+        cached = fx_cache.get(key)
+        if cached is not None:
+            return cached
+        rate = await _fx_rate(session, ccy_from, ccy_to, on)
+        fx_cache[key] = rate
+        return rate
+
     # Determine window
     today = date.today()
     end_y, end_m = today.year, today.month
@@ -289,7 +306,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         a = asset_by_id.get(tx.asset_id)
         if a is None:
             continue
-        rate = await _fx_rate(session, a.currency, user_ccy, tx.date)
+        rate = await fx(a.currency, user_ccy, tx.date)
         amount = float(tx.value) * rate
         key = tx.date.isoformat() if granularity == "daily" else tx.date.strftime("%Y-%m")
         bucket = cf_idx[(a.id, key)]
@@ -454,7 +471,7 @@ async def get_timeseries(session: AsyncSession, user: User,
             v_native = daily_v_native(a, prev_d)
             if v_native == 0:
                 continue
-            rate = await _fx_rate(session, a.currency, user_ccy, prev_d)
+            rate = await fx(a.currency, user_ccy, prev_d)
             prev_v_end += v_native * rate
 
         d = start_d
@@ -482,7 +499,7 @@ async def get_timeseries(session: AsyncSession, user: User,
                         and a.id in price_history):
                     # Market-priced assets: units_at × yfinance close.
                     v_native = daily_v_native(a, d)
-                    rate = await _fx_rate(session, a.currency, user_ccy, d)
+                    rate = await fx(a.currency, user_ccy, d)
                     v_user = v_native * rate
                 else:
                     # Sparse-AV assets (RF / manual): carry a base value
@@ -495,7 +512,7 @@ async def get_timeseries(session: AsyncSession, user: User,
                     if av_now > base:
                         base = av_now
                     asset_base_native[a.id] = base
-                    rate = await _fx_rate(session, a.currency, user_ccy, d)
+                    rate = await fx(a.currency, user_ccy, d)
                     v_user = base * rate
 
                 if v_user == 0:
@@ -546,7 +563,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         v_native = value_at_for_asset(a, prev_me)
         if v_native == 0:
             continue
-        rate = await _fx_rate(session, a.currency, user_ccy, prev_me)
+        rate = await fx(a.currency, user_ccy, prev_me)
         prev_v_end += v_native * rate
 
     for (y, m) in _iter_months(date(start_y, start_m, 1),
@@ -565,7 +582,7 @@ async def get_timeseries(session: AsyncSession, user: User,
             v_native = value_at_for_asset(a, me)
             if v_native == 0:
                 continue
-            rate = await _fx_rate(session, a.currency, user_ccy, me)
+            rate = await fx(a.currency, user_ccy, me)
             v_user = v_native * rate
             v_end_total += v_user
             per_class[a.asset_class or "OUTRO"] += v_user

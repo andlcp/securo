@@ -337,6 +337,7 @@ async def get_portfolio_returns(
             group_ids=filter_groups,
             date_from=date_from,
             date_to=date_to,
+            granularity="daily",
         )
 
     # Consolidated (respect the incoming group_ids filter — same as before).
