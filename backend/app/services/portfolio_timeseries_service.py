@@ -391,7 +391,16 @@ async def get_timeseries(session: AsyncSession, user: User,
 
         def units_at(asset: Asset, on: date) -> float:
             """Walk transactions backwards from current units, undoing those
-            that happened after `on`. Returns share count owned at end of `on`."""
+            that happened after `on`. Returns share count owned at end of `on`.
+
+            Floored at 0 because negative shares are nonsensical: when a
+            corporate action (reverse split, delisting, group/ungrouping)
+            silently reduced the position outside our transaction ledger,
+            asset.units no longer matches sum(BUYs)-sum(SELLs) and the
+            walk produces ghost short positions for pre-purchase dates
+            (seen on AERI3.SA: 0.4 units now, 10208 BUYs, 510 SELLs;
+            walking back to 2021 returns -9698 ghosts × R$ 200 ≈ R$ -1.9M
+            of phantom historical value)."""
             u = float(asset.units or 0)
             for tx in reversed(tx_by_asset.get(asset.id, [])):
                 if tx.date <= on:
@@ -401,7 +410,7 @@ async def get_timeseries(session: AsyncSession, user: User,
                     u -= q
                 elif tx.type in _SELL_TYPES:
                     u += q
-            return u
+            return max(u, 0.0)
 
         def price_at(asset: Asset, on: date) -> Optional[float]:
             """Most recent close <= on. None if no history fetched/available."""
@@ -458,6 +467,17 @@ async def get_timeseries(session: AsyncSession, user: User,
                     cf_sell += b["sell"]
                     inc += b["income"]
             cf = cf_buy - cf_sell
+
+            # Floor V_end on net-buy days to absorb AssetValue snapshot lag.
+            # Non-market-priced assets (RF, manual valuation) only get a new
+            # AV row at month-end — but the user's BUY transaction lands on
+            # an earlier day. Without this floor the formula reads "added
+            # R$ 50k of cash, V_end didn't move" as a -200 % return (capped
+            # to -50 %/day) which compounds into nonsense over months.
+            # Real price drops on a buy day get slightly muted, but that's
+            # always a smaller distortion than the snapshot-lag catastrophe.
+            if cf > 0 and v_end_total < prev_v_end + cf:
+                v_end_total = prev_v_end + cf
 
             denom = prev_v_end + 0.5 * cf
             if denom <= 1e-3:
