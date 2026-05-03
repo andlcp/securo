@@ -249,8 +249,18 @@ async def get_timeseries(session: AsyncSession, user: User,
     # and timed out the chart query. Hot path is just dict lookup.
     fx_cache: dict[tuple[str, str, str], float] = {}
 
+    # Detect an empty FX table once. If there are no rows, every lookup
+    # would degrade to "exact match miss → on-demand sync (fails when no
+    # provider configured) → closest miss → 1.0 fallback" — three DB
+    # round-trips for a guaranteed-1.0 answer. Skip them entirely.
+    from app.models.fx_rate import FxRate
+    from sqlalchemy import func as _sa_func
+    _has_fx = (await session.execute(
+        select(_sa_func.count()).select_from(FxRate)
+    )).scalar_one() > 0
+
     async def fx(ccy_from: str, ccy_to: str, on: date) -> float:
-        if ccy_from == ccy_to:
+        if ccy_from == ccy_to or not _has_fx:
             return 1.0
         key = (ccy_from, ccy_to, on.isoformat())
         cached = fx_cache.get(key)
