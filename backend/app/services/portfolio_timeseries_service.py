@@ -27,7 +27,9 @@ already handles multi-currency.
 """
 
 import asyncio
+import json
 import logging
+import time as _time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -52,6 +54,41 @@ logger = logging.getLogger(__name__)
 _INCOME_TYPES = {"DIVIDEND", "JCP", "RENDIMENTO", "RESGATE", "INTEREST"}
 _BUY_TYPES = {"BUY", "DEPOSIT"}
 _SELL_TYPES = {"SELL", "WITHDRAWAL"}
+
+# Module-level result cache for get_timeseries. The walk is deterministic
+# given (user, filters, window, granularity) and the underlying tables
+# rarely change within a few seconds, so a short TTL collapses the
+# repeated calls fired by the dashboard (chart, KPIs, /returns) into
+# a single computation per cache window.
+_TS_CACHE_TTL_S = 60.0
+_ts_cache: dict[tuple, tuple[float, list]] = {}
+
+
+def _ts_cache_key(user_id, months, since_start, asset_ids, asset_classes,
+                  group_ids, granularity, date_from, date_to) -> tuple:
+    return (
+        str(user_id),
+        months,
+        since_start,
+        tuple(sorted(str(x) for x in (asset_ids or []))),
+        tuple(sorted(asset_classes or [])),
+        tuple(sorted(str(x) for x in (group_ids or []))),
+        granularity,
+        date_from.isoformat() if date_from else None,
+        date_to.isoformat() if date_to else None,
+    )
+
+
+def invalidate_ts_cache(user_id=None) -> None:
+    """Drop cached entries — call after mutations that could change the
+    timeseries (asset edit, transaction insert, FX rate sync)."""
+    if user_id is None:
+        _ts_cache.clear()
+        return
+    target = str(user_id)
+    for k in list(_ts_cache.keys()):
+        if k and k[0] == target:
+            del _ts_cache[k]
 
 
 def _month_end(y: int, m: int) -> date:
@@ -237,10 +274,22 @@ async def get_timeseries(session: AsyncSession, user: User,
         take precedence over months/since_start. Daily granularity is forced
         for ranges shorter than 4 months.
     """
+    # Cache lookup before any DB work. Same (user, filters, window) hit
+    # within the TTL gets the previous walk's result instantly.
+    cache_key = _ts_cache_key(
+        user.id, months, since_start, asset_ids, asset_classes,
+        group_ids, granularity, date_from, date_to,
+    )
+    now_mono = _time.monotonic()
+    cached = _ts_cache.get(cache_key)
+    if cached is not None and cached[0] > now_mono:
+        return cached[1]
+
     user_ccy = await _user_primary_currency(session, user)
     assets = await _load_assets(session, user.id, asset_ids, asset_classes,
                                 group_ids)
     if not assets:
+        _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, [])
         return []
 
     # In-request FX cache — daily mode walks ~1800 days × N assets and
@@ -580,6 +629,7 @@ async def get_timeseries(session: AsyncSession, user: User,
             prev_v_end = v_end_total
             d += timedelta(days=1)
 
+        _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, out)
         return out
 
     # Monthly mode (default): walk one row per month-end.
@@ -653,4 +703,5 @@ async def get_timeseries(session: AsyncSession, user: User,
         })
         prev_v_end = v_end_total
 
+    _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, out)
     return out
