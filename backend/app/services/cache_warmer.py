@@ -85,14 +85,14 @@ async def _warm_once() -> None:
     if not users:
         return
 
-    logger.info("Warming portfolio timeseries cache for %d user(s)", len(users))
+    print(f"Warming portfolio timeseries cache for {len(users)} user(s)", flush=True)
     for u in users:
         # Each user gets its own session — the timeseries walk loads a
         # lot of data and we don't want it lingering across users.
         async with Session() as session:
             await _warm_user(session, u)
         await asyncio.sleep(0.5)
-    logger.info("Cache warm pass complete")
+    print("Cache warm pass complete", flush=True)
 
 
 async def periodic_warm_loop() -> None:

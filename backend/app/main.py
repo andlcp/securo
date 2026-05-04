@@ -62,7 +62,10 @@ async def lifespan(app: FastAPI):
     import asyncio as _asyncio
     from app.services.cache_warmer import periodic_warm_loop
     warmer_task = _asyncio.create_task(periodic_warm_loop())
-    logger.info("Startup: launched portfolio-timeseries cache warmer")
+    # print() goes straight to stdout regardless of logging config —
+    # the project's root logger filters INFO, so logger.info would
+    # silently disappear and we'd have no signal that warmer started.
+    print("Startup: launched portfolio-timeseries cache warmer", flush=True)
 
     yield
     # Shutdown
