@@ -133,12 +133,23 @@ async def _fx_rate(session: AsyncSession, ccy_from: str,
 async def _load_assets(session: AsyncSession, user_id: uuid.UUID,
                        asset_ids: Optional[list[uuid.UUID]] = None,
                        asset_classes: Optional[list[str]] = None,
-                       group_ids: Optional[list[uuid.UUID]] = None
+                       group_ids: Optional[list[uuid.UUID]] = None,
+                       include_archived: bool = True,
                        ) -> list[Asset]:
-    stmt = select(Asset).where(
-        Asset.user_id == user_id,
-        Asset.is_archived == False,    # noqa: E712
-    )
+    """Load the user's assets for timeseries computation.
+
+    include_archived defaults to True because the historical walk needs
+    to see positions that have since been closed — otherwise a year
+    where the user held R$ 200k in a Tesouro Selic that's now archived
+    reads as "no return" instead of CDI growth. The carry-forward path
+    in get_timeseries handles archived-without-transactions assets via
+    the implicit-cashflow heuristic so abrupt AV jumps (undocumented
+    buys) don't show as gains and the V→0 close-out doesn't show as a
+    loss.
+    """
+    stmt = select(Asset).where(Asset.user_id == user_id)
+    if not include_archived:
+        stmt = stmt.where(Asset.is_archived == False)  # noqa: E712
     if asset_ids:
         stmt = stmt.where(Asset.id.in_(asset_ids))
     if asset_classes:
@@ -594,6 +605,33 @@ async def get_timeseries(session: AsyncSession, user: User,
                             new_av_amount = float(r.amount)
                             new_av_date = r.date
                     if new_av_amount is not None:
+                        # Implausible-jump heuristic for assets without
+                        # transactions (typically archived RF imported
+                        # via push_to_securo where the offline pipeline
+                        # populates monthly AVs but no BUY/SELL rows).
+                        # An RF position can't legitimately swing > 0.1 %
+                        # /day from market moves, so anything beyond that
+                        # is a hidden cashflow (deposit, withdrawal, or
+                        # close-out at archival). Convert the excess into
+                        # an implicit cashflow so Modified Dietz reads it
+                        # as neutral instead of as a huge return/loss.
+                        if not tx_by_asset.get(a.id):
+                            base_before = state["base"]
+                            elapsed_days = (
+                                (new_av_date - last_av_date).days
+                                if last_av_date else 30
+                            )
+                            elapsed_days = max(elapsed_days, 1)
+                            allow_growth = abs(base_before) * 0.001 * elapsed_days
+                            allow_growth = max(allow_growth, 50.0)
+                            diff = new_av_amount - base_before
+                            if abs(diff) > allow_growth:
+                                # Native amount; treat as user_ccy below
+                                # since RF assets are BRL == user_ccy.
+                                if diff > 0:
+                                    cf_buy += diff
+                                else:
+                                    cf_sell += -diff
                         state["base"] = new_av_amount
                         state["av_date"] = new_av_date
                     base = state["base"]
