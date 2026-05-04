@@ -72,10 +72,15 @@ async def _warm_once() -> None:
     Session = _make_session_maker()
     async with Session() as session:
         # Load only users with assets — no point warming an empty portfolio.
-        stmt = (select(User)
-                .join(Asset, Asset.user_id == User.id)
-                .distinct())
-        users = list((await session.execute(stmt)).scalars().all())
+        # SELECT DISTINCT on User row fails because User has a JSON column;
+        # query distinct user_ids first, then resolve to User objects.
+        ids_stmt = select(Asset.user_id).distinct()
+        user_ids = [row[0] for row in (await session.execute(ids_stmt)).all()]
+        if not user_ids:
+            return
+        users = list((await session.execute(
+            select(User).where(User.id.in_(user_ids))
+        )).scalars().all())
 
     if not users:
         return
