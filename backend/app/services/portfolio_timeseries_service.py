@@ -463,17 +463,28 @@ async def get_timeseries(session: AsyncSession, user: User,
             return value_at_for_asset(asset, on)
 
         # Seed prev_v_end with the portfolio value the day before window start.
-        # Per-asset "carried" base value in native currency. For
-        # non-market-priced assets (RF, manual valuation) the AssetValue
-        # row only appears at month-end, so a mid-month BUY would otherwise
-        # be invisible until the snapshot catches up. We carry the
-        # buy-adjusted value forward day-by-day until a higher AV arrives
-        # (interest paid out at month-end), at which point we jump to the
-        # AV figure. Market-priced assets bypass this — units_at × yfinance
-        # already tracks intraday correctly.
-        asset_base_native: dict[uuid.UUID, float] = {}
+        # Per-asset "carried" state for non-market-priced assets (RF, manual
+        # valuation). The AssetValue row only appears at month-end, so a
+        # mid-month BUY/SELL is invisible to a naive lookup. We carry a base
+        # value forward day-by-day, absorbing the day's cashflow, and jump
+        # to a fresh AV only when its date is *strictly after* the AV we
+        # last anchored on. Without the date check, the AV row from
+        # before a sell would clobber the cashflow-adjusted base on the
+        # very next iteration (seen on a 2023-08-02 RF sell of R$ 30 789
+        # that read as +20 % on the cumulative TWR).
+        asset_state: dict[uuid.UUID, dict] = {}
+        seed_d = start_d - timedelta(days=1)
         for a in assets:
-            asset_base_native[a.id] = value_at_for_asset(a, start_d - timedelta(days=1))
+            rows = av_by_asset.get(a.id, [])
+            initial_v = 0.0
+            initial_av_date = None
+            for r in rows:
+                if r.date <= seed_d:
+                    initial_v = float(r.amount)
+                    initial_av_date = r.date
+                else:
+                    break
+            asset_state[a.id] = {"base": initial_v, "av_date": initial_av_date}
 
         prev_d = start_d - timedelta(days=1)
         prev_v_end = 0.0
@@ -513,15 +524,28 @@ async def get_timeseries(session: AsyncSession, user: User,
                     v_user = v_native * rate
                 else:
                     # Sparse-AV assets (RF / manual): carry a base value
-                    # forward, absorbing today's cashflow and jumping up
-                    # to a freshly-arrived AV when it exceeds the carried
-                    # base. Native amount, then convert to user_ccy.
-                    base = asset_base_native.get(a.id, 0.0)
-                    base += a_cf_user  # cf is in user_ccy ≈ native for BRL
-                    av_now = value_at_for_asset(a, d)
-                    if av_now > base:
-                        base = av_now
-                    asset_base_native[a.id] = base
+                    # forward, absorbing today's net cashflow. Anchor to a
+                    # new AV row only when its date is strictly after the
+                    # last anchor — at that point it represents fresh
+                    # ground-truth (interest accrued, broker reconciled
+                    # the prior buys/sells). Same-or-older AV rows are
+                    # ignored so they can't undo a recent cashflow.
+                    state = asset_state.setdefault(a.id, {"base": 0.0, "av_date": None})
+                    state["base"] += a_cf_user
+                    rows = av_by_asset.get(a.id, [])
+                    last_av_date = state["av_date"]
+                    new_av_amount = None
+                    new_av_date = None
+                    for r in rows:
+                        if r.date > d:
+                            break
+                        if last_av_date is None or r.date > last_av_date:
+                            new_av_amount = float(r.amount)
+                            new_av_date = r.date
+                    if new_av_amount is not None:
+                        state["base"] = new_av_amount
+                        state["av_date"] = new_av_date
+                    base = state["base"]
                     rate = await fx(a.currency, user_ccy, d)
                     v_user = base * rate
 
