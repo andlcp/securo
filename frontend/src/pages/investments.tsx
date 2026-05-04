@@ -249,6 +249,12 @@ function timeseriesToChartData(
         if (p.k > target) break
         last = p.v
       }
+      // Fallback: when target precedes the first entry (e.g. Início's first
+      // portfolio day = start-of-month, but the benchmark series only begins
+      // on the user's first purchase day a few days later), anchor at the
+      // earliest available entry. Otherwise the merge returns null for the
+      // base, which silently zeros out the entire benchmark line.
+      if (last === null && idx.length > 0) return idx[0].v
       return last
     }
 
@@ -469,7 +475,23 @@ export default function InvestmentsPage() {
     ? snapshots[snapshots.length - 1]
     : null
   const latestTs = tsData && tsData.length > 0 ? tsData[tsData.length - 1] : null
-  const latestTsLifetime = tsLifetime && tsLifetime.length > 0 ? tsLifetime[tsLifetime.length - 1] : null
+  // Lifetime TWR — rebased the same way the chart line is, so the KPI card
+  // and the chart's last-point + "NO PERÍODO" value tell exactly the same
+  // story. Without the rebase the raw twr_cum differs slightly because the
+  // first day of the walk usually has a positive cashflow (initial buy) at
+  // a close price slightly off the average purchase price, leaving
+  // first.twr_cum ≈ -2 % that bleeds into the cumulative.
+  const lifetimeTwrCum = useMemo(() => {
+    if (!tsLifetime || tsLifetime.length < 2) {
+      return tsLifetime?.[tsLifetime.length - 1]?.twr_cum ?? null
+    }
+    const first = tsLifetime[0]
+    const last = tsLifetime[tsLifetime.length - 1]
+    const baseFactor = 1 + (first.twr_cum ?? 0)
+    const lastFactor = 1 + (last.twr_cum ?? 0)
+    if (baseFactor <= 0) return last.twr_cum ?? null
+    return lastFactor / baseFactor - 1
+  }, [tsLifetime])
 
   const groups = groupsList ?? []
   const consolidated = returnsData?.consolidated
@@ -683,10 +705,10 @@ export default function InvestmentsPage() {
               TWR (cumulativo)
             </p>
             <p className={`text-base font-bold tabular-nums ${
-              (latestTsLifetime?.twr_cum ?? latestSnap?.twr_cum ?? 0) >= 0
+              (lifetimeTwrCum ?? latestSnap?.twr_cum ?? 0) >= 0
                 ? 'text-emerald-600' : 'text-rose-500'
             }`}>
-              {privacyMode ? MASK : fmtPct((latestTsLifetime?.twr_cum ?? latestSnap?.twr_cum ?? 0) * 100)}
+              {privacyMode ? MASK : fmtPct((lifetimeTwrCum ?? latestSnap?.twr_cum ?? 0) * 100)}
             </p>
             <p className="text-[10px] text-muted-foreground mt-0.5">desde o início</p>
           </div>
