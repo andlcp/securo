@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import HTTPException, status
 from sqlalchemy import select, func, desc
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -282,28 +283,29 @@ async def create_asset(
     session.add(asset)
     await session.flush()
 
-    # Seed the first AssetValue from the live quote so the portfolio chart
-    # has a starting data point without waiting for the scheduled refresh.
-    if data.valuation_method == "market_price" and quote is not None:
-        initial_amount = Decimal(str(quote.price)) * Decimal(str(data.units))
-        session.add(
-            AssetValue(
-                asset_id=asset.id,
-                amount=initial_amount,
-                date=date.today(),
-                source="sync",
-            )
-        )
-
-    # Create initial value if provided
+    # Seed exactly ONE initial AssetValue dated today. Order of preference:
+    # explicit current_value (from the import payload), live quote (for
+    # market-priced assets), or fall through to the growth-rule seed
+    # below. The previous version layered the live-quote and
+    # current_value branches as two independent `if`s, so a market_price
+    # create with current_value (typical push_to_securo payload) wrote
+    # the same date twice — that's how the asset_values table grew 41
+    # duplicate rows over multiple bulk imports.
     if data.current_value is not None:
-        value = AssetValue(
+        session.add(AssetValue(
             asset_id=asset.id,
             amount=data.current_value,
             date=date.today(),
             source="manual",
-        )
-        session.add(value)
+        ))
+    elif data.valuation_method == "market_price" and quote is not None:
+        initial_amount = Decimal(str(quote.price)) * Decimal(str(data.units))
+        session.add(AssetValue(
+            asset_id=asset.id,
+            amount=initial_amount,
+            date=date.today(),
+            source="sync",
+        ))
     elif data.valuation_method == "growth_rule" and data.purchase_price is not None:
         # Seed the initial value from purchase price
         base_date = data.purchase_date or data.growth_start_date or date.today()
@@ -463,7 +465,13 @@ async def get_asset_values(
 async def add_asset_value(
     session: AsyncSession, asset_id: uuid.UUID, user_id: uuid.UUID, data: AssetValueCreate
 ) -> Optional[AssetValueRead]:
-    """Add a new value entry for an asset."""
+    """Upsert a value entry for an asset (one row per asset_id+date).
+
+    Uses ON CONFLICT against the uq_asset_values_asset_date constraint
+    so that re-running push_to_securo for the same monthly history
+    rewrites the existing row instead of inserting a duplicate. The
+    previous plain-INSERT path silently created duplicates that
+    distorted the timeseries walk on every cashflow day."""
     # Verify ownership
     owner_check = await session.execute(
         select(Asset.id).where(Asset.id == asset_id, Asset.user_id == user_id)
@@ -471,16 +479,19 @@ async def add_asset_value(
     if not owner_check.scalar_one_or_none():
         return None
 
-    value = AssetValue(
+    stmt = pg_insert(AssetValue).values(
         asset_id=asset_id,
         amount=data.amount,
         date=data.date,
         source="manual",
-    )
-    session.add(value)
+    ).on_conflict_do_update(
+        constraint="uq_asset_values_asset_date",
+        set_={"amount": data.amount, "source": "manual"},
+    ).returning(AssetValue)
+    result = await session.execute(stmt)
+    row = result.scalar_one()
     await session.commit()
-    await session.refresh(value)
-    return AssetValueRead.model_validate(value)
+    return AssetValueRead.model_validate(row)
 
 
 async def delete_asset_value(
