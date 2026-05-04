@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.asset import Asset
 from app.models.asset_transaction import AssetTransaction
 from app.schemas.asset import ASSET_TX_TYPES, AssetTransactionCreate
+from app.services.portfolio_timeseries_service import invalidate_ts_cache
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,7 @@ async def create(session: AsyncSession,
     session.add(row)
     await session.commit()
     await session.refresh(row)
+    invalidate_ts_cache(user_id)
     return row
 
 
@@ -177,6 +179,8 @@ async def delete(session: AsyncSession,
                    AssetTransaction.user_id == user_id))
     result = await session.execute(stmt)
     await session.commit()
+    if (result.rowcount or 0) > 0:
+        invalidate_ts_cache(user_id)
     return (result.rowcount or 0) > 0
 
 
@@ -214,6 +218,7 @@ async def bulk_upsert(session: AsyncSession,
     )
     result = await session.execute(stmt)
     await session.commit()
+    invalidate_ts_cache(user_id)
     return result.rowcount or len(payload)
 
 
@@ -224,4 +229,5 @@ async def delete_all_for_user(session: AsyncSession,
         AssetTransaction.user_id == user_id)
     result = await session.execute(stmt)
     await session.commit()
+    invalidate_ts_cache(user_id)
     return result.rowcount or 0

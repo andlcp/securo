@@ -57,10 +57,12 @@ _SELL_TYPES = {"SELL", "WITHDRAWAL"}
 
 # Module-level result cache for get_timeseries. The walk is deterministic
 # given (user, filters, window, granularity) and the underlying tables
-# rarely change within a few seconds, so a short TTL collapses the
-# repeated calls fired by the dashboard (chart, KPIs, /returns) into
-# a single computation per cache window.
-_TS_CACHE_TTL_S = 60.0
+# rarely change within a few minutes for a personal-finance app, so a
+# moderate TTL collapses the repeated calls fired by the dashboard
+# (chart, KPIs, /returns) into a single computation per cache window.
+# Mutations that should drop entries (asset edit, transaction insert,
+# dividend sync) call invalidate_ts_cache() to bust the cache.
+_TS_CACHE_TTL_S = 600.0  # 10 min
 _ts_cache: dict[tuple, tuple[float, list]] = {}
 
 
