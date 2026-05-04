@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -389,6 +389,41 @@ export default function InvestmentsPage() {
     }),
     staleTime: 1000 * 60,
   })
+
+  // Once the current window has loaded, kick off background prefetches
+  // for the other presets. The backend has its own 60 s result cache, so
+  // these mostly hit cache after the first warm-up round and a click on
+  // a different window resolves instantly. Skipped while a custom range
+  // is active because we don't know which preset the user will switch to.
+  useEffect(() => {
+    if (!tsData || customRange) return
+    const otherPresets: Array<{ months?: number; sinceStart?: boolean }> = [
+      { months: 1 },
+      { months: 3 },
+      { months: 6 },
+      { months: 12 },
+      { months: 24 },
+      { sinceStart: true },
+    ].filter(p => {
+      if (sinceStart) return !p.sinceStart
+      return p.sinceStart || p.months !== months
+    })
+    for (const p of otherPresets) {
+      const presetMonths = p.months ?? 12
+      const presetSince = !!p.sinceStart
+      queryClient.prefetchQuery({
+        queryKey: ['portfolio-timeseries', `${presetSince}-${presetMonths}`, classesParam, groupsParam, 'daily'],
+        queryFn: () => portfolioTimeseries.series({
+          months: presetMonths,
+          sinceStart: presetSince,
+          assetClasses: classesParam,
+          groupIds: groupsParam,
+          granularity: 'daily',
+        }),
+        staleTime: 1000 * 60,
+      })
+    }
+  }, [tsData, customRange, sinceStart, months, classesParam, groupsParam, queryClient])
 
   // Always-since-inception series — used only to power the lifetime TWR
   // KPI ("TWR cumulativo"), independent of the selected 3M/6M/1A window.
@@ -860,7 +895,7 @@ export default function InvestmentsPage() {
                   }`}
                   title={visible ? 'Ocultar' : 'Mostrar'}
                 >
-                  <div className="w-5 border-t-2" style={{ borderColor: item.color }} />
+                  <div className="w-5 border-t-2 border-dashed" style={{ borderColor: item.color }} />
                   <span className="text-[11px] text-muted-foreground">{item.label}</span>
                 </button>
               )
@@ -907,13 +942,13 @@ export default function InvestmentsPage() {
                 />
                 <ReferenceLine y={0} stroke="var(--border)" />
                 {visibleBenchmarks.has('cdi') && (
-                  <Line type="monotone" dataKey="cdi" stroke={CDI_COLOR} strokeWidth={1.5} dot={false} name="CDI" connectNulls />
+                  <Line type="monotone" dataKey="cdi" stroke={CDI_COLOR} strokeWidth={1.5} strokeDasharray="5 3" dot={false} name="CDI" connectNulls />
                 )}
                 {visibleBenchmarks.has('ibov') && (
-                  <Line type="monotone" dataKey="ibov" stroke={IBOV_COLOR} strokeWidth={1.5} dot={false} name="IBOV" connectNulls />
+                  <Line type="monotone" dataKey="ibov" stroke={IBOV_COLOR} strokeWidth={1.5} strokeDasharray="5 3" dot={false} name="IBOV" connectNulls />
                 )}
                 {visibleBenchmarks.has('sp500') && (
-                  <Line type="monotone" dataKey="sp500" stroke={SP500_COLOR} strokeWidth={1.5} dot={false} name="S&P 500" connectNulls />
+                  <Line type="monotone" dataKey="sp500" stroke={SP500_COLOR} strokeWidth={1.5} strokeDasharray="5 3" dot={false} name="S&P 500" connectNulls />
                 )}
                 {((tsData && tsData.length > 0) || hasSnapshots) && (
                   <Line type="monotone" dataKey="twr" stroke={TWR_COLOR} strokeWidth={2.5} dot={false} name="TWR Carteira" connectNulls />
