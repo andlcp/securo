@@ -489,9 +489,26 @@ async def get_timeseries(session: AsyncSession, user: User,
             walk produces ghost short positions for pre-purchase dates
             (seen on AERI3.SA: 0.4 units now, 10208 BUYs, 510 SELLs;
             walking back to 2021 returns -9698 ghosts × R$ 200 ≈ R$ -1.9M
-            of phantom historical value)."""
+            of phantom historical value).
+
+            Pre-history clamp: if `on` is before the earliest known signal
+            (first transaction or, failing that, purchase_date), we have
+            no evidence the user held the asset on `on` — return 0.
+            Without this, ghost units (current asset.units > sum(BUY)-
+            sum(SELL), e.g. user got 780 BLAU3 over time but only 600
+            net qty are recorded as transactions) get projected back to
+            the start of time. When yfinance starts returning a price for
+            the ticker — typically at IPO — those ghost units suddenly
+            multiply by the IPO price and inject a phantom V_end jump
+            with no matching cashflow, producing a vertical step in the
+            TWR curve (seen on 2021-04-19, the day BLAU3 IPO'd: 180
+            ghost units × R$ 31.6 ≈ R$ 5.7 k of unexplained gain)."""
+            txs = tx_by_asset.get(asset.id, [])
+            earliest = txs[0].date if txs else asset.purchase_date
+            if earliest is not None and on < earliest:
+                return 0.0
             u = float(asset.units or 0)
-            for tx in reversed(tx_by_asset.get(asset.id, [])):
+            for tx in reversed(txs):
                 if tx.date <= on:
                     break
                 q = float(tx.qty or 0)
