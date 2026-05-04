@@ -185,12 +185,15 @@ async def _fetch_yahoo_index(symbol: str, start: date, end: date) -> list[dict]:
 
 
 async def get_portfolio_start_date(session: AsyncSession, user_id) -> Optional[date]:
-    """Return the earliest purchase_date among the user's non-sold assets, or None."""
+    """Earliest purchase_date across ALL of the user's assets (including
+    sold/archived). Used to anchor the benchmark fetch for the lifetime
+    chart — we want IBOV/CDI/S&P to span the entire walked history,
+    even for periods when the user only held positions that have since
+    been closed."""
     result = await session.execute(
         select(func.min(Asset.purchase_date)).where(
             Asset.user_id == user_id,
             Asset.purchase_date.is_not(None),
-            Asset.sell_date.is_(None),
         )
     )
     return result.scalar()
