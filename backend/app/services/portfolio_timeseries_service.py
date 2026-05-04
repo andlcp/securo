@@ -622,7 +622,15 @@ async def get_timeseries(session: AsyncSession, user: User,
                                 if last_av_date else 30
                             )
                             elapsed_days = max(elapsed_days, 1)
+                            # Allow at most 0.1 %/day of growth as legitimate
+                            # market move. Cap at 25 % of the base — for an
+                            # asset gone silent for 4 years (1460 days) the
+                            # raw 0.1 %/day allowance would be 146 % of the
+                            # base, which let the entire close-out drop
+                            # leak through as a loss instead of triggering
+                            # the implicit-cashflow path.
                             allow_growth = abs(base_before) * 0.001 * elapsed_days
+                            allow_growth = min(allow_growth, abs(base_before) * 0.25)
                             allow_growth = max(allow_growth, 50.0)
                             diff = new_av_amount - base_before
                             if abs(diff) > allow_growth:
