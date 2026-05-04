@@ -55,8 +55,22 @@ async def lifespan(app: FastAPI):
         logger.info("Startup: dispatched sync_all_connections task to Celery")
     except Exception:
         logger.exception("Startup: failed to dispatch sync task")
+
+    # Startup: kick off the in-process portfolio-timeseries cache warmer.
+    # Keeps the Investments dashboard's heavy "Início" walk hot so the
+    # user's first page load doesn't pay the ~5 s cold-cache cost.
+    import asyncio as _asyncio
+    from app.services.cache_warmer import periodic_warm_loop
+    warmer_task = _asyncio.create_task(periodic_warm_loop())
+    logger.info("Startup: launched portfolio-timeseries cache warmer")
+
     yield
     # Shutdown
+    warmer_task.cancel()
+    try:
+        await warmer_task
+    except _asyncio.CancelledError:
+        pass
     await close_redis()
 
 
