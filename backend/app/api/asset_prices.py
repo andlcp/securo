@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/assets", tags=["asset-prices"])
 
 YAHOO_URL = ("https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-             "?period1={p1}&period2={p2}&interval={interval}")
+             "?period1={p1}&period2={p2}&interval={interval}&events=split")
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Securo/1.0)"}
 
 
@@ -48,6 +48,17 @@ _RANGE_TO_INTERVAL = {
 
 def _fetch_yahoo_history(symbol: str, days: int, interval: str
                          ) -> list[dict]:
+    """Daily/weekly raw close history for the cotação chart.
+
+    Reverse-adjusts splits to keep the displayed prices on the same
+    basis as the user's actual buy/sell prices. Yahoo silently
+    back-adjusts pre-split closes by 1/ratio, so a BLAU3 buy on
+    14/08/2025 at R$ 12.10 collides with a chart showing R$ 9.31 for
+    that day. We pull events.splits, detect where Yahoo's data
+    transitions from back-adjusted to raw (the day-on-day jump that
+    matches the split ratio), and multiply older closes back so the
+    line aligns with the trade markers.
+    """
     end = dt.datetime.now(dt.timezone.utc)
     start = end - dt.timedelta(days=days)
     p1 = int(start.timestamp())
@@ -68,12 +79,48 @@ def _fetch_yahoo_history(symbol: str, days: int, interval: str
     timestamps = res.get("timestamp") or []
     quote = (res.get("indicators", {}).get("quote") or [{}])[0]
     closes = quote.get("close") or []
-    out = []
+
+    # Build sorted [(date_iso, close)] list.
+    rows: list[tuple[str, float]] = []
     for ts, c in zip(timestamps, closes):
         if c is None:
             continue
         d = dt.datetime.fromtimestamp(int(ts), dt.timezone.utc).date()
-        out.append({"date": d.isoformat(), "close": round(float(c), 4)})
+        rows.append((d.isoformat(), float(c)))
+    rows.sort(key=lambda r: r[0])
+
+    # Pull splits and find the back-adjustment cutoff per event.
+    events = res.get("events") or {}
+    splits: list[tuple[str, float]] = []
+    for entry in (events.get("splits") or {}).values():
+        num = entry.get("numerator")
+        den = entry.get("denominator")
+        ts = entry.get("date")
+        if num is None or den is None or den == 0 or ts is None:
+            continue
+        sd = dt.datetime.fromtimestamp(int(ts), dt.timezone.utc).date().isoformat()
+        splits.append((sd, float(num) / float(den)))
+
+    boundaries: list[tuple[str, float]] = []
+    for split_d, ratio in splits:
+        cutoff = split_d
+        pre = [(d, c) for d, c in rows if d < split_d]
+        for i in range(len(pre) - 1, 0, -1):
+            d_curr, c_curr = pre[i]
+            _, c_prev = pre[i - 1]
+            if c_prev > 0 and (c_curr / c_prev) >= ratio * 0.85:
+                cutoff = d_curr
+                break
+        boundaries.append((cutoff, ratio))
+    boundaries.sort(key=lambda b: b[0], reverse=True)
+
+    out = []
+    for d, c in rows:
+        adj = c
+        for cutoff, ratio in boundaries:
+            if d < cutoff:
+                adj *= ratio
+        out.append({"date": d, "close": round(adj, 4)})
     return out
 
 
