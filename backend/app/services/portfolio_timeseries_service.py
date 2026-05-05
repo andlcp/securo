@@ -1,35 +1,28 @@
-"""Portfolio time series — money-on-money rentability computed live from
+"""Portfolio time series — Modified Dietz TWR computed live from
 asset_transactions + asset_values + assets.
 
 Replaces the parallel `portfolio_snapshots` table as the source for the
 investments dashboard chart. Reading from the same tables that Patrimônio
 edits guarantees that every change in the UI is reflected in the chart.
 
-The math (per day, per "bucket" — could be all assets, a class, or a
+The math (per month, per "bucket" — could be all assets, a class, or a
 specific asset id):
-    V(t)               = sum(units(t) × price(t))   for assets in bucket
-    cum_buys(t)        = sum(BUY.value)             from start until t
-    cum_sells(t)       = sum(SELL.value)            from start until t
-    rentabilidade(t)   = (V(t) + cum_sells(t) - cum_buys(t)) / cum_buys(t)
+    V_start_m  = sum(AssetValue.amount at month_end_{m-1}) for assets in bucket
+    V_end_m    = sum(AssetValue.amount at month_end_m)     for assets in bucket
+    CF_m       = sum(BUY at_close) - sum(SELL at_close)    in month m
+    INC_m      = sum(DIVIDEND.value + JCP.value + RENDIMENTO.value
+                    + RESGATE.value)
+    r_m        = (V_end_m + INC_m - V_start_m - CF_m) / (V_start_m + 0.5*CF_m)
+    TWR_cum_m  = product over m of (1 + r_m) - 1
 
-This is the same metric the per-asset card already shows as "P&L %":
-how much money you have in the portfolio versus how much money you put
-in. It converges exactly with `(saldo - investido) / investido` and
-matches the percentage Brazilian retail investors expect (Status Invest,
-Kinvo, etc. expose the same number).
-
-Why we left Modified Dietz behind: TWR is a fund-manager metric that
-penalises you for execution variance against close-of-day prices. If
-you bought 1380 ASAI3 at R$ 7.83 (intraday) on a day that closed at
-R$ 7.31, Modified Dietz registers a one-day -7 % loss the moment the
-BUY settles even though no value was destroyed. For an individual
-investor that's noise. The cost-basis ratio above only cares about
-end-of-period state vs cumulative cash invested, so end-of-window
-rentabilidade matches the saldo / investido ratio exactly.
-
-The `twr_cum` field name on the response is kept for API stability
-(frontend already reads it) — but the value is now this rentabilidade,
-not Modified Dietz. The legacy `return_month` field is set to None.
+For market-priced assets BUY / SELL cashflows are valued at the day's
+yfinance close (qty × close), not the broker's execution price. That
+keeps the daily formula on a single basis: V_end uses close, CF uses
+close, and the result captures price drift on the existing position
+without flipping into a phantom -8 % "loss" the moment a BUY settles
+against a low close (ASAI3 14/08/2025 ate one of those before this
+fix). The actual cash you paid is preserved on the per-asset card via
+asset.purchase_price × units vs last_price × units.
 
 For window normalization the frontend rebases each line to 0% at the
 start of the chosen window — we just return the cumulative series here,
@@ -387,7 +380,47 @@ async def get_timeseries(session: AsyncSession, user: User,
         AssetTransaction.asset_id.in_(asset_ids_use),
     )
     txs = list((await session.execute(stmt_tx)).scalars().all())
-    # Convert to user_ccy on the transaction date
+
+    # Pre-fetch yfinance close history for every market-priced asset so
+    # we can value cashflows AT CLOSE on tx days instead of at the
+    # broker's execution price. Why: Modified Dietz reads the spread
+    # between user.tx_price and yfinance.close as a one-day return — a
+    # 7 % intraday gap on ASAI3's R$ 7.83 buy when close was R$ 7.31
+    # turned into a phantom -8 % TWR for the asset and pulled the whole
+    # carteira down. Valuing the cashflow as `qty × close` cancels the
+    # spread out of the daily formula (V_end and CF move together at
+    # close), so TWR captures only the price drift on the existing
+    # position. The actual cash you paid is still preserved in
+    # tx.value for per-asset money-on-money in the UI.
+    market_assets_for_tx = [a for a in assets
+                            if a.valuation_method == "market_price" and a.ticker]
+    fetch_start = min((tx.date for tx in txs), default=date.today())
+    fetch_end = date.today()
+    history_results = await asyncio.gather(*[
+        fetch_yahoo_close_history(a.ticker, fetch_start - timedelta(days=10), fetch_end)
+        for a in market_assets_for_tx
+    ]) if market_assets_for_tx else []
+    cf_price_history: dict[uuid.UUID, list[tuple[str, float]]] = {}
+    for a, hist in zip(market_assets_for_tx, history_results):
+        if hist:
+            cf_price_history[a.id] = sorted(hist.items())
+
+    def _close_at(asset_id: uuid.UUID, on: date) -> Optional[float]:
+        hist = cf_price_history.get(asset_id)
+        if not hist:
+            return None
+        target = on.isoformat()
+        last: Optional[float] = None
+        for d_iso, p in hist:
+            if d_iso > target:
+                break
+            last = p
+        return last
+
+    # Convert to user_ccy on the transaction date. For market-priced BUY/
+    # SELL we substitute (qty × close) for tx.value so the cashflow is
+    # on the same basis as the daily V_end. Income (dividends/JCP) and
+    # non-market assets keep tx.value as-is.
     for tx in txs:
         if tx.value is None:
             continue
@@ -395,15 +428,23 @@ async def get_timeseries(session: AsyncSession, user: User,
         if a is None:
             continue
         rate = await fx(a.currency, user_ccy, tx.date)
-        amount = float(tx.value) * rate
+        cf_amount: Optional[float] = None
+        if (a.valuation_method == "market_price"
+                and tx.qty is not None
+                and tx.type in (_BUY_TYPES | _SELL_TYPES)):
+            close = _close_at(a.id, tx.date)
+            if close is not None:
+                cf_amount = float(tx.qty) * close * rate
+        if cf_amount is None:
+            cf_amount = float(tx.value) * rate
         key = tx.date.isoformat() if granularity == "daily" else tx.date.strftime("%Y-%m")
         bucket = cf_idx[(a.id, key)]
         if tx.type in _BUY_TYPES:
-            bucket["buy"] += amount
+            bucket["buy"] += cf_amount
         elif tx.type in _SELL_TYPES:
-            bucket["sell"] += amount
+            bucket["sell"] += cf_amount
         elif tx.type in _INCOME_TYPES:
-            bucket["income"] += amount
+            bucket["income"] += float(tx.value) * rate
 
     # Compute V_end per month per asset, summed across assets.
     # Optimization: pull AssetValues in one query, sort by asset+date,
@@ -453,6 +494,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         return latest_amount
 
     out: list[dict] = []
+    cum = 1.0
 
     if granularity == "daily":
         # Daily mode: walk one row per calendar day. Useful for short
@@ -556,6 +598,7 @@ async def get_timeseries(session: AsyncSession, user: User,
                     return units_at(asset, on) * p
             return value_at_for_asset(asset, on)
 
+        # Seed prev_v_end with the portfolio value the day before window start.
         # Per-asset "carried" state for non-market-priced assets (RF, manual
         # valuation). The AssetValue row only appears at month-end, so a
         # mid-month BUY/SELL is invisible to a naive lookup. We carry a base
@@ -563,7 +606,8 @@ async def get_timeseries(session: AsyncSession, user: User,
         # to a fresh AV only when its date is *strictly after* the AV we
         # last anchored on. Without the date check, the AV row from
         # before a sell would clobber the cashflow-adjusted base on the
-        # very next iteration.
+        # very next iteration (seen on a 2023-08-02 RF sell of R$ 30 789
+        # that read as +20 % on the cumulative TWR).
         asset_state: dict[uuid.UUID, dict] = {}
         seed_d = start_d - timedelta(days=1)
         for a in assets:
@@ -578,49 +622,14 @@ async def get_timeseries(session: AsyncSession, user: User,
                     break
             asset_state[a.id] = {"base": initial_v, "av_date": initial_av_date}
 
-        # Window-anchored rentabilidade. For "Início" we anchor at V_start = 0
-        # and accumulate every BUY/SELL ever made — that becomes the lifetime
-        # cost basis. For a 1A/3M/etc. window we anchor at V at the seed day
-        # (last trading day before the window opens) and only accumulate
-        # cashflows that fall inside the window. The user sees:
-        #
-        #     rent(t) = (V(t) + sells_in_window(t) - V_start - buys_in_window(t))
-        #               / (V_start + buys_in_window(t))
-        #
-        # which reads as "how the capital I held at window start, plus any new
-        # money I added since, has performed". Without this anchoring the
-        # lifetime cumulative metric drifts when new BUYs land mid-window
-        # (denominator grows faster than numerator → looks like a "loss" even
-        # if every asset went up), exactly the artifact that made 1A read
-        # -11 % when V was actually up R$ 81 k.
-        cum_buys_user = 0.0
-        cum_sells_user = 0.0
-        v_start_user = 0.0
-        if not since_start:
-            seed_d = start_d - timedelta(days=1)
-            for a in assets:
-                v_native = daily_v_native(a, seed_d)
-                if v_native == 0:
-                    continue
-                rate = await fx(a.currency, user_ccy, seed_d)
-                v_start_user += v_native * rate
-        else:
-            # Lifetime mode: still seed cumulative trackers with anything that
-            # happened BEFORE the chart's first labelled day so the very first
-            # data row is consistent (rare edge case where start_d sits a few
-            # days inside the actual portfolio start).
-            for tx in txs:
-                if tx.value is None or tx.date >= start_d:
-                    continue
-                a_pre = asset_by_id.get(tx.asset_id)
-                if a_pre is None:
-                    continue
-                r = await fx(a_pre.currency, user_ccy, tx.date)
-                amt = float(tx.value) * r
-                if tx.type in _BUY_TYPES:
-                    cum_buys_user += amt
-                elif tx.type in _SELL_TYPES:
-                    cum_sells_user += amt
+        prev_d = start_d - timedelta(days=1)
+        prev_v_end = 0.0
+        for a in assets:
+            v_native = daily_v_native(a, prev_d)
+            if v_native == 0:
+                continue
+            rate = await fx(a.currency, user_ccy, prev_d)
+            prev_v_end += v_native * rate
 
         d = start_d
         while d <= window_end:
@@ -718,18 +727,16 @@ async def get_timeseries(session: AsyncSession, user: User,
 
             cf = cf_buy - cf_sell
 
-            # Roll today's BUYs/SELLs into window-cumulative trackers.
-            # cf_buy / cf_sell are already in user_ccy.
-            cum_buys_user += cf_buy
-            cum_sells_user += cf_sell
-
-            # Window-anchored rentabilidade.
-            denom = v_start_user + cum_buys_user
-            if denom > 1e-3:
-                rent = (v_end_total + cum_sells_user
-                        - v_start_user - cum_buys_user) / denom
+            denom = prev_v_end + 0.5 * cf
+            if denom <= 1e-3:
+                r_d: Optional[float] = 0.0 if (v_end_total + inc) <= 1e-3 else None
             else:
-                rent = 0.0
+                r_d = (v_end_total + inc - prev_v_end - cf) / denom
+
+            if r_d is not None:
+                # Per-day cap is tighter than monthly: ±50%/day handles even
+                # extreme single-day moves and clips obvious data glitches.
+                cum *= (1.0 + max(min(r_d, 0.5), -0.5))
 
             out.append({
                 "month_end": iso,
@@ -737,47 +744,33 @@ async def get_timeseries(session: AsyncSession, user: User,
                 "v_end": round(v_end_total, 2),
                 "cashflow": round(cf, 2),
                 "income": round(inc, 2),
-                "return_month": None,
-                "twr_cum": round(rent, 6),
+                "return_month": round(r_d, 6) if r_d is not None else None,
+                "twr_cum": round(cum - 1.0, 6),
                 "by_class": {k: round(v, 2) for k, v in per_class.items()},
             })
+            prev_v_end = v_end_total
             d += timedelta(days=1)
 
         _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, out)
         return out
 
-    # Monthly mode: same window-anchored rentabilidade as daily mode.
-    cum_buys_user = 0.0
-    cum_sells_user = 0.0
-    v_start_user = 0.0
+    # Monthly mode (default): walk one row per month-end.
+    # Seed prev_v_end with the portfolio value at the month-end *before* the
+    # window starts. Otherwise, the first month's Modified Dietz return uses
+    # prev_v_end=0 even though the user already owned assets, which inflates
+    # the cumulative TWR by the entire pre-window value.
     if start_m == 1:
         prev_y, prev_m = start_y - 1, 12
     else:
         prev_y, prev_m = start_y, start_m - 1
     prev_me = _month_end(prev_y, prev_m)
-    if not since_start:
-        # Anchor at portfolio value the month-end before window opens.
-        for a in assets:
-            v_native = value_at_for_asset(a, prev_me)
-            if v_native == 0:
-                continue
-            rate = await fx(a.currency, user_ccy, prev_me)
-            v_start_user += v_native * rate
-    else:
-        # Lifetime: pre-load txs that landed before the first labelled
-        # month so the seed row is consistent.
-        for tx in txs:
-            if tx.value is None or tx.date.replace(day=1) > prev_me:
-                continue
-            a_pre = asset_by_id.get(tx.asset_id)
-            if a_pre is None:
-                continue
-            r = await fx(a_pre.currency, user_ccy, tx.date)
-            amt = float(tx.value) * r
-            if tx.type in _BUY_TYPES:
-                cum_buys_user += amt
-            elif tx.type in _SELL_TYPES:
-                cum_sells_user += amt
+    prev_v_end = 0.0
+    for a in assets:
+        v_native = value_at_for_asset(a, prev_me)
+        if v_native == 0:
+            continue
+        rate = await fx(a.currency, user_ccy, prev_me)
+        prev_v_end += v_native * rate
 
     for (y, m) in _iter_months(date(start_y, start_m, 1),
                                 date(end_y, end_m, 1)):
@@ -810,16 +803,15 @@ async def get_timeseries(session: AsyncSession, user: User,
                 inc += b["income"]
         cf = cf_buy - cf_sell
 
-        # Roll this month's BUYs/SELLs into window-cumulative trackers.
-        cum_buys_user += cf_buy
-        cum_sells_user += cf_sell
-
-        denom = v_start_user + cum_buys_user
-        if denom > 1e-3:
-            rent = (v_end_total + cum_sells_user
-                    - v_start_user - cum_buys_user) / denom
+        # Modified Dietz return
+        denom = prev_v_end + 0.5 * cf
+        if denom <= 1e-3:
+            r_m: Optional[float] = 0.0 if (v_end_total + inc) <= 1e-3 else None
         else:
-            rent = 0.0
+            r_m = (v_end_total + inc - prev_v_end - cf) / denom
+
+        if r_m is not None:
+            cum *= (1.0 + max(min(r_m, 5.0), -0.95))
 
         out.append({
             "month_end": label_date.isoformat(),
@@ -827,10 +819,11 @@ async def get_timeseries(session: AsyncSession, user: User,
             "v_end": round(v_end_total, 2),
             "cashflow": round(cf, 2),
             "income": round(inc, 2),
-            "return_month": None,
-            "twr_cum": round(rent, 6),
+            "return_month": round(r_m, 6) if r_m is not None else None,
+            "twr_cum": round(cum - 1.0, 6),
             "by_class": {k: round(v, 2) for k, v in per_class.items()},
         })
+        prev_v_end = v_end_total
 
     _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, out)
     return out

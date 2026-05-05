@@ -775,9 +775,22 @@ export default function AssetsV2Page() {
           <div className="hidden lg:block text-right shrink-0 w-[90px] tabular-nums">
             <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Rent.</p>
             {(() => {
-              const t = twrByAsset?.[asset.id]
-              if (!t) return <p className="text-xs text-muted-foreground">—</p>
-              const v = t.twr_cum
+              // Per-asset rentabilidade is plain money-on-money: how the
+              // current value compares to what you paid (saldo / investido
+              // - 1). Matches the +R$ x,xx (+y.yy% P&L) line on the saldo
+              // header. We compute it locally instead of hitting the TWR
+              // endpoint because the time-weighted return for a single
+              // asset would diverge from this number whenever there are
+              // multiple buys at different prices — and the user wants
+              // those two displays to agree.
+              const invested = (asset.purchase_price != null && asset.units != null)
+                ? Number(asset.purchase_price) * Number(asset.units)
+                : null
+              const value = asset.current_value
+              if (invested == null || value == null || invested <= 0) {
+                return <p className="text-xs text-muted-foreground">—</p>
+              }
+              const v = (value - invested) / invested
               return (
                 <p className={`text-xs font-semibold ${
                   v >= 0 ? 'text-emerald-600' : 'text-rose-500'
