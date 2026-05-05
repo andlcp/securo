@@ -653,13 +653,8 @@ export default function AssetsV2Page() {
     staleTime: 1000 * 60,
   })
 
-  // TWR per asset for the Rent. TWR column. ONE call returns the map.
-  const { data: twrByAsset } = useQuery({
-    queryKey: ['portfolio-twr-by-asset', kpiPeriod.months, kpiPeriod.sinceStart],
-    queryFn: () => portfolioTimeseries.twrByAsset(
-      kpiPeriod.months, kpiPeriod.sinceStart),
-    staleTime: 1000 * 60,
-  })
+  // (Per-asset Rent. badge moved to inline money-on-money — no longer
+  // depends on the time-weighted endpoint.)
 
   const kpiResult = useMemo(() => {
     if (!kpiSeries || kpiSeries.length < 2) return null
