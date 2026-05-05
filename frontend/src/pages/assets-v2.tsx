@@ -46,6 +46,7 @@ import {
   Tooltip as RechartsTooltip,
   ResponsiveContainer,
   CartesianGrid,
+  ReferenceDot,
 } from 'recharts'
 import { PageHeader } from '@/components/page-header'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
@@ -2023,6 +2024,41 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
     : true
   const priceColor = priceIsPositive ? '#10B981' : '#F43F5E'
 
+  // BUY/SELL markers overlaid on the cotação chart. Each transaction is
+  // snapped to the closest priceData entry on or before its date so the
+  // dot lands precisely on the line (transactions on weekends/holidays
+  // would otherwise miss the x-axis since priceData only has trading days).
+  // The y-coordinate prefers the user's actual trade price (tx.price) so
+  // the dot reads "I bought at exactly this price"; falls back to the day's
+  // close when price is missing or zero (e.g. value=0 reconciliation rows).
+  const txMarkers = useMemo(() => {
+    if (!transactions || priceData.length === 0) return []
+    const firstDate = priceData[0].date
+    const lastDate = priceData[priceData.length - 1].date
+    return transactions
+      .filter(t => (t.type === 'BUY' || t.type === 'SELL')
+        && t.date >= firstDate && t.date <= lastDate)
+      .map(t => {
+        // Snap to closest priceData point on or before tx.date.
+        let snapped: { date: string; close: number } | null = null
+        for (const p of priceData) {
+          if (p.date <= t.date) snapped = p
+          else break
+        }
+        if (!snapped) return null
+        const tradePrice = (t.price && t.price > 0) ? Number(t.price) : null
+        return {
+          id: t.id,
+          type: t.type as 'BUY' | 'SELL',
+          x: snapped.date,
+          y: tradePrice ?? snapped.close,
+          qty: t.qty ?? null,
+          date: t.date,
+        }
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+  }, [transactions, priceData])
+
   return (
     <div className="border-t border-border px-5 py-5 space-y-5 bg-muted/5">
       {/* Cotação chart — for market_priced assets, fetch daily closes from
@@ -2102,6 +2138,31 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
                     activeDot={{ r: 4, strokeWidth: 2, fill: 'var(--card)',
                       stroke: priceColor }}
                   />
+                  {/* BUY/SELL transaction markers overlaid on the line.
+                      Triangle up (blue) = compra, triangle down (amber) =
+                      venda. Drawn last so they sit on top of the area fill. */}
+                  {txMarkers.map(m => {
+                    const fill = m.type === 'BUY' ? '#2563EB' : '#F59E0B'
+                    return (
+                      <ReferenceDot
+                        key={m.id}
+                        x={m.x}
+                        y={m.y}
+                        ifOverflow="extendDomain"
+                        shape={(props: { cx?: number; cy?: number }) => {
+                          const cx = props.cx ?? 0
+                          const cy = props.cy ?? 0
+                          const path = m.type === 'BUY'
+                            ? `M ${cx} ${cy - 6} L ${cx - 5} ${cy + 4} L ${cx + 5} ${cy + 4} Z`
+                            : `M ${cx} ${cy + 6} L ${cx - 5} ${cy - 4} L ${cx + 5} ${cy - 4} Z`
+                          return (
+                            <path d={path} fill={fill}
+                              stroke="var(--card)" strokeWidth={1.5} />
+                          )
+                        }}
+                      />
+                    )
+                  })}
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
@@ -2110,6 +2171,25 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
               </p>
             )}
           </div>
+          {/* Tiny legend, only shown when at least one tx falls inside the
+              currently selected window. Stays out of the way otherwise. */}
+          {txMarkers.length > 0 && (
+            <div className="flex items-center justify-end gap-3 mt-1
+              text-[10px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1">
+                <svg width="10" height="10" viewBox="0 0 10 10">
+                  <path d="M 5 1 L 0 9 L 10 9 Z" fill="#2563EB" />
+                </svg>
+                Compra
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <svg width="10" height="10" viewBox="0 0 10 10">
+                  <path d="M 5 9 L 0 1 L 10 1 Z" fill="#F59E0B" />
+                </svg>
+                Venda
+              </span>
+            </div>
+          )}
         </div>
       ) : trendWithPurchase.length > 1 && (
         <div>
