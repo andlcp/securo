@@ -578,26 +578,49 @@ async def get_timeseries(session: AsyncSession, user: User,
                     break
             asset_state[a.id] = {"base": initial_v, "av_date": initial_av_date}
 
-        # Cumulative trackers for the new rentabilidade metric. We
-        # accumulate every BUY/SELL ever made (in user_ccy at tx date),
-        # including everything BEFORE start_d so windowed views still
-        # reflect the lifetime cost basis. The frontend rebases to 0 at
-        # window start, so the line shape during the window is what the
-        # user sees — but the absolute % is anchored to lifetime.
+        # Window-anchored rentabilidade. For "Início" we anchor at V_start = 0
+        # and accumulate every BUY/SELL ever made — that becomes the lifetime
+        # cost basis. For a 1A/3M/etc. window we anchor at V at the seed day
+        # (last trading day before the window opens) and only accumulate
+        # cashflows that fall inside the window. The user sees:
+        #
+        #     rent(t) = (V(t) + sells_in_window(t) - V_start - buys_in_window(t))
+        #               / (V_start + buys_in_window(t))
+        #
+        # which reads as "how the capital I held at window start, plus any new
+        # money I added since, has performed". Without this anchoring the
+        # lifetime cumulative metric drifts when new BUYs land mid-window
+        # (denominator grows faster than numerator → looks like a "loss" even
+        # if every asset went up), exactly the artifact that made 1A read
+        # -11 % when V was actually up R$ 81 k.
         cum_buys_user = 0.0
         cum_sells_user = 0.0
-        for tx in txs:
-            if tx.value is None or tx.date >= start_d:
-                continue
-            a_pre = asset_by_id.get(tx.asset_id)
-            if a_pre is None:
-                continue
-            r = await fx(a_pre.currency, user_ccy, tx.date)
-            amt = float(tx.value) * r
-            if tx.type in _BUY_TYPES:
-                cum_buys_user += amt
-            elif tx.type in _SELL_TYPES:
-                cum_sells_user += amt
+        v_start_user = 0.0
+        if not since_start:
+            seed_d = start_d - timedelta(days=1)
+            for a in assets:
+                v_native = daily_v_native(a, seed_d)
+                if v_native == 0:
+                    continue
+                rate = await fx(a.currency, user_ccy, seed_d)
+                v_start_user += v_native * rate
+        else:
+            # Lifetime mode: still seed cumulative trackers with anything that
+            # happened BEFORE the chart's first labelled day so the very first
+            # data row is consistent (rare edge case where start_d sits a few
+            # days inside the actual portfolio start).
+            for tx in txs:
+                if tx.value is None or tx.date >= start_d:
+                    continue
+                a_pre = asset_by_id.get(tx.asset_id)
+                if a_pre is None:
+                    continue
+                r = await fx(a_pre.currency, user_ccy, tx.date)
+                amt = float(tx.value) * r
+                if tx.type in _BUY_TYPES:
+                    cum_buys_user += amt
+                elif tx.type in _SELL_TYPES:
+                    cum_sells_user += amt
 
         d = start_d
         while d <= window_end:
@@ -695,16 +718,16 @@ async def get_timeseries(session: AsyncSession, user: User,
 
             cf = cf_buy - cf_sell
 
-            # Roll today's BUYs/SELLs into the lifetime cumulative
-            # trackers. cf_buy / cf_sell are already in user_ccy
-            # (cf_idx was populated with FX-converted amounts above).
+            # Roll today's BUYs/SELLs into window-cumulative trackers.
+            # cf_buy / cf_sell are already in user_ccy.
             cum_buys_user += cf_buy
             cum_sells_user += cf_sell
 
-            # Rentabilidade = (V + cumSells - cumBuys) / cumBuys.
-            # If we haven't started buying yet, the chart sits at 0.
-            if cum_buys_user > 1e-3:
-                rent = (v_end_total + cum_sells_user - cum_buys_user) / cum_buys_user
+            # Window-anchored rentabilidade.
+            denom = v_start_user + cum_buys_user
+            if denom > 1e-3:
+                rent = (v_end_total + cum_sells_user
+                        - v_start_user - cum_buys_user) / denom
             else:
                 rent = 0.0
 
@@ -723,32 +746,38 @@ async def get_timeseries(session: AsyncSession, user: User,
         _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, out)
         return out
 
-    # Monthly mode: walk one row per month-end. Same rentabilidade
-    # logic as daily mode — cumulative buys/sells across history,
-    # divided by cum_buys at each point.
+    # Monthly mode: same window-anchored rentabilidade as daily mode.
     cum_buys_user = 0.0
     cum_sells_user = 0.0
+    v_start_user = 0.0
     if start_m == 1:
         prev_y, prev_m = start_y - 1, 12
     else:
         prev_y, prev_m = start_y, start_m - 1
     prev_me = _month_end(prev_y, prev_m)
-    # Pre-load all txs strictly BEFORE the window's first labelled month
-    # into the cumulative trackers. The cf_idx buckets used inside the
-    # loop only include the months we iterate over, so anything older
-    # would otherwise be lost from cum_buys / cum_sells.
-    for tx in txs:
-        if tx.value is None or tx.date.replace(day=1) > prev_me:
-            continue
-        a_pre = asset_by_id.get(tx.asset_id)
-        if a_pre is None:
-            continue
-        r = await fx(a_pre.currency, user_ccy, tx.date)
-        amt = float(tx.value) * r
-        if tx.type in _BUY_TYPES:
-            cum_buys_user += amt
-        elif tx.type in _SELL_TYPES:
-            cum_sells_user += amt
+    if not since_start:
+        # Anchor at portfolio value the month-end before window opens.
+        for a in assets:
+            v_native = value_at_for_asset(a, prev_me)
+            if v_native == 0:
+                continue
+            rate = await fx(a.currency, user_ccy, prev_me)
+            v_start_user += v_native * rate
+    else:
+        # Lifetime: pre-load txs that landed before the first labelled
+        # month so the seed row is consistent.
+        for tx in txs:
+            if tx.value is None or tx.date.replace(day=1) > prev_me:
+                continue
+            a_pre = asset_by_id.get(tx.asset_id)
+            if a_pre is None:
+                continue
+            r = await fx(a_pre.currency, user_ccy, tx.date)
+            amt = float(tx.value) * r
+            if tx.type in _BUY_TYPES:
+                cum_buys_user += amt
+            elif tx.type in _SELL_TYPES:
+                cum_sells_user += amt
 
     for (y, m) in _iter_months(date(start_y, start_m, 1),
                                 date(end_y, end_m, 1)):
@@ -781,12 +810,14 @@ async def get_timeseries(session: AsyncSession, user: User,
                 inc += b["income"]
         cf = cf_buy - cf_sell
 
-        # Roll this month's BUYs/SELLs into lifetime cumulative trackers.
+        # Roll this month's BUYs/SELLs into window-cumulative trackers.
         cum_buys_user += cf_buy
         cum_sells_user += cf_sell
 
-        if cum_buys_user > 1e-3:
-            rent = (v_end_total + cum_sells_user - cum_buys_user) / cum_buys_user
+        denom = v_start_user + cum_buys_user
+        if denom > 1e-3:
+            rent = (v_end_total + cum_sells_user
+                    - v_start_user - cum_buys_user) / denom
         else:
             rent = 0.0
 
