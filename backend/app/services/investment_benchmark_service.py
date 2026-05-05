@@ -119,12 +119,25 @@ async def fetch_yahoo_dividends(symbol: str, start: date, end: date) -> list[dic
 
 
 async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict[str, float]:
-    """Daily unadjusted close prices for a symbol over a date range.
+    """Daily raw close prices for a symbol over a date range.
 
     Returns {iso_date: close} keyed on the trading day. Non-business days
     are absent — callers should hold-last-known when filling gaps.
     Used by the portfolio timeseries to compute daily V_end for
     market-priced assets without relying on sparse AssetValue snapshots.
+
+    Reverse-adjusts for splits that Yahoo silently applies to historical
+    closes. Despite returning a `quote.close` field that LOOKS like raw
+    close, Yahoo back-adjusts pre-split entries by 1/ratio to keep a
+    visually "smooth" line through corporate actions. That's fine for a
+    pretty chart but breaks Modified Dietz: the user's BUY in BRL-real
+    cash on a pre-split day collides with a back-adjusted (smaller)
+    close on the same day, producing a phantom -22 % loss every time
+    they buy a stock that later splits or issues a bonus. We pull the
+    `events.splits` list from the same payload and multiply pre-event
+    closes back by the split ratio so cash and price stay on the same
+    basis (BLAU3.SA: 14/08/2025 close goes from 9.31 back to 12.10,
+    matching the user's actual purchase price).
     """
     period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
     period2 = int(datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
@@ -132,7 +145,14 @@ async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             r = await client.get(
                 f"{YAHOO_BASE}/{symbol}",
-                params={"interval": "1d", "period1": period1, "period2": period2},
+                params={
+                    "interval": "1d",
+                    "period1": period1,
+                    "period2": period2,
+                    # Ask for split events explicitly — Yahoo only returns
+                    # `events.splits` when this param is present.
+                    "events": "split",
+                },
                 headers=YAHOO_HEADERS,
             )
             r.raise_for_status()
@@ -140,12 +160,34 @@ async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict
         chart = data["chart"]["result"][0]
         timestamps = chart["timestamp"]
         closes = chart["indicators"]["quote"][0]["close"]
+
+        # Build the (split_iso_date, ratio) list. Yahoo encodes ratios as
+        # numerator/denominator (e.g. a 1.3-for-1 bonus is 13/10). We use
+        # the ratio (>1 for splits/bonuses, <1 for groupings).
+        splits: list[tuple[str, float]] = []
+        events = chart.get("events") or {}
+        for entry in (events.get("splits") or {}).values():
+            num = entry.get("numerator")
+            den = entry.get("denominator")
+            ts = entry.get("date")
+            if num is None or den is None or den == 0 or ts is None:
+                continue
+            split_d = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
+            splits.append((split_d, float(num) / float(den)))
+        # Sort latest first so we apply reverse-adjustment in chronological
+        # reverse order: each pre-event close picks up the cumulative ratio.
+        splits.sort(key=lambda s: s[0], reverse=True)
+
         out: dict[str, float] = {}
         for ts, close in zip(timestamps, closes):
             if close is None:
                 continue
             d = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
-            out[d] = float(close)
+            adj = float(close)
+            for split_d, ratio in splits:
+                if d < split_d:
+                    adj *= ratio
+            out[d] = adj
         return out
     except Exception as exc:
         logger.warning("Yahoo history %s fetch failed: %s", symbol, exc)
