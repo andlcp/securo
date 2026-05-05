@@ -161,11 +161,21 @@ async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict
         timestamps = chart["timestamp"]
         closes = chart["indicators"]["quote"][0]["close"]
 
+        # Build sorted (iso_date, raw_close) list once; we need it both
+        # for output and to detect the back-adjustment transition below.
+        rows: list[tuple[str, float]] = []
+        for ts, close in zip(timestamps, closes):
+            if close is None:
+                continue
+            d = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+            rows.append((d, float(close)))
+        rows.sort(key=lambda r: r[0])
+
         # Build the (split_iso_date, ratio) list. Yahoo encodes ratios as
         # numerator/denominator (e.g. a 1.3-for-1 bonus is 13/10). We use
         # the ratio (>1 for splits/bonuses, <1 for groupings).
-        splits: list[tuple[str, float]] = []
         events = chart.get("events") or {}
+        splits: list[tuple[str, float]] = []
         for entry in (events.get("splits") or {}).values():
             num = entry.get("numerator")
             den = entry.get("denominator")
@@ -174,18 +184,38 @@ async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict
                 continue
             split_d = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
             splits.append((split_d, float(num) / float(den)))
-        # Sort latest first so we apply reverse-adjustment in chronological
-        # reverse order: each pre-event close picks up the cumulative ratio.
-        splits.sort(key=lambda s: s[0], reverse=True)
+
+        # For each split, find the actual back-adjustment transition.
+        # In our experience Yahoo doesn't always back-adjust the 1-3
+        # trading days immediately before the split — those rows already
+        # display at raw scale, so multiplying them again would inject a
+        # phantom spike (BLAU3 2026-01-02 was already raw at R$ 13.91;
+        # blindly multiplying by 1.3 sent it to R$ 18). The transition
+        # appears as a jump UP between two consecutive trading days whose
+        # ratio matches the split ratio. Walking from the split date back
+        # we pick the first such jump as the boundary; rows older than
+        # that boundary are back-adjusted and get multiplied.
+        boundaries: list[tuple[str, float]] = []  # (cutoff_d, ratio)
+        for split_d, ratio in splits:
+            cutoff = split_d
+            # Pre-split rows in chronological order.
+            pre = [(d, c) for d, c in rows if d < split_d]
+            for i in range(len(pre) - 1, 0, -1):
+                d_curr, c_curr = pre[i]
+                d_prev, c_prev = pre[i - 1]
+                if c_prev > 0 and (c_curr / c_prev) >= ratio * 0.85:
+                    cutoff = d_curr
+                    break
+            boundaries.append((cutoff, ratio))
+        # Sort latest cutoff first so cumulative reverse-adjustment is
+        # applied correctly when multiple splits stack.
+        boundaries.sort(key=lambda b: b[0], reverse=True)
 
         out: dict[str, float] = {}
-        for ts, close in zip(timestamps, closes):
-            if close is None:
-                continue
-            d = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
-            adj = float(close)
-            for split_d, ratio in splits:
-                if d < split_d:
+        for d, c in rows:
+            adj = c
+            for cutoff, ratio in boundaries:
+                if d < cutoff:
                     adj *= ratio
             out[d] = adj
         return out
