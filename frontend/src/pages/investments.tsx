@@ -737,7 +737,7 @@ export default function InvestmentsPage() {
           </div>
           <div className="rounded-xl border border-border bg-card p-4">
             <p className="text-[11px] text-muted-foreground uppercase tracking-wider">
-              TWR (cumulativo)
+              Rentabilidade
             </p>
             <p className={`text-base font-bold tabular-nums ${
               (lifetimeTwrCum ?? latestSnap?.twr_cum ?? 0) >= 0
@@ -871,7 +871,7 @@ export default function InvestmentsPage() {
             {((tsData && tsData.length > 0) || hasSnapshots) && (
               <div className="flex items-center gap-1.5">
                 <div className="w-5 border-t-2" style={{ borderColor: TWR_COLOR }} />
-                <span className="text-[11px] text-muted-foreground">TWR Carteira</span>
+                <span className="text-[11px] text-muted-foreground">Rentabilidade</span>
               </div>
             )}
             {([
@@ -951,7 +951,7 @@ export default function InvestmentsPage() {
                   <Line type="monotone" dataKey="sp500" stroke={SP500_COLOR} strokeWidth={1.5} strokeDasharray="5 3" dot={false} name="S&P 500" connectNulls />
                 )}
                 {((tsData && tsData.length > 0) || hasSnapshots) && (
-                  <Line type="monotone" dataKey="twr" stroke={TWR_COLOR} strokeWidth={2.5} dot={false} name="TWR Carteira" connectNulls />
+                  <Line type="monotone" dataKey="twr" stroke={TWR_COLOR} strokeWidth={2.5} dot={false} name="Rentabilidade" connectNulls />
                 )}
                 {!(tsData && tsData.length > 0) && !hasSnapshots && portfolioRefLines.map(rl => (
                   <ReferenceLine

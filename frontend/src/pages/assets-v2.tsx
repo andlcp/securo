@@ -773,7 +773,7 @@ export default function AssetsV2Page() {
             </p>
           </div>
           <div className="hidden lg:block text-right shrink-0 w-[90px] tabular-nums">
-            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Rent. TWR</p>
+            <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Rent.</p>
             {(() => {
               const t = twrByAsset?.[asset.id]
               if (!t) return <p className="text-xs text-muted-foreground">—</p>
@@ -2288,8 +2288,7 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
         </p>
         <p className="text-[11px] text-muted-foreground mb-3">
           Registre compras, vendas e proventos para que a aba Investimentos
-          calcule o TWR automaticamente. As transações alimentam o Modified
-          Dietz mensal — o gráfico atualiza após cada lançamento.
+          calcule a rentabilidade automaticamente.
         </p>
 
         {/* Add transaction form */}
