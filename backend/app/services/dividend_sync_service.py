@@ -31,6 +31,7 @@ import uuid
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Optional
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,9 +84,25 @@ def _bare_ticker(ticker: str) -> str:
     return upper[:-3] if upper.endswith(".SA") else upper
 
 
-def _units_at(asset_units: float, txs: list[AssetTransaction], on: date) -> float:
+def _units_at(asset_units: float, txs: list[AssetTransaction],
+              on: date,
+              purchase_date: Optional[date] = None) -> float:
     """Walk transactions newest-first, undoing buys/sells dated AFTER `on`.
-    Returns share count owned at end of day `on`. txs must be sorted ascending."""
+    Returns share count owned at end of day `on`. txs must be sorted ascending.
+
+    Pre-history clamp: if `on` is before the earliest known signal (first
+    tx, or `purchase_date` when there are no txs), return 0. Without this,
+    when current `asset.units` doesn't match sum(BUY)-sum(SELL) (the
+    "ghost units" pattern: corporate actions that bumped the position
+    silently, pre-CSV holdings), the walk projects the discrepancy
+    backwards in time. Multiplied by yfinance's per-share dividend rate
+    that gets added back as a "received" cashflow on a date the user
+    didn't actually own the asset, polluting the ledger with synthetic
+    DIVIDENDs (BLAU3 had three of those for jun/24, sep/24, mar/25).
+    """
+    earliest = txs[0].date if txs else purchase_date
+    if earliest is not None and on < earliest:
+        return 0.0
     u = asset_units
     for tx in reversed(txs):
         if tx.date <= on:
@@ -194,7 +211,8 @@ async def _process_asset_events(
             skipped += 1
             continue
 
-        units = _units_at(asset_units_today, txs, ev_date)
+        units = _units_at(asset_units_today, txs, ev_date,
+                          purchase_date=asset.purchase_date)
         if units <= 0:
             skipped += 1
             continue
