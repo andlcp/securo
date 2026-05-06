@@ -1314,32 +1314,42 @@ export default function AssetsV2Page() {
               </p>
             </div>
 
-            {/* Ícone + Currency. "Tipo" was renamed to "Ícone" because it
-                only drives the card icon/badge, not the section grouping —
-                users were assuming this field defined the section and
-                getting surprised. Currency comes from the live quote when
-                a market_price ticker is picked, so it's read-only there. */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>{t('assets.icon')}</Label>
-                <select
-                  className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
-                  value={formType}
-                  onChange={e => {
-                    setFormType(e.target.value)
-                    setIconTouched(true)
-                  }}
-                >
-                  {ASSET_TYPES.map(at => (
-                    <option key={at} value={at}>
-                      {t(`assets.type${at.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase()).replace(/^./, c => c.toUpperCase())}`)}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-muted-foreground">
-                  {t('assets.iconHelp')}
-                </p>
-              </div>
+            {/* Ícone + Currency. The Ícone (type) field is only useful for
+                non-financial assets (Imóvel / Veículo / Bem de Valor / etc.)
+                because:
+                - For market_price assets, yfinance's logo_url wins almost
+                  always, so the type-icon is a fantasma that never renders.
+                - For all other financial classes the icon is deterministic
+                  given the class (Stocks → Ação, FIIs → Imóvel, …) and is
+                  auto-applied through iconTypeForClass on category change.
+                We therefore expose the Ícone picker only when Categoria
+                = "Outro" — the one bucket where the user actually has a
+                meaningful choice (Imóvel/Veículo/Fundo/Bem de Valor/etc.).
+                Currency stays visible always; it spans full width when
+                Ícone is hidden. */}
+            <div className={formAssetClass === 'OUTRO' ? 'grid grid-cols-2 gap-4' : ''}>
+              {formAssetClass === 'OUTRO' && (
+                <div className="space-y-2">
+                  <Label>{t('assets.icon')}</Label>
+                  <select
+                    className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
+                    value={formType}
+                    onChange={e => {
+                      setFormType(e.target.value)
+                      setIconTouched(true)
+                    }}
+                  >
+                    {ASSET_TYPES.map(at => (
+                      <option key={at} value={at}>
+                        {t(`assets.type${at.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase()).replace(/^./, c => c.toUpperCase())}`)}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('assets.iconHelp')}
+                  </p>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label>{t('assets.currency')}</Label>
                 <select

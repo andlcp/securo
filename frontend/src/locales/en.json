@@ -665,7 +665,7 @@
     "name": "Name",
     "type": "Type",
     "icon": "Icon",
-    "iconHelp": "Just the icon shown on the card. It doesn't drive which section the asset is listed under — that's the Category.",
+    "iconHelp": "Card icon (Real Estate, Vehicle, Valuable, etc.). For market-quoted assets, the yfinance company logo is used when available and this icon only serves as a fallback.",
     "category": "Category",
     "categorySelect": "— select —",
     "categoryHelp": "Determines which section the asset appears under on the Portfolio page (Stocks, REITs, Fixed Income, US Stocks, Crypto…) and the Investments dashboard filters.",
