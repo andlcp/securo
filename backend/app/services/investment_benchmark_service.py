@@ -185,27 +185,39 @@ async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict
             split_d = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
             splits.append((split_d, float(num) / float(den)))
 
-        # For each split, find the actual back-adjustment transition.
-        # In our experience Yahoo doesn't always back-adjust the 1-3
-        # trading days immediately before the split — those rows already
-        # display at raw scale, so multiplying them again would inject a
-        # phantom spike (BLAU3 2026-01-02 was already raw at R$ 13.91;
-        # blindly multiplying by 1.3 sent it to R$ 18). The transition
-        # appears as a jump UP between two consecutive trading days whose
-        # ratio matches the split ratio. Walking from the split date back
-        # we pick the first such jump as the boundary; rows older than
-        # that boundary are back-adjusted and get multiplied.
+        # For each split, decide where yfinance switches from
+        # back-adjusted (older, displayed on post-event basis) to raw
+        # (more recent, no adjustment yet). Default cutoff is the split
+        # date itself.
+        #
+        # SPLITS / BONUSES (ratio > 1): yfinance often leaves the 1-3
+        # trading days immediately before the event raw — those rows
+        # already display at the pre-event price level, so blindly
+        # multiplying them by the ratio would inject a phantom spike
+        # (BLAU3 2026-01-02 was already raw at R$ 13.91; ×1.3 sent it
+        # to R$ 18). Detect the transition by walking back and finding
+        # the first day-on-day JUMP UP that matches the ratio.
+        #
+        # GROUPINGS (ratio < 1, e.g. AERI3's 1:20 = 0.05): yfinance
+        # back-adjusts ALL pre-event rows consistently — there is no
+        # late-window raw window to skip. Trying to detect a transition
+        # by ratio-matching c_curr/c_prev would always trigger on
+        # day-1's ratio (~ 0.98) since 0.98 ≥ 0.05 × 0.85 = 0.0425, and
+        # the algorithm would mis-cut at the day before the grouping,
+        # leaving a 20× spike between two consecutive days. So for
+        # ratio < 1 we just keep cutoff at split_d and let every
+        # pre-event close get multiplied uniformly.
         boundaries: list[tuple[str, float]] = []  # (cutoff_d, ratio)
         for split_d, ratio in splits:
             cutoff = split_d
-            # Pre-split rows in chronological order.
-            pre = [(d, c) for d, c in rows if d < split_d]
-            for i in range(len(pre) - 1, 0, -1):
-                d_curr, c_curr = pre[i]
-                d_prev, c_prev = pre[i - 1]
-                if c_prev > 0 and (c_curr / c_prev) >= ratio * 0.85:
-                    cutoff = d_curr
-                    break
+            if ratio > 1.0:
+                pre = [(d, c) for d, c in rows if d < split_d]
+                for i in range(len(pre) - 1, 0, -1):
+                    d_curr, c_curr = pre[i]
+                    _, c_prev = pre[i - 1]
+                    if c_prev > 0 and (c_curr / c_prev) >= ratio * 0.85:
+                        cutoff = d_curr
+                        break
             boundaries.append((cutoff, ratio))
         # Sort latest cutoff first so cumulative reverse-adjustment is
         # applied correctly when multiple splits stack.

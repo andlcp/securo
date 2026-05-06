@@ -104,13 +104,18 @@ def _fetch_yahoo_history(symbol: str, days: int, interval: str
     boundaries: list[tuple[str, float]] = []
     for split_d, ratio in splits:
         cutoff = split_d
-        pre = [(d, c) for d, c in rows if d < split_d]
-        for i in range(len(pre) - 1, 0, -1):
-            d_curr, c_curr = pre[i]
-            _, c_prev = pre[i - 1]
-            if c_prev > 0 and (c_curr / c_prev) >= ratio * 0.85:
-                cutoff = d_curr
-                break
+        # Only look for a back-adjustment transition for splits/bonuses
+        # (ratio > 1). For groupings (ratio < 1) yfinance back-adjusts
+        # every pre-event row uniformly, so the ratio-match heuristic
+        # would mis-cut on day 1 and leave a 20× spike (AERI3 case).
+        if ratio > 1.0:
+            pre = [(d, c) for d, c in rows if d < split_d]
+            for i in range(len(pre) - 1, 0, -1):
+                d_curr, c_curr = pre[i]
+                _, c_prev = pre[i - 1]
+                if c_prev > 0 and (c_curr / c_prev) >= ratio * 0.85:
+                    cutoff = d_curr
+                    break
         boundaries.append((cutoff, ratio))
     boundaries.sort(key=lambda b: b[0], reverse=True)
 
