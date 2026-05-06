@@ -499,21 +499,23 @@ async def get_timeseries(session: AsyncSession, user: User,
             last = p
         return last
 
-    # Convert to user_ccy on the transaction date. For market-priced BUY/
-    # SELL with a real cash value we substitute (qty × close) for
-    # tx.value so the cashflow is on the same basis as the daily V_end
-    # (kills the bid-ask-spread blip on tx days).
+    # Convert to user_ccy on the transaction date. We use the actual
+    # cash value of every BUY/SELL/INCOME (tx.value), not the day's
+    # close × qty. That's "Option B" / broker convention: the spread
+    # between your execution price and the day's close becomes a real
+    # day-of-trade Modified Dietz return — positive when you got in
+    # below close, negative when you paid above. Brokers (XP, Status
+    # Invest, Kinvo) report this way because that R$ 718 you "left on
+    # the table" by paying R$ 7.83 for ASAI3 cotas that closed at
+    # R$ 7.31 IS a real loss in net wealth that day.
     #
-    # IMPORTANT — never override tx.value when tx.value is 0. That's
-    # the signature of a reconciliation row written to make
-    # asset.units = sum(BUY) - sum(SELL) again after a corporate
-    # action we couldn't capture as a real trade (AERI3 grouping,
-    # BLAU3 bonus, etc.). Those rows must stay at zero cashflow —
-    # otherwise Modified Dietz reads `qty × close` as money flowing
-    # in/out of the portfolio with no V change to absorb it, and
-    # that registers as a +50 % daily return cap (AERI3 SELL 9697.6
-    # × R$ 9.95 = R$ 96 k phantom sell on 2024-05-14, which inflated
-    # the Renda Variável Brasil cumulative line by ~60 pp).
+    # The VALE3 sanity check (PDF 24M +59.83 % vs our +69 % under the
+    # close-based variant, +58.92 % under this raw-cash variant —
+    # gap dropped from 9 pp to 1 pp) tipped the decision.
+    #
+    # Reconciliation rows still carry tx.value = 0 by construction
+    # (corporate-action paper adjustments) so they contribute zero
+    # cashflow either way — no special-casing needed here.
     for tx in txs:
         if tx.value is None:
             continue
@@ -521,17 +523,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         if a is None:
             continue
         rate = await fx(a.currency, user_ccy, tx.date)
-        tx_value_native = float(tx.value)
-        cf_amount: Optional[float] = None
-        if (a.valuation_method == "market_price"
-                and tx.qty is not None
-                and tx_value_native > 0
-                and tx.type in (_BUY_TYPES | _SELL_TYPES)):
-            close = _close_at(a.id, tx.date)
-            if close is not None:
-                cf_amount = float(tx.qty) * close * rate
-        if cf_amount is None:
-            cf_amount = tx_value_native * rate
+        cf_amount = float(tx.value) * rate
         key = tx.date.isoformat() if granularity == "daily" else tx.date.strftime("%Y-%m")
         bucket = cf_idx[(a.id, key)]
         if tx.type in _BUY_TYPES:
@@ -539,7 +531,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         elif tx.type in _SELL_TYPES:
             bucket["sell"] += cf_amount
         elif tx.type in _INCOME_TYPES:
-            bucket["income"] += tx_value_native * rate
+            bucket["income"] += cf_amount
 
     # Compute V_end per month per asset, summed across assets.
     # Optimization: pull AssetValues in one query, sort by asset+date,
