@@ -47,14 +47,20 @@ class BcbPtaxProvider(FxRateProvider):
         return "bcb_ptax"
 
     async def fetch_latest(self) -> dict[str, Decimal]:
-        """Return today's PTAX (or the most recent business day's).
+        """Return the last *closed* PTAX rate.
 
-        BCB publishes PTAX after market close. On weekends/holidays the
-        endpoint returns no quote; we walk back up to 7 days to find the
-        last published rate.
+        BCB publishes intraday boletins during the trading day (Abertura,
+        Intermediário 1-4) before the official PTAX comes out around
+        13:00 BRT. Those intraday partials change every 30 minutes and
+        aren't authoritative — using them in the badge would make the
+        portfolio valuation wobble through the morning.
+
+        Start from yesterday and walk back so the badge always reflects
+        an official, closed PTAX. On weekends/holidays we keep walking
+        until we hit the last business day with a published rate.
         """
         async with httpx.AsyncClient(timeout=30) as client:
-            for delta in range(0, 7):
+            for delta in range(1, 8):
                 d = date.today() - timedelta(days=delta)
                 params = {
                     "@dataCotacao": f"'{d.strftime('%m-%d-%Y')}'",
@@ -77,7 +83,7 @@ class BcbPtaxProvider(FxRateProvider):
                 except Exception as exc:
                     logger.warning("BCB PTAX fetch failed for %s: %s", d, exc)
                     continue
-        raise RuntimeError("No PTAX rate found in last 7 days")
+        raise RuntimeError("No PTAX rate found in last 7 business days")
 
     async def fetch_historical(self, target_date: date) -> dict[str, Decimal]:
         """Return USD/BRL rate for a specific historical date.

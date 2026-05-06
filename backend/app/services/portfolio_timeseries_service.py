@@ -386,21 +386,29 @@ async def get_timeseries(session: AsyncSession, user: User,
         _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, [])
         return []
 
-    # In-request FX cache — daily mode walks ~1800 days × N assets and
-    # _fx_rate hits the DB (and on-demand sync) every call. Without
-    # caching, "Início" daily for a multi-currency portfolio took ~30 s
-    # and timed out the chart query. Hot path is just dict lookup.
-    fx_cache: dict[tuple[str, str, str], float] = {}
-
-    # Detect an empty FX table once. If there are no rows, every lookup
-    # would degrade to "exact match miss → on-demand sync (fails when no
-    # provider configured) → closest miss → 1.0 fallback" — three DB
-    # round-trips for a guaranteed-1.0 answer. Skip them entirely.
+    # Bulk-load every USD-quoted FX rate into memory at the start so the
+    # daily walk hits a dict instead of issuing thousands of DB queries.
+    # The previous lazy fx_cache still triggered _fx_rate -> DB on every
+    # unique (date, ccy) combination — for a 7-year history with US
+    # assets that was 2.5 k+ DB roundtrips and pushed the "Início"
+    # request to ~19 s, which the frontend reads as a stuck load.
     from app.models.fx_rate import FxRate
-    from sqlalchemy import func as _sa_func
-    _has_fx = (await session.execute(
-        select(_sa_func.count()).select_from(FxRate)
-    )).scalar_one() > 0
+    fx_rows = (await session.execute(
+        select(FxRate).where(FxRate.base_currency == "USD")
+    )).scalars().all()
+    # {(quote_ccy, iso_date): rate}, plus per-currency sorted-date list
+    # for as-of lookups when the exact date isn't in the table.
+    fx_by_date: dict[tuple[str, str], float] = {}
+    fx_dates_by_ccy: dict[str, list[str]] = defaultdict(list)
+    for row in fx_rows:
+        iso = row.date.isoformat()
+        fx_by_date[(row.quote_currency, iso)] = float(row.rate)
+        fx_dates_by_ccy[row.quote_currency].append(iso)
+    for ccy in fx_dates_by_ccy:
+        fx_dates_by_ccy[ccy].sort()
+    _has_fx = len(fx_rows) > 0
+
+    fx_cache: dict[tuple[str, str, str], float] = {}
 
     async def fx(ccy_from: str, ccy_to: str, on: date) -> float:
         if ccy_from == ccy_to or not _has_fx:
@@ -409,7 +417,31 @@ async def get_timeseries(session: AsyncSession, user: User,
         cached = fx_cache.get(key)
         if cached is not None:
             return cached
-        rate = await _fx_rate(session, ccy_from, ccy_to, on)
+        # Cross-rate via USD: rate(from→to) = USD→to / USD→from.
+        # Exact-date lookup first; if missing, walk back to the closest
+        # earlier date we do have (PTAX skips weekends/holidays).
+        target = on.isoformat()
+        def _usd_to(c: str) -> float:
+            if c == "USD":
+                return 1.0
+            r = fx_by_date.get((c, target))
+            if r is not None:
+                return r
+            dates = fx_dates_by_ccy.get(c, [])
+            if not dates:
+                return 1.0
+            # Binary-walk to the latest date <= target.
+            last = None
+            for d_iso in dates:
+                if d_iso <= target:
+                    last = d_iso
+                else:
+                    break
+            if last is None:
+                # Target precedes any FX row — use the earliest available.
+                last = dates[0]
+            return fx_by_date.get((c, last), 1.0)
+        rate = _usd_to(ccy_to) / _usd_to(ccy_from)
         fx_cache[key] = rate
         return rate
 

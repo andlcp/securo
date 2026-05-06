@@ -26,17 +26,37 @@ async def sync_rates(
 ) -> int:
     """Fetch rates from the provider for the given date and upsert into fx_rates.
 
-    Only saves rates for currencies in `supported_currencies`.
-    Idempotent — existing rates for the same date are updated.
-    Returns the number of rates synced.
-    """
-    target = target_date or date.today()
-    supported = set(get_settings().supported_currencies.split(","))
+    For the "current" sync (no target_date) we anchor to *yesterday* so
+    we always store an officially closed PTAX rate. BCB's intraday
+    boletins (Abertura, Intermediário) shift through the morning and
+    don't represent the day's reference quote until ~13:00 BRT — using
+    them for valuation makes the badge wobble and the consolidated
+    portfolio total drift around as the day progresses.
 
-    if target == date.today():
-        rates = await _provider.fetch_latest()
-    else:
+    Idempotent — existing rates for the same date are updated.
+    """
+    from datetime import timedelta as _td
+    if target_date is not None:
+        target = target_date
         rates = await _provider.fetch_historical(target)
+    else:
+        # "Last closed PTAX" anchor: walk back from yesterday until
+        # we find a business day with a published quote. We attribute
+        # the rate to its actual quote date — not today — so the
+        # badge shows the correct date label.
+        target = None
+        rates: dict[str, Decimal] = {}
+        for delta in range(1, 8):
+            d = date.today() - _td(days=delta)
+            r = await _provider.fetch_historical(d)
+            if r:
+                target = d
+                rates = r
+                break
+        if target is None:
+            logger.warning("No PTAX rate found in last 7 business days")
+            return 0
+    supported = set(get_settings().supported_currencies.split(","))
 
     count = 0
     for currency_code, rate in rates.items():
