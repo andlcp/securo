@@ -7,14 +7,16 @@ Source routing:
   Anything else → Yahoo Finance ``events=div``. Yahoo doesn't separate
     JCP from ordinary dividends, so we always store these as DIVIDEND.
 
-Withholding factors applied to the per-share amount BEFORE multiplying
-by units owned on the date. Configured to match the user's preference
-of storing the *net* (post-tax) value so it reconciles with the XP CSV:
+All factors are 1.0 — we store GROSS values so portfolio rentabilidade
+sits on the same basis as the CDI benchmark line drawn alongside it.
+The earlier × 0.85 for JCP was producing a misleading apples-to-oranges
+comparison (net portfolio vs gross CDI) that the user read as
+underperformance.
 
-  DIVIDEND BR    × 1.00  (isento p/ pessoa física)
-  RENDIMENTO     × 1.00  (FII isento p/ PF)
-  JCP            × 0.85  (15 % IR retido na fonte)
-  DIVIDEND US    × 1.00  (user opted out of the 30 % factor)
+  DIVIDEND BR    × 1.00
+  RENDIMENTO     × 1.00
+  JCP            × 1.00
+  DIVIDEND US    × 1.00
 
 Dedupe:
   1. Idempotent re-runs use ``external_id`` keyed by source+ticker+date.
@@ -63,10 +65,15 @@ _DEDUPE_VALUE_ABS = 0.50  # R$
 _DEDUPE_VALUE_REL = 0.05  # 5 %
 
 # Per-type withholding factor applied to amount × units before storing.
+# All set to 1.0 — we store GROSS values to keep portfolio rentabilidade
+# on the same basis as the gross CDI benchmark line. Mixing net (after IR
+# retido na fonte for JCP, etc.) cashflows with a gross CDI baseline gives
+# an apples-to-oranges comparison, and the user reads the resulting gap
+# as portfolio underperformance even when it's just a tax artifact.
 _FACTOR_BY_TYPE = {
-    "DIVIDEND": 1.00,    # BR isento de IR p/ PF; US user opted to not apply 0.70
-    "JCP": 0.85,         # 15 % IR retido na fonte
-    "RENDIMENTO": 1.00,  # FII isento p/ PF
+    "DIVIDEND": 1.00,
+    "JCP": 1.00,
+    "RENDIMENTO": 1.00,
 }
 
 
