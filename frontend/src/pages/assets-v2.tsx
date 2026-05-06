@@ -241,6 +241,10 @@ export default function AssetsV2Page() {
   const [deletingWalletId, setDeletingWalletId] = useState<string | null>(null)
   // Collapsed wallet IDs — default is expanded (empty set), user can collapse manually
   const [collapsedWallets, setCollapsedWallets] = useState<Set<string>>(new Set())
+  // Subgroup (Ações / FIIs / RF / …) collapse state. Keyed by
+  // `${walletId}::${subgroupName}` so the same subgroup name in
+  // different wallets can collapse independently.
+  const [collapsedSubgroups, setCollapsedSubgroups] = useState<Set<string>>(new Set())
   // Asset being moved to a wallet (null = no picker open)
   const [movingAsset, setMovingAsset] = useState<Asset | null>(null)
 
@@ -989,6 +993,16 @@ export default function AssetsV2Page() {
     })
   }
 
+  function toggleSubgroupCollapse(walletId: string, subgroupName: string) {
+    const key = `${walletId}::${subgroupName}`
+    setCollapsedSubgroups(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
   function openCreateWallet() {
     setEditingWallet(null)
     setWalletFormName('')
@@ -1082,31 +1096,50 @@ export default function AssetsV2Page() {
         </div>
         {!isCollapsed && walletAssets.length > 0 && (
           <div className="space-y-3 pl-4">
-            {groupByDisplayClass(walletAssets).map(({ name, assets: subAssets }) => (
-              <div key={name} className="space-y-2">
-                {/* Subgroup header — only shown when there's more than one
-                    subgroup in the wallet (otherwise it's redundant). */}
-                {groupByDisplayClass(walletAssets).length > 1 && (
-                  <div className="flex items-center justify-between px-1 pt-1 border-l-2 border-muted-foreground/20 pl-3">
-                    <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-                      {name}
-                      <span className="text-[10px] text-muted-foreground/70 ml-2 normal-case">
-                        ({subAssets.length})
+            {groupByDisplayClass(walletAssets).map(({ name, assets: subAssets }) => {
+              const subgroupKey = `${wallet.id}::${name}`
+              const isSubCollapsed = collapsedSubgroups.has(subgroupKey)
+              const showHeader = groupByDisplayClass(walletAssets).length > 1
+              const subgroupTotal = subAssets.reduce(
+                (sum, a) => sum + (a.current_value_primary ?? a.current_value ?? 0),
+                0,
+              )
+              return (
+                <div key={name} className="space-y-2">
+                  {/* Subgroup header — only shown when there's more than one
+                      subgroup in the wallet (otherwise it's redundant). The
+                      whole row is a button now so the user can collapse a
+                      subgroup independently of the wallet collapse. */}
+                  {showHeader && (
+                    <button
+                      type="button"
+                      onClick={() => toggleSubgroupCollapse(wallet.id, name)}
+                      className="flex items-center justify-between w-full px-1 pt-1 border-l-2 border-muted-foreground/20 pl-3 hover:bg-muted/30 transition-colors rounded-r"
+                    >
+                      <span className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                        {isSubCollapsed ? (
+                          <ChevronRight size={12} className="text-muted-foreground" />
+                        ) : (
+                          <ChevronDown size={12} className="text-muted-foreground" />
+                        )}
+                        {name}
+                        <span className="text-[10px] text-muted-foreground/70 ml-1 normal-case">
+                          ({subAssets.length})
+                        </span>
                       </span>
-                    </span>
-                    <span className="text-[11px] font-bold tabular-nums text-muted-foreground">
-                      {mask(formatCurrency(
-                        subAssets.reduce((sum, a) =>
-                          sum + (a.current_value_primary ?? a.current_value ?? 0), 0),
-                        userCurrency, locale))}
-                    </span>
-                  </div>
-                )}
-                <div className="space-y-2">
-                  {subAssets.map(renderAssetCard)}
+                      <span className="text-[11px] font-bold tabular-nums text-muted-foreground">
+                        {mask(formatCurrency(subgroupTotal, userCurrency, locale))}
+                      </span>
+                    </button>
+                  )}
+                  {!isSubCollapsed && (
+                    <div className="space-y-2">
+                      {subAssets.map(renderAssetCard)}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
         {!isCollapsed && walletAssets.length === 0 && (
