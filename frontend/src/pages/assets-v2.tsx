@@ -644,12 +644,19 @@ export default function AssetsV2Page() {
     }, 0)
   }, [assetsList])
 
-  // Portfolio timeseries for the KPI bar (Resultado período).
+  // Portfolio timeseries for the KPI bar (Resultado período). Use
+  // daily granularity — monthly mode lacks the implicit-cashflow
+  // heuristic that the daily walk uses for archived RFs without
+  // transactions, so a Tesouro Selic AV jump from a mid-month deposit
+  // gets mis-read as a +99 % monthly return and the cum compounds to
+  // +1808 % over a few years (Patrimônio V2 was showing the user's
+  // R$ 1.27 M total as a +R$ 1.75 M / +1808 % gain).
   const { data: kpiSeries } = useQuery({
     queryKey: ['portfolio-ts-kpi', kpiPeriod.months, kpiPeriod.sinceStart],
     queryFn: () => portfolioTimeseries.series({
       months: kpiPeriod.months,
       sinceStart: kpiPeriod.sinceStart,
+      granularity: 'daily',
     }),
     staleTime: 1000 * 60,
   })
