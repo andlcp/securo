@@ -11,11 +11,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.core.config import get_settings
 from app.models.fx_rate import FxRate
 from app.models.user import User
-from app.providers.openexchangerates import OpenExchangeRatesProvider
+from app.providers.bcb_ptax import BcbPtaxProvider
 
 logger = logging.getLogger(__name__)
 
-_provider = OpenExchangeRatesProvider()
+# Switched from OpenExchangeRates (paid signup, 1 k req/mo cap) to BCB
+# PTAX — same source the user's broker statements use, no key needed,
+# and we already use BCB SGS for IPCA / CDI elsewhere.
+_provider = BcbPtaxProvider()
 
 
 async def sync_rates(

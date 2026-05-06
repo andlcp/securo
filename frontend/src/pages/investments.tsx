@@ -19,6 +19,7 @@ import type { PortfolioSnapshot, PortfolioPoint } from '@/lib/api'
 import { ASSET_CLASS_OPTIONS, type AssetClass, ASSET_CLASS_LABELS } from '@/types'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/page-header'
+import { FxBadge } from '@/components/fx-badge'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
 import { useAuth } from '@/contexts/auth-context'
 import type { AssetGroup } from '@/types'
@@ -578,7 +579,8 @@ export default function InvestmentsPage() {
         section={t('nav.groupAnalysis')}
         title={t('investments.title')}
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <FxBadge />
             <input
               ref={fileInputRef}
               type="file"

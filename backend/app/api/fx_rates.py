@@ -1,7 +1,7 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func
+from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import current_active_user
@@ -12,6 +12,36 @@ from app.models.user import User
 from app.services.fx_rate_service import sync_rates
 
 router = APIRouter(prefix="/api/fx-rates", tags=["fx-rates"])
+
+
+@router.get("/current")
+async def current_rate(
+    quote: str = "BRL",
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Return the most recent USD/{quote} rate stored locally.
+
+    Used by the discrete header badge on Patrimônio and Investimentos
+    so the user can verify which dollar rate their portfolio
+    consolidation is using. Falls back to {rate: null} if the table
+    is empty (so the UI can hide the badge instead of showing 1.0).
+    """
+    row = (await session.execute(
+        select(FxRate).where(
+            FxRate.base_currency == "USD",
+            FxRate.quote_currency == quote,
+        ).order_by(desc(FxRate.date)).limit(1)
+    )).scalar_one_or_none()
+    if row is None:
+        return {"rate": None, "date": None, "source": None}
+    return {
+        "rate": float(row.rate),
+        "date": row.date.isoformat(),
+        "source": row.source,
+        "base": row.base_currency,
+        "quote": row.quote_currency,
+    }
 
 
 @router.post("/refresh")

@@ -49,6 +49,7 @@ import {
   ReferenceDot,
 } from 'recharts'
 import { PageHeader } from '@/components/page-header'
+import { FxBadge } from '@/components/fx-badge'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
 import { useAuth } from '@/contexts/auth-context'
 
@@ -1032,7 +1033,8 @@ export default function AssetsV2Page() {
         section={t('assetsV2.title')}
         title={t('assetsV2.title')}
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <FxBadge />
             <Button onClick={openCreateWallet} variant="outline" className="gap-1.5">
               <Wallet size={16} />
               {t('assets.newWallet')}
