@@ -15,10 +15,12 @@ export function FxBadge() {
         source: string | null
       }
     },
-    // Cache for 5 min — beat task syncs once a day, no need to hit
-    // the endpoint on every navigation.
-    staleTime: 5 * 60 * 1000,
-    refetchOnWindowFocus: false,
+    // Cheap call (single-row read), so we always re-fetch on mount
+    // and on window focus. Avoids the badge silently sitting on a
+    // stale rate after the daily Celery sync runs.
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   })
 
   if (!data || data.rate == null) return null

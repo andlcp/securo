@@ -49,9 +49,12 @@ async def refresh_rates(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
-    """Trigger immediate FX rate sync."""
-    count = await sync_rates(session, date.today())
-    return {"synced": True, "rates_count": count, "date": date.today().isoformat()}
+    """Trigger immediate FX rate sync. Stores the last closed PTAX
+    against its actual quote date (sync_rates handles the walk-back),
+    so this endpoint never plants today's intraday partial under
+    today's date."""
+    count = await sync_rates(session)
+    return {"synced": True, "rates_count": count}
 
 
 @router.get("/status")
