@@ -1,9 +1,22 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
+
+
+# Single source of truth for the asset taxonomy. Keep in sync with
+# frontend/src/types/index.ts:AssetClass — both lists must drift together
+# or the dropdown sends a value the API rejects.
+AssetClassLiteral = Literal[
+    "RENDA_VARIAVEL_BR",
+    "RENDA_FIXA",
+    "STOCKS_US",
+    "FIIS",
+    "CRIPTO",
+    "OUTRO",
+]
 
 
 class AssetCreate(BaseModel):
@@ -31,7 +44,7 @@ class AssetCreate(BaseModel):
     # Explicit class — one of RENDA_VARIAVEL_BR, RENDA_FIXA, STOCKS_US,
     # FIIS, CRIPTO, OUTRO. If omitted the backend tries to infer from
     # ticker/name; the frontend Add Asset form sends it explicitly.
-    asset_class: Optional[str] = None
+    asset_class: Optional[AssetClassLiteral] = None
     maturity_date: Optional[date] = None
     custodian: Optional[str] = None
 
@@ -58,7 +71,7 @@ class AssetUpdate(BaseModel):
     group_id: Optional[uuid.UUID] = None
     ticker: Optional[str] = None
     ticker_exchange: Optional[str] = None
-    asset_class: Optional[str] = None
+    asset_class: Optional[AssetClassLiteral] = None
     maturity_date: Optional[date] = None
     custodian: Optional[str] = None
 

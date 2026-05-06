@@ -169,6 +169,46 @@ const VALUATION_METHODS = ['manual', 'growth_rule', 'market_price'] as const
 const GROWTH_TYPES = ['percentage', 'absolute'] as const
 const GROWTH_FREQUENCIES = ['daily', 'weekly', 'monthly', 'yearly'] as const
 
+// Suggest the most useful valuation method given a category. Applied only
+// when the user is creating (method is locked on edit) and they haven't
+// touched the method yet — Stocks/FIIs/Cripto rarely make sense without
+// live quotes, while Renda Fixa and Outro typically need manual entries
+// since no public price feed covers them.
+function suggestedMethodForClass(assetClass: string): string {
+  switch (assetClass) {
+    case 'RENDA_VARIAVEL_BR':
+    case 'STOCKS_US':
+    case 'FIIS':
+    case 'CRIPTO':
+      return 'market_price'
+    case 'RENDA_FIXA':
+    case 'OUTRO':
+    default:
+      return 'manual'
+  }
+}
+
+// Auto-derive the display icon from the chosen category. Hides the Tipo
+// field from new users while keeping the per-asset icon consistent with
+// what users see on the cards. Icons live separately from grouping so the
+// existing taxonomy stays untouched.
+function iconTypeForClass(assetClass: string): string {
+  switch (assetClass) {
+    case 'STOCKS_US':
+    case 'RENDA_VARIAVEL_BR':
+      return 'stock'
+    case 'FIIS':
+      return 'real_estate'
+    case 'RENDA_FIXA':
+      return 'investment'
+    case 'CRIPTO':
+      return 'crypto'
+    case 'OUTRO':
+    default:
+      return 'other'
+  }
+}
+
 export default function AssetsV2Page() {
   const { t, i18n } = useTranslation()
   const locale = i18n.language === 'en' ? 'en-US' : i18n.language
@@ -226,6 +266,18 @@ export default function AssetsV2Page() {
   const [selectedQuote, setSelectedQuote] = useState<MarketSymbolQuote | null>(null)
   const [formUnits, setFormUnits] = useState('')
   const [quoteLoading, setQuoteLoading] = useState(false)
+  // Extra fields exposed by the form (Level 1 + 2 cleanup): both
+  // already exist in the DB but were previously edit-only via API.
+  const [formCustodian, setFormCustodian] = useState('')
+  const [formMaturityDate, setFormMaturityDate] = useState('')
+  // Tracks whether the user has manually overridden the auto-derived
+  // icon. While false, picking a category continues to keep the icon
+  // in sync; once the user edits the icon dropdown directly we leave
+  // it alone.
+  const [iconTouched, setIconTouched] = useState(false)
+  // Same idea for the valuation method — only auto-suggest while the
+  // user hasn't picked one explicitly.
+  const [methodTouched, setMethodTouched] = useState(false)
 
   const { data: assetsList, isLoading } = useQuery({
     queryKey: ['assets'],
@@ -452,7 +504,9 @@ export default function AssetsV2Page() {
     setFormTickerQuery('')
     setTickerMatches([])
     setSelectedQuote(null)
-    setFormUnits('')
+    // formUnits is no longer cleared here — it's now a shared field
+    // visible for all valuation methods, so openCreate/openEdit own its
+    // lifecycle directly.
     setQuoteLoading(false)
     setTickerSearchLoading(false)
   }
@@ -473,6 +527,11 @@ export default function AssetsV2Page() {
     setFormGrowthRate('')
     setFormGrowthFrequency('monthly')
     setFormGrowthStartDate('')
+    setFormCustodian('')
+    setFormMaturityDate('')
+    setFormUnits('')
+    setIconTouched(false)
+    setMethodTouched(false)
     resetMarketPriceForm()
     setDialogOpen(true)
   }
@@ -493,10 +552,16 @@ export default function AssetsV2Page() {
     setFormGrowthRate(asset.growth_rate?.toString() ?? '')
     setFormGrowthFrequency(asset.growth_frequency ?? 'monthly')
     setFormGrowthStartDate(asset.growth_start_date ?? '')
+    setFormCustodian(asset.custodian ?? '')
+    setFormMaturityDate(asset.maturity_date ?? '')
+    setFormUnits(asset.units?.toString() ?? '')  // expose for any method
+    // On edit treat the icon and method as already chosen so we don't
+    // surprise the user by mutating fields they came in to inspect.
+    setIconTouched(true)
+    setMethodTouched(true)
     resetMarketPriceForm()
     if (asset.valuation_method === 'market_price' && asset.ticker) {
       setFormTickerQuery(asset.ticker)
-      setFormUnits(asset.units?.toString() ?? '')
       // Synthesize a quote from the cached fields so the preview shows
       // immediately — we skip a round-trip to yfinance on edit open.
       if (asset.last_price != null) {
@@ -523,6 +588,12 @@ export default function AssetsV2Page() {
       purchase_price: formPurchasePrice ? parseFloat(formPurchasePrice) : null,
       sell_date: formSellDate || null,
       sell_price: formSellPrice ? parseFloat(formSellPrice) : null,
+      // Quantidade is now shared across all methods, not gated on
+      // market_price — manual / growth_rule assets need it for the
+      // per-asset rentability calc (units * purchase_price).
+      units: formUnits ? parseFloat(formUnits) : null,
+      custodian: formCustodian.trim() || null,
+      maturity_date: formMaturityDate || null,
     }
 
     if (formMethod === 'growth_rule') {
@@ -535,7 +606,6 @@ export default function AssetsV2Page() {
     if (formMethod === 'market_price') {
       payload.ticker = (selectedQuote?.symbol || formTickerQuery || '').toUpperCase()
       payload.ticker_exchange = selectedQuote?.exchange ?? null
-      payload.units = formUnits ? parseFloat(formUnits) : null
     }
 
     if (!editingAsset && formCurrentValue) {
@@ -1206,14 +1276,59 @@ export default function AssetsV2Page() {
               <Input value={formName} onChange={e => setFormName(e.target.value)} />
             </div>
 
-            {/* Type + Currency */}
+            {/* Categoria (asset_class) — required, drives section grouping
+                and now also auto-suggests the icon and the valuation method
+                so the user only has to pick this one to get a sensible
+                default. Sits at the top because it's the most consequential
+                decision in the form. */}
+            <div className="space-y-2">
+              <Label>
+                {t('assets.category')}
+                <span className="text-rose-500 ml-1">*</span>
+              </Label>
+              <select
+                className={`bg-card border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full ${
+                  formAssetClass ? 'border-border' : 'border-rose-300'
+                }`}
+                value={formAssetClass}
+                onChange={e => {
+                  const next = e.target.value
+                  setFormAssetClass(next)
+                  // Smart defaults for create flow only — on edit the
+                  // valuation_method is locked (see VALUATION_METHODS
+                  // buttons below), and the user is here to inspect/fix
+                  // existing data, not be auto-corrected.
+                  if (!editingAsset && next) {
+                    if (!iconTouched) setFormType(iconTypeForClass(next))
+                    if (!methodTouched) setFormMethod(suggestedMethodForClass(next))
+                  }
+                }}
+              >
+                <option value="">{t('assets.categorySelect')}</option>
+                {ASSET_CLASS_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-muted-foreground">
+                {t('assets.categoryHelp')}
+              </p>
+            </div>
+
+            {/* Ícone + Currency. "Tipo" was renamed to "Ícone" because it
+                only drives the card icon/badge, not the section grouping —
+                users were assuming this field defined the section and
+                getting surprised. Currency comes from the live quote when
+                a market_price ticker is picked, so it's read-only there. */}
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>{t('assets.type')}</Label>
+                <Label>{t('assets.icon')}</Label>
                 <select
                   className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
                   value={formType}
-                  onChange={e => setFormType(e.target.value)}
+                  onChange={e => {
+                    setFormType(e.target.value)
+                    setIconTouched(true)
+                  }}
                 >
                   {ASSET_TYPES.map(at => (
                     <option key={at} value={at}>
@@ -1221,6 +1336,9 @@ export default function AssetsV2Page() {
                     </option>
                   ))}
                 </select>
+                <p className="text-[11px] text-muted-foreground">
+                  {t('assets.iconHelp')}
+                </p>
               </div>
               <div className="space-y-2">
                 <Label>{t('assets.currency')}</Label>
@@ -1237,21 +1355,6 @@ export default function AssetsV2Page() {
               </div>
             </div>
 
-            {/* Asset class — explicit taxonomy used by Investments dashboard */}
-            <div className="space-y-2">
-              <Label>Classe do ativo</Label>
-              <select
-                className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
-                value={formAssetClass}
-                onChange={e => setFormAssetClass(e.target.value)}
-              >
-                <option value="">— selecionar —</option>
-                {ASSET_CLASS_OPTIONS.map(opt => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-            </div>
-
             {/* Valuation Method — locked on edit */}
             <div className="space-y-2">
               <Label>{t('assets.valuationMethod')}</Label>
@@ -1266,7 +1369,11 @@ export default function AssetsV2Page() {
                         ? 'border-primary bg-primary/10 text-primary shadow-sm'
                         : 'border-border text-muted-foreground hover:border-primary/50 hover:bg-muted/50'
                     } ${editingAsset ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    onClick={() => !editingAsset && setFormMethod(m)}
+                    onClick={() => {
+                      if (editingAsset) return
+                      setFormMethod(m)
+                      setMethodTouched(true)
+                    }}
                   >
                     {m === 'market_price'
                       ? t('assets.marketPrice')
@@ -1378,17 +1485,11 @@ export default function AssetsV2Page() {
                   </div>
                 )}
 
-                <div className="space-y-2">
-                  <Label>{t('assets.quantity')}</Label>
-                  <Input
-                    type="number"
-                    step="any"
-                    min="0"
-                    value={formUnits}
-                    onChange={e => setFormUnits(e.target.value)}
-                    placeholder="10"
-                  />
-                </div>
+                {/* Quantidade lives outside this block now (shared field
+                    for all valuation methods). It's still rendered below
+                    the ticker preview so users see the live value of
+                    "qty × price" inline — the preview block is what
+                    references `formUnits`. */}
 
                 {selectedQuote && formUnits && parseFloat(formUnits) > 0 && (
                   <div className="flex items-center justify-between p-3 rounded-lg border border-primary/30 bg-primary/10">
@@ -1482,6 +1583,46 @@ export default function AssetsV2Page() {
               </div>
             </div>
 
+            {/* Quantidade + Custodiante. Quantidade was previously gated
+                inside the market_price block — exposing it here means
+                manual / growth_rule assets (RF, real estate fractional
+                ownership, etc.) can also store a unit count, which the
+                per-asset rentability badge needs for "units * purchase". */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>{t('assets.quantity')}</Label>
+                <Input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={formUnits}
+                  onChange={e => setFormUnits(e.target.value)}
+                  placeholder={t('assets.quantityPlaceholder')}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t('assets.custodian')}</Label>
+                <Input
+                  value={formCustodian}
+                  onChange={e => setFormCustodian(e.target.value)}
+                  placeholder={t('assets.custodianPlaceholder')}
+                />
+              </div>
+            </div>
+
+            {/* Vencimento — only meaningful for Renda Fixa. Shows as a
+                badge on the asset card; without this field the user had
+                no way to set or edit it from the UI. */}
+            {formAssetClass === 'RENDA_FIXA' && (
+              <div className="space-y-2">
+                <Label>{t('assets.maturityDate')}</Label>
+                <DatePickerInput value={formMaturityDate} onChange={setFormMaturityDate} />
+                <p className="text-[11px] text-muted-foreground">
+                  {t('assets.maturityHelp')}
+                </p>
+              </div>
+            )}
+
             {/* Current Value — manual only */}
             {!editingAsset && formMethod === 'manual' && (
               <div className="space-y-2">
@@ -1525,6 +1666,7 @@ export default function AssetsV2Page() {
               onClick={handleSave}
               disabled={
                 !formName
+                || !formAssetClass  // categoria é obrigatória
                 || createMutation.isPending
                 || updateMutation.isPending
                 // Market-price guard: must have a resolved ticker + quantity.
