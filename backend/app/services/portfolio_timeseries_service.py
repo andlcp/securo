@@ -619,6 +619,20 @@ async def get_timeseries(session: AsyncSession, user: User,
         asset_state: dict[uuid.UUID, dict] = {}
         seed_d = start_d - timedelta(days=1)
         for a in assets:
+            # Sold-and-gone clamp: if the asset was sold before the
+            # window opens, seed at zero. Otherwise the carry-forward
+            # picks up the last AV before the sell (the position's
+            # gross value the day it was liquidated) and projects it
+            # into the window as phantom V_start. Tesouro Selic 2024
+            # sold in 2022 was reading R$ 56 k of imaginary patrimony
+            # at window start of 2025-05; combined with two other
+            # archived Selics, that put R$ 395 k of ghost capital
+            # into the Renda Fixa denominator and dragged the RF
+            # rentabilidade visibly below CDI.
+            if (a.is_archived and a.sell_date is not None
+                    and a.sell_date <= seed_d):
+                asset_state[a.id] = {"base": 0.0, "av_date": a.sell_date}
+                continue
             rows = av_by_asset.get(a.id, [])
             initial_v = 0.0
             initial_av_date = None
