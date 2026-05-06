@@ -64,6 +64,74 @@ _INCOME_TYPES = {"DIVIDEND", "JCP", "RENDIMENTO", "RESGATE", "INTEREST"}
 _BUY_TYPES = {"BUY", "DEPOSIT"}
 _SELL_TYPES = {"SELL", "WITHDRAWAL"}
 
+
+# Module-level CDI history cache. We fetch the monthly accumulated CDI
+# from BCB SGS once per process and use it to drive the implicit-cashflow
+# heuristic for CDI-tracking assets (Tesouro Selic, CDBs without explicit
+# transactions). Without this the heuristic uses a fixed 0.1 %/day
+# allowance which is well above CDI in low-rate years (Selic at 2 %
+# = 0.005 %/day) and well below in high-rate years (Selic at 13.75 %
+# = 0.04 %/day) — both miscalibrations leak organic CDI into cf_buy.
+_CDI_MONTHLY: dict[tuple[int, int], float] = {}
+_CDI_FETCHED = False
+
+
+async def _ensure_cdi_loaded() -> None:
+    global _CDI_FETCHED
+    if _CDI_FETCHED:
+        return
+    import urllib.request
+    try:
+        url = ("https://api.bcb.gov.br/dados/serie/bcdata.sgs.4391/dados"
+               "?formato=json&dataInicial=01/01/2018&dataFinal=01/12/2030")
+        with urllib.request.urlopen(url, timeout=15) as r:
+            raw = json.load(r)
+        for it in raw:
+            d = datetime.strptime(it["data"], "%d/%m/%Y").date()
+            _CDI_MONTHLY[(d.year, d.month)] = float(it["valor"]) / 100
+        _CDI_FETCHED = True
+    except Exception as exc:
+        logger.warning("CDI fetch failed: %s — heuristic falls back to 0.1%%/day", exc)
+        _CDI_FETCHED = True  # don't keep retrying
+
+
+def _cdi_factor_between(d_from: date, d_to: date) -> float:
+    """Cumulative CDI multiplier between two dates (inclusive on the to side).
+
+    Uses monthly accumulated CDI from BCB. Returns 1.0 if data is missing
+    so the caller can fall back gracefully.
+    """
+    if not _CDI_MONTHLY or d_from >= d_to:
+        return 1.0
+    factor = 1.0
+    y, m = d_from.year, d_from.month
+    # Skip d_from's month — we count months that have CLOSED between
+    # d_from and d_to. The month of d_from has already been partly lived
+    # before the user got here.
+    m += 1
+    if m > 12:
+        m = 1; y += 1
+    while (y, m) <= (d_to.year, d_to.month):
+        factor *= 1 + _CDI_MONTHLY.get((y, m), 0)
+        m += 1
+        if m > 12:
+            m = 1; y += 1
+    return factor
+
+
+def _is_cdi_tracker(asset: Asset) -> bool:
+    """Heuristic: assets whose AV growth between anchors should track
+    CDI gross. Tesouro Selic and CDBs are the textbook cases. Tesouro
+    IPCA+ and Tesouro Prefixado intentionally diverge (IPCA-linked or
+    fixed-rate exposure to mark-to-market), so they keep the looser
+    fallback allowance."""
+    name = (asset.name or "").upper()
+    if "SELIC" in name:
+        return True
+    if name.startswith("CDB"):
+        return True
+    return False
+
 # Module-level result cache for get_timeseries. The walk is deterministic
 # given (user, filters, window, granularity) and the underlying tables
 # rarely change within a few minutes for a personal-finance app, so a
@@ -296,6 +364,10 @@ async def get_timeseries(session: AsyncSession, user: User,
         take precedence over months/since_start. Daily granularity is forced
         for ranges shorter than 4 months.
     """
+    # Lazy-load CDI history once per process (used by the implicit
+    # cashflow heuristic for Tesouro Selic and CDBs without transactions).
+    await _ensure_cdi_loaded()
+
     # Cache lookup before any DB work. Same (user, filters, window) hit
     # within the TTL gets the previous walk's result instantly.
     cache_key = _ts_cache_key(
@@ -705,12 +777,17 @@ async def get_timeseries(session: AsyncSession, user: User,
                         # transactions (typically archived RF imported
                         # via push_to_securo where the offline pipeline
                         # populates monthly AVs but no BUY/SELL rows).
-                        # An RF position can't legitimately swing > 0.1 %
-                        # /day from market moves, so anything beyond that
-                        # is a hidden cashflow (deposit, withdrawal, or
-                        # close-out at archival). Convert the excess into
-                        # an implicit cashflow so Modified Dietz reads it
-                        # as neutral instead of as a huge return/loss.
+                        #
+                        # When the asset is a CDI tracker (Tesouro Selic,
+                        # CDB) we use the actual BCB CDI between the two
+                        # AV anchors as the "expected organic growth" —
+                        # any excess over CDI is a hidden cashflow. The
+                        # looser fallback (0.1 %/day allowance) is only
+                        # used when CDI data isn't available or for
+                        # non-CDI-tracker assets (Tesouro IPCA+,
+                        # Prefixado) whose AV moves driven by rate-cycle
+                        # mark-to-market shouldn't be re-attributed to
+                        # cashflow.
                         if not tx_by_asset.get(a.id):
                             base_before = state["base"]
                             elapsed_days = (
@@ -718,24 +795,31 @@ async def get_timeseries(session: AsyncSession, user: User,
                                 if last_av_date else 30
                             )
                             elapsed_days = max(elapsed_days, 1)
-                            # Allow at most 0.1 %/day of growth as legitimate
-                            # market move. Cap at 25 % of the base — for an
-                            # asset gone silent for 4 years (1460 days) the
-                            # raw 0.1 %/day allowance would be 146 % of the
-                            # base, which let the entire close-out drop
-                            # leak through as a loss instead of triggering
-                            # the implicit-cashflow path.
-                            allow_growth = abs(base_before) * 0.001 * elapsed_days
-                            allow_growth = min(allow_growth, abs(base_before) * 0.25)
-                            allow_growth = max(allow_growth, 50.0)
-                            diff = new_av_amount - base_before
-                            if abs(diff) > allow_growth:
-                                # Native amount; treat as user_ccy below
-                                # since RF assets are BRL == user_ccy.
-                                if diff > 0:
-                                    cf_buy += diff
-                                else:
-                                    cf_sell += -diff
+
+                            if _is_cdi_tracker(a) and _CDI_MONTHLY and last_av_date:
+                                cdi_growth = base_before * (
+                                    _cdi_factor_between(last_av_date, new_av_date) - 1
+                                )
+                                expected_v = base_before + cdi_growth
+                                # Allow ±2 % of base around CDI for noise
+                                # (Selic spread, custódia fees, etc.).
+                                tol = max(abs(base_before) * 0.02, 50.0)
+                                diff_excess = new_av_amount - expected_v
+                                if abs(diff_excess) > tol:
+                                    if diff_excess > 0:
+                                        cf_buy += diff_excess
+                                    else:
+                                        cf_sell += -diff_excess
+                            else:
+                                allow_growth = abs(base_before) * 0.001 * elapsed_days
+                                allow_growth = min(allow_growth, abs(base_before) * 0.25)
+                                allow_growth = max(allow_growth, 50.0)
+                                diff = new_av_amount - base_before
+                                if abs(diff) > allow_growth:
+                                    if diff > 0:
+                                        cf_buy += diff
+                                    else:
+                                        cf_sell += -diff
                         state["base"] = new_av_amount
                         state["av_date"] = new_av_date
                     base = state["base"]
