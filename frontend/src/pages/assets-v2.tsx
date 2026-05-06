@@ -671,10 +671,24 @@ export default function AssetsV2Page() {
     const baseFactor = 1 + (first.twr_cum ?? 0)
     const lastFactor = 1 + (last.twr_cum ?? 0)
     const twrPeriod = lastFactor / baseFactor - 1
+    // Money-on-money real gain: V_final − V_start − Σ(net cashflows in window).
+    // Previous formula was just V_end − V_start, which in "Tudo" mode (V_start ≈ 0)
+    // returned ≈ V_end and made it look like the user's entire patrimônio was lucro.
+    // The cashflow field on each timeseries row is signed (+ for deposits/buys,
+    // − for withdrawals/sells), so Σcf over the window = net invested capital.
+    // Subtracting it leaves the true gain (V_end − total_invested).
+    const vStart = first.v_end ?? 0
+    const vEnd = last.v_end ?? 0
+    const investedNet = kpiSeries.reduce(
+      (sum: number, r: any) => sum + (r.cashflow ?? 0),
+      0,
+    )
+    const delta = vEnd - vStart - investedNet
     return {
-      v_end: last.v_end ?? 0,
-      v_start: first.v_end ?? 0,
-      delta: (last.v_end ?? 0) - (first.v_end ?? 0),
+      v_end: vEnd,
+      v_start: vStart,
+      invested_net: investedNet,
+      delta,
       twr_period: twrPeriod,
       first_month: first.month,
       last_month: last.month,
@@ -1069,9 +1083,12 @@ export default function AssetsV2Page() {
             <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
               Resultado ({kpiPeriod.label})
             </p>
-            <p className={`text-xl font-bold tabular-nums ${
-              kpiResult.delta >= 0 ? 'text-emerald-600' : 'text-rose-500'
-            }`}>
+            <p
+              className={`text-xl font-bold tabular-nums ${
+                kpiResult.delta >= 0 ? 'text-emerald-600' : 'text-rose-500'
+              }`}
+              title={`Lucro = patrimônio − aportes líquidos no período (${formatCurrency(kpiResult.invested_net, userCurrency, locale)} investidos). % ao lado é o TWR (Time-Weighted Return).`}
+            >
               {mask(`${kpiResult.delta >= 0 ? '+' : ''}${formatCurrency(kpiResult.delta, userCurrency, locale)}`)}
               <span className="text-sm font-medium ml-2">
                 ({kpiResult.twr_period >= 0 ? '+' : ''}{(kpiResult.twr_period * 100).toFixed(2)}%)
