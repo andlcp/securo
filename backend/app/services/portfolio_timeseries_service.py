@@ -428,9 +428,20 @@ async def get_timeseries(session: AsyncSession, user: User,
         return last
 
     # Convert to user_ccy on the transaction date. For market-priced BUY/
-    # SELL we substitute (qty × close) for tx.value so the cashflow is
-    # on the same basis as the daily V_end. Income (dividends/JCP) and
-    # non-market assets keep tx.value as-is.
+    # SELL with a real cash value we substitute (qty × close) for
+    # tx.value so the cashflow is on the same basis as the daily V_end
+    # (kills the bid-ask-spread blip on tx days).
+    #
+    # IMPORTANT — never override tx.value when tx.value is 0. That's
+    # the signature of a reconciliation row written to make
+    # asset.units = sum(BUY) - sum(SELL) again after a corporate
+    # action we couldn't capture as a real trade (AERI3 grouping,
+    # BLAU3 bonus, etc.). Those rows must stay at zero cashflow —
+    # otherwise Modified Dietz reads `qty × close` as money flowing
+    # in/out of the portfolio with no V change to absorb it, and
+    # that registers as a +50 % daily return cap (AERI3 SELL 9697.6
+    # × R$ 9.95 = R$ 96 k phantom sell on 2024-05-14, which inflated
+    # the Renda Variável Brasil cumulative line by ~60 pp).
     for tx in txs:
         if tx.value is None:
             continue
@@ -438,15 +449,17 @@ async def get_timeseries(session: AsyncSession, user: User,
         if a is None:
             continue
         rate = await fx(a.currency, user_ccy, tx.date)
+        tx_value_native = float(tx.value)
         cf_amount: Optional[float] = None
         if (a.valuation_method == "market_price"
                 and tx.qty is not None
+                and tx_value_native > 0
                 and tx.type in (_BUY_TYPES | _SELL_TYPES)):
             close = _close_at(a.id, tx.date)
             if close is not None:
                 cf_amount = float(tx.qty) * close * rate
         if cf_amount is None:
-            cf_amount = float(tx.value) * rate
+            cf_amount = tx_value_native * rate
         key = tx.date.isoformat() if granularity == "daily" else tx.date.strftime("%Y-%m")
         bucket = cf_idx[(a.id, key)]
         if tx.type in _BUY_TYPES:
@@ -454,7 +467,7 @@ async def get_timeseries(session: AsyncSession, user: User,
         elif tx.type in _SELL_TYPES:
             bucket["sell"] += cf_amount
         elif tx.type in _INCOME_TYPES:
-            bucket["income"] += float(tx.value) * rate
+            bucket["income"] += tx_value_native * rate
 
     # Compute V_end per month per asset, summed across assets.
     # Optimization: pull AssetValues in one query, sort by asset+date,
