@@ -36,18 +36,25 @@ async def sync_rates(
     Idempotent — existing rates for the same date are updated.
     """
     from datetime import timedelta as _td
-    if target_date is not None:
+    today_local = date.today()
+
+    # Anchor: never store a row for today or any future date. Today's
+    # PTAX hasn't closed yet during business hours and the BCB Olinda
+    # endpoint may return an Abertura/Intermediário boletim that
+    # shifts through the morning. On-demand callers (dashboard,
+    # asset_service, etc.) hit get_rate() with target=today on every
+    # page load — without this clamp each one inserts a row dated
+    # today with whatever intraday partial BCB had at that millisecond.
+    if target_date is not None and target_date < today_local:
         target = target_date
         rates = await _provider.fetch_historical(target)
     else:
-        # "Last closed PTAX" anchor: walk back from yesterday until
-        # we find a business day with a published quote. We attribute
-        # the rate to its actual quote date — not today — so the
-        # badge shows the correct date label.
+        # target_date is None OR target_date >= today: walk back from
+        # yesterday and store the rate against its actual quote date.
         target = None
         rates: dict[str, Decimal] = {}
         for delta in range(1, 8):
-            d = date.today() - _td(days=delta)
+            d = today_local - _td(days=delta)
             r = await _provider.fetch_historical(d)
             if r:
                 target = d
