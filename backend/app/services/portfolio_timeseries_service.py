@@ -381,32 +381,42 @@ async def get_timeseries(session: AsyncSession, user: User,
     )
     txs = list((await session.execute(stmt_tx)).scalars().all())
 
-    # Pre-fetch yfinance close history for every market-priced asset so
-    # we can value cashflows AT CLOSE on tx days instead of at the
-    # broker's execution price. Why: Modified Dietz reads the spread
-    # between user.tx_price and yfinance.close as a one-day return — a
-    # 7 % intraday gap on ASAI3's R$ 7.83 buy when close was R$ 7.31
-    # turned into a phantom -8 % TWR for the asset and pulled the whole
-    # carteira down. Valuing the cashflow as `qty × close` cancels the
-    # spread out of the daily formula (V_end and CF move together at
-    # close), so TWR captures only the price drift on the existing
-    # position. The actual cash you paid is still preserved in
-    # tx.value for per-asset money-on-money in the UI.
+    # Pre-fetch yfinance close history for every market-priced asset
+    # so we can both value cashflows at close on tx days (instead of at
+    # the broker's execution price) AND drive V_end in the daily walk.
+    # One fetch shared by both paths — the previous version called
+    # fetch_yahoo_close_history twice for the same data and made the
+    # Investments page noticeably slow on a portfolio with ~50 tickers.
     market_assets_for_tx = [a for a in assets
                             if a.valuation_method == "market_price" and a.ticker]
-    fetch_start = min((tx.date for tx in txs), default=date.today())
-    fetch_end = date.today()
+    # We need close prices that cover both the chart window AND every
+    # tx date (so the BUY/SELL on a date OUTSIDE the window can still
+    # be valued at close for cf_idx lookups inside the window when the
+    # daily walk asks for it). The bounds below catch both.
+    today_for_fetch = date.today()
+    if granularity == "daily":
+        if custom_range and date_from is not None:
+            _start_d = date_from
+        elif since_start:
+            _start_d = date(start_y, start_m, 1)
+        else:
+            _start_d = today_for_fetch - timedelta(days=int(months or 1) * 30)
+    else:
+        _start_d = date(start_y, start_m, 1)
+    _window_end = date_to if (custom_range and date_to is not None) else today_for_fetch
+    tx_min = min((tx.date for tx in txs), default=_start_d)
+    fetch_start = min(_start_d - timedelta(days=10), tx_min)
     history_results = await asyncio.gather(*[
-        fetch_yahoo_close_history(a.ticker, fetch_start - timedelta(days=10), fetch_end)
+        fetch_yahoo_close_history(a.ticker, fetch_start, _window_end)
         for a in market_assets_for_tx
     ]) if market_assets_for_tx else []
-    cf_price_history: dict[uuid.UUID, list[tuple[str, float]]] = {}
+    price_history: dict[uuid.UUID, list[tuple[str, float]]] = {}
     for a, hist in zip(market_assets_for_tx, history_results):
         if hist:
-            cf_price_history[a.id] = sorted(hist.items())
+            price_history[a.id] = sorted(hist.items())
 
     def _close_at(asset_id: uuid.UUID, on: date) -> Optional[float]:
-        hist = cf_price_history.get(asset_id)
+        hist = price_history.get(asset_id)
         if not hist:
             return None
         target = on.isoformat()
@@ -508,23 +518,8 @@ async def get_timeseries(session: AsyncSession, user: User,
         else:
             start_d = today_d - timedelta(days=int(months or 1) * 30)
 
-        # Pre-fetch daily Yahoo Finance close history for every market-priced
-        # asset. Without this the daily V_end is flat between AssetValue
-        # snapshots, which causes spurious negative returns on transaction
-        # days (the cashflow registers but V_end doesn't reflect new units).
-        # Fetch a few days before start_d so the seed-day lookup has data.
-        market_assets = [a for a in assets
-                         if a.valuation_method == "market_price" and a.ticker]
-        history_results = await asyncio.gather(*[
-            fetch_yahoo_close_history(a.ticker, start_d - timedelta(days=10), window_end)
-            for a in market_assets
-        ]) if market_assets else []
-        # Convert each {iso_date: close} dict into a sorted list of
-        # (iso_date, price) tuples for cheap "as-of" lookup.
-        price_history: dict[uuid.UUID, list[tuple[str, float]]] = {}
-        for a, hist in zip(market_assets, history_results):
-            if hist:
-                price_history[a.id] = sorted(hist.items())
+        # price_history was already populated upstream (shared with cf
+        # indexing). Reuse it here.
 
         # Sort all transactions per asset once, ascending by date — used by
         # units_at(asset, d) to compute the share count owned at end of day d.
