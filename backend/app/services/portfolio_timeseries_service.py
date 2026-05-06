@@ -550,6 +550,19 @@ async def get_timeseries(session: AsyncSession, user: User,
     avs = list((await session.execute(stmt_av)).scalars().all())
     av_by_asset: dict[uuid.UUID, list[AssetValue]] = defaultdict(list)
     for av in avs:
+        a = asset_by_id.get(av.asset_id)
+        # Drop post-sell zero-value markers. push_to_securo writes a
+        # `AV = 0 at last-of-month` row whenever an asset is liquidated
+        # to flag "this position no longer exists". The walk picks up
+        # those rows as legitimate AV anchors and treats the drop from
+        # the last real value to zero as a giant cashflow event many
+        # months after the actual sale — combined with the new
+        # CDI-aware heuristic, that injects a phantom +44 % daily
+        # return on the ghost-AV day. The actual SELL at the asset's
+        # sell_date is handled below by an explicit cashflow injection.
+        if (a is not None and a.is_archived and a.sell_date is not None
+                and av.date > a.sell_date and float(av.amount) == 0):
+            continue
         av_by_asset[av.asset_id].append(av)
 
     today_d = date.today()
@@ -822,6 +835,20 @@ async def get_timeseries(session: AsyncSession, user: User,
                                         cf_sell += -diff
                         state["base"] = new_av_amount
                         state["av_date"] = new_av_date
+
+                    # Explicit liquidation event on sell_date for archived
+                    # assets without transactions. The AVs we keep go up
+                    # to the sell month; the post-sell zero markers were
+                    # filtered out above. Without this injection the
+                    # asset's value would just keep carrying forward at
+                    # the last AV indefinitely (Tesouro Selic 2025 sold
+                    # in Feb 2025 was reading R$ 127 k of patrimony all
+                    # the way through May 2026).
+                    if (a.is_archived and a.sell_date is not None
+                            and d == a.sell_date and not tx_by_asset.get(a.id)
+                            and state["base"] > 0):
+                        cf_sell += state["base"]
+                        state["base"] = 0.0
                     base = state["base"]
                     rate = await fx(a.currency, user_ccy, d)
                     v_user = base * rate
