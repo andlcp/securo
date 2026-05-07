@@ -245,6 +245,11 @@ export default function AssetsV2Page() {
   // `${walletId}::${subgroupName}` so the same subgroup name in
   // different wallets can collapse independently.
   const [collapsedSubgroups, setCollapsedSubgroups] = useState<Set<string>>(new Set())
+  // Sold assets section. Defaulted to collapsed because most users have
+  // dozens of historical sales they don't want crowding the page on every
+  // visit — the rentability lives in the past, the active portfolio is
+  // what they're looking at today.
+  const [soldCollapsed, setSoldCollapsed] = useState(true)
   // Asset being moved to a wallet (null = no picker open)
   const [movingAsset, setMovingAsset] = useState<Asset | null>(null)
 
@@ -1264,15 +1269,31 @@ export default function AssetsV2Page() {
             </div>
           )}
 
-          {/* Sold Assets */}
+          {/* Sold Assets — collapsible, collapsed by default. */}
           {soldAssets.length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
-                {t('assets.soldAssets')}
-              </h3>
-              <div className="space-y-2">
-                {soldAssets.map(renderAssetCard)}
-              </div>
+              <button
+                type="button"
+                onClick={() => setSoldCollapsed(prev => !prev)}
+                className="flex items-center gap-2 px-1 hover:opacity-80 transition-opacity"
+              >
+                {soldCollapsed ? (
+                  <ChevronRight size={12} className="text-muted-foreground" />
+                ) : (
+                  <ChevronDown size={12} className="text-muted-foreground" />
+                )}
+                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                  {t('assets.soldAssets')}
+                  <span className="text-[10px] text-muted-foreground/70 ml-2 normal-case">
+                    ({soldAssets.length})
+                  </span>
+                </h3>
+              </button>
+              {!soldCollapsed && (
+                <div className="space-y-2">
+                  {soldAssets.map(renderAssetCard)}
+                </div>
+              )}
             </div>
           )}
 
