@@ -76,6 +76,26 @@ function fmtCurrency(v: number, locale: string, currency = 'BRL') {
 }
 
 /**
+ * Compact BRL formatter for the dense R$ grid. Values shown without the
+ * "R$" prefix (the column header carries that context already) and
+ * abbreviated to "k" when ≥ 1000 so 12 monthly cells per row fit on a
+ * laptop without horizontal scroll. Negatives keep their minus sign.
+ */
+function fmtCurrencyCompact(v: number, locale: string) {
+  const abs = Math.abs(v)
+  const sign = v < 0 ? '-' : ''
+  const fmt = (n: number, frac: number) =>
+    new Intl.NumberFormat(locale, {
+      minimumFractionDigits: frac,
+      maximumFractionDigits: frac,
+    }).format(n)
+  if (abs >= 1_000_000) return `${sign}${fmt(abs / 1_000_000, 2)} mi`
+  if (abs >= 10_000)    return `${sign}${fmt(abs / 1_000, 1)} k`
+  if (abs >= 1_000)     return `${sign}${fmt(abs / 1_000, 2)} k`
+  return `${sign}${fmt(abs, 0)}`
+}
+
+/**
  * Aggregate daily portfolio + CDI series into per-month statistics.
  *
  * For each calendar month present in the daily data, we keep the LAST day
@@ -107,16 +127,24 @@ function computeMonthlyStats(
   let prevTwrCum = 0
   let prevVEnd = 0
 
-  // Index CDI by date for as-of lookups (cumulative %, monthly increments
-  // come from chaining the cumulative values at month boundaries).
+  // Index CDI by date for as-of lookups. The benchmark API returns dates
+  // in DD/MM/YYYY (BR-style), but the portfolio month_end is YYYY-MM-DD
+  // (ISO). Normalize both to ISO before comparing — string comparison on
+  // the BR format silently mis-orders ("01/07/2019" < "2019-06-01"
+  // because '0' < '2' in ASCII), which used to fix prevCdi == cdiNow on
+  // every month and zero out the entire CDI column.
+  const toIso = (d: string): string => {
+    if (d.length === 10 && d[4] === '-') return d  // already ISO
+    const [dd, mm, yy] = d.split('/')
+    return `${yy}-${mm}-${dd}`
+  }
   const cdiByDate = new Map<string, number>()
-  for (const p of cdi) cdiByDate.set(p.date, p.value)
-  const cdiDatesSorted = cdi.map(p => p.date).sort()
+  for (const p of cdi) cdiByDate.set(toIso(p.date), p.value)
+  const cdiDatesSorted = Array.from(cdiByDate.keys()).sort()
   const cdiAsOf = (target: string): number | null => {
-    // Last entry with date <= target. CDI series is daily/business days,
-    // and the target is always our portfolio's last-day-of-month — a
-    // weekend or holiday in 30-40% of cases. Walking back picks up the
-    // nearest preceding business day.
+    // Last entry with ISO date <= target. CDI series is daily/business
+    // days; portfolio month_end may be a weekend/holiday — walking back
+    // picks the nearest preceding business day.
     let last: number | null = null
     for (const d of cdiDatesSorted) {
       if (d > target) break
@@ -283,20 +311,23 @@ export function ResultadoTable({
 
   const periodColLabel = periodLabel ?? 'Período'
 
-  // Cell renderer used by both views to keep formatting consistent.
-  const renderCell = (v: number | null | undefined, mode: 'pct' | 'brl', kind: 'cdi' | 'pf') => {
+  // Cell renderer. `compact: true` switches BRL formatting to "k/mi"
+  // suffixes — used in the dense monthly grid. The summary row at the
+  // top stays full-precision because each cell has more horizontal
+  // breathing room.
+  const renderCell = (
+    v: number | null | undefined,
+    mode: 'pct' | 'brl',
+    kind: 'cdi' | 'pf',
+    compact = false,
+  ) => {
     if (v == null || isNaN(v)) return <span className="text-muted-foreground/50">—</span>
     if (mode === 'pct') {
-      return (
-        <span className={cellColor(v)}>{fmtPct(v)}</span>
-      )
+      return <span className={cellColor(v)}>{fmtPct(v)}</span>
     }
-    // BRL view — CDI row never shows here (filtered by caller); only portfolio.
-    return (
-      <span className={cellColor(v)}>
-        {kind === 'pf' ? mask(fmtCurrency(v, locale)) : '—'}
-      </span>
-    )
+    if (kind !== 'pf') return <span className="text-muted-foreground/50">—</span>
+    const formatted = compact ? fmtCurrencyCompact(v, locale) : fmtCurrency(v, locale)
+    return <span className={cellColor(v)}>{mask(formatted)}</span>
   }
 
   return (
@@ -352,7 +383,7 @@ export function ResultadoTable({
               <td className="text-right tabular-nums px-3 py-2.5">
                 {view === 'pct'
                   ? renderCell(aggregates.periodo.twr, 'pct', 'pf')
-                  : renderCell(aggregates.periodo.gain, 'brl', 'pf')}
+                  : renderCell(aggregates.periodo.gain, 'brl', 'pf', false)}
               </td>
               <td className="text-right tabular-nums px-3 py-2.5">
                 {view === 'pct'
@@ -408,12 +439,15 @@ export function ResultadoTable({
         </table>
       </div>
 
-      {/* Monthly grid */}
+      {/* Monthly grid. The R$ view uses a smaller font + compact BRL
+          formatting (10,3 k instead of R$ 10.316,65) so all 12 month
+          columns + Total fit without horizontal scroll. The % view
+          keeps the regular size since "+1.50 %" is short. */}
       <div className="overflow-x-auto border-t border-border">
-        <table className="w-full text-xs">
+        <table className={`w-full ${view === 'brl' ? 'text-[11px]' : 'text-xs'}`}>
           <thead>
             <tr className="text-[11px] text-muted-foreground bg-muted/20">
-              <th className="text-left font-medium px-5 py-2.5 w-16">&nbsp;</th>
+              <th className="text-left font-medium px-5 py-2.5 w-14">&nbsp;</th>
               {MONTH_NAMES.map(m => (
                 <th key={m} className="text-right font-medium px-2 py-2.5">{m}</th>
               ))}
@@ -427,6 +461,7 @@ export function ResultadoTable({
               const yearTotalTwr = chainTwr(list, s => s.twr_pct)
               const yearTotalCdi = chainTwr(list, s => s.cdi_pct)
               const yearTotalGain = sumGain(list)
+              const cellPad = view === 'brl' ? 'px-1.5 py-2' : 'px-2 py-2.5'
 
               return (
                 <>
@@ -436,17 +471,17 @@ export function ResultadoTable({
                     {Array.from({ length: 12 }, (_, i) => i + 1).map(mm => {
                       const s = monthMap.get(mm)
                       return (
-                        <td key={mm} className="text-right tabular-nums px-2 py-2.5">
+                        <td key={mm} className={`text-right tabular-nums ${cellPad}`}>
                           {view === 'pct'
                             ? renderCell(s?.twr_pct, 'pct', 'pf')
-                            : renderCell(s?.gain, 'brl', 'pf')}
+                            : renderCell(s?.gain, 'brl', 'pf', true)}
                         </td>
                       )
                     })}
-                    <td className="text-right tabular-nums font-bold px-3 py-2.5">
+                    <td className={`text-right tabular-nums font-bold ${view === 'brl' ? 'px-2 py-2' : 'px-3 py-2.5'}`}>
                       {view === 'pct'
                         ? renderCell(yearTotalTwr, 'pct', 'pf')
-                        : renderCell(yearTotalGain, 'brl', 'pf')}
+                        : renderCell(yearTotalGain, 'brl', 'pf', true)}
                     </td>
                   </tr>
                   {/* CDI row — only in % view */}
@@ -456,7 +491,7 @@ export function ResultadoTable({
                       {Array.from({ length: 12 }, (_, i) => i + 1).map(mm => {
                         const s = monthMap.get(mm)
                         return (
-                          <td key={mm} className="text-right tabular-nums px-2 py-2.5">
+                          <td key={mm} className={`text-right tabular-nums ${cellPad}`}>
                             {renderCell(s?.cdi_pct, 'pct', 'cdi')}
                           </td>
                         )
