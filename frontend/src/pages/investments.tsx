@@ -20,6 +20,7 @@ import { ASSET_CLASS_OPTIONS, type AssetClass, ASSET_CLASS_LABELS } from '@/type
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/page-header'
 import { FxBadge } from '@/components/fx-badge'
+import { ResultadoTable } from '@/components/resultado-table'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
 import { useAuth } from '@/contexts/auth-context'
 import type { AssetGroup } from '@/types'
@@ -389,6 +390,32 @@ export default function InvestmentsPage() {
       dateTo: customRange?.to,
     }),
     staleTime: 1000 * 60,
+  })
+
+  // Lifetime daily series for the Resultado table (independent of the
+  // chart's window). The table needs every month back to the first
+  // transaction so it can render the year-by-year monthly grid; we don't
+  // want it to flip around when the user clicks 30d / 6M presets above.
+  // Same filters (assetClasses + groupIds) so a Camila-only filter at
+  // the top makes the Resultado table reflect Camila too.
+  const { data: lifetimeDaily } = useQuery<PortfolioPoint[]>({
+    queryKey: ['portfolio-timeseries-lifetime', classesParam, groupsParam],
+    queryFn: () => portfolioTimeseries.series({
+      sinceStart: true,
+      assetClasses: classesParam,
+      groupIds: groupsParam,
+      granularity: 'daily',
+    }),
+    staleTime: 1000 * 60 * 5,  // ~5 min — full history rarely changes
+  })
+
+  // Lifetime CDI series for the Resultado table's benchmark row. Same
+  // pattern as the chart's benchmark fetch but always since-start so the
+  // monthly grid can show a CDI line for every year the user has data.
+  const { data: lifetimeBench } = useQuery<BenchmarkData>({
+    queryKey: ['inv-benchmarks-lifetime'],
+    queryFn: () => investmentBenchmarks.series(12, true),
+    staleTime: 1000 * 60 * 30,
   })
 
   // Once the current window has loaded, kick off background prefetches
@@ -970,6 +997,34 @@ export default function InvestmentsPage() {
             <p className="text-muted-foreground text-sm text-center py-16">{t('investments.noData')}</p>
           )}
         </div>
+      </div>
+
+      {/* Resultado financeiro e rentabilidade — Gorila-style monthly table.
+          Always shows lifetime data (independent of the chart's window) so
+          the monthly grid back-fills every year the user has on record.
+          The "Período" column reacts to the user's filter at the top. */}
+      <div className="mb-5">
+        <ResultadoTable
+          lifetimeDaily={lifetimeDaily}
+          cdiSeries={lifetimeBench?.cdi}
+          locale={locale}
+          mask={mask}
+          periodLabel={
+            customRange
+              ? `${formatRangeLabel(customRange.from)} → ${formatRangeLabel(customRange.to)}`
+              : sinceStart
+                ? 'Desde início'
+                : `${months}M`
+          }
+          periodFrom={
+            customRange?.from
+              ?? (sinceStart ? lifetimeDaily?.[0]?.month_end : undefined)
+          }
+          periodTo={
+            customRange?.to
+              ?? lifetimeDaily?.[lifetimeDaily.length - 1]?.month_end
+          }
+        />
       </div>
 
       {/* Portfolio returns + asset class breakdown */}
