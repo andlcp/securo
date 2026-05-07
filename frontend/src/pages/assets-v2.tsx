@@ -902,22 +902,11 @@ export default function AssetsV2Page() {
                     ≈ {mask(formatCurrency(asset.current_value_primary, userCurrency, locale))}
                   </p>
                 )}
-                {asset.gain_loss != null && (() => {
-                  const invested = (asset.purchase_price ?? 0) * (asset.units ?? 0)
-                  const pct = invested > 0 ? (asset.gain_loss / invested) * 100 : null
-                  return (
-                    <>
-                      <p className={`text-xs font-medium tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                        {mask(`${asset.gain_loss >= 0 ? '+' : ''}${formatCurrency(asset.gain_loss, asset.currency, locale)}`)}
-                      </p>
-                      {pct != null && (
-                        <p className={`text-[10px] tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                          ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}% P&L)
-                        </p>
-                      )}
-                    </>
-                  )
-                })()}
+                {asset.gain_loss != null && (
+                  <p className={`text-xs font-medium tabular-nums ${asset.gain_loss >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                    {mask(`${asset.gain_loss >= 0 ? '+' : ''}${formatCurrency(asset.gain_loss, asset.currency, locale)}`)}
+                  </p>
+                )}
                 {totalPortfolioValue > 0 && (asset.current_value_primary ?? asset.current_value ?? 0) > 0 && (() => {
                   const v = asset.current_value_primary ?? asset.current_value ?? 0
                   const pct = (v / totalPortfolioValue) * 100
