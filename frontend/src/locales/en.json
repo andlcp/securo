@@ -674,6 +674,8 @@
     "maturityDate": "Maturity Date",
     "maturityHelp": "When the bond matures. Shown as a card badge and used for cashflow planning.",
     "quantityPlaceholder": "10",
+    "wallet": "Wallet",
+    "currentValueAutoHint": "Computed from Purchase Price × Quantity. Edit it to use the live market value instead.",
     "currency": "Currency",
     "typeRealEstate": "Real Estate",
     "typeVehicle": "Vehicle",

@@ -674,6 +674,8 @@
     "maturityDate": "Vencimento",
     "maturityHelp": "Data de vencimento do título. Aparece como badge no card e ajuda no controle de fluxo de caixa.",
     "quantityPlaceholder": "10",
+    "wallet": "Carteira",
+    "currentValueAutoHint": "Calculado a partir de Preço de Compra × Quantidade. Edite se quiser usar a cotação atual.",
     "currency": "Moeda",
     "typeRealEstate": "Imóvel",
     "typeVehicle": "Veículo",

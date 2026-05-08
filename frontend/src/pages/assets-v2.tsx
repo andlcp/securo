@@ -279,6 +279,10 @@ export default function AssetsV2Page() {
   // already exist in the DB but were previously edit-only via API.
   const [formCustodian, setFormCustodian] = useState('')
   const [formMaturityDate, setFormMaturityDate] = useState('')
+  // Wallet (AssetGroup) selector. Without this in the form, manually
+  // created assets land in "Sem carteira" because group_id stays null —
+  // and the user has to use the separate "Mover" dialog to fix it.
+  const [formGroupId, setFormGroupId] = useState<string>('')
   // Tracks whether the user has manually overridden the auto-derived
   // icon. While false, picking a category continues to keep the icon
   // in sync; once the user edits the icon dropdown directly we leave
@@ -287,6 +291,13 @@ export default function AssetsV2Page() {
   // Same idea for the valuation method — only auto-suggest while the
   // user hasn't picked one explicitly.
   const [methodTouched, setMethodTouched] = useState(false)
+  // And for "Valor Atual": while the user hasn't touched it on a manual
+  // create, we auto-fill it with purchase_price × units. Without this
+  // the user typically saves with current_value blank and the backend
+  // never seeds an AssetValue row — the asset then shows a fallback
+  // "current_value = purchase_price" on the card but contributes 0 to
+  // the timeseries / Investments dashboard / CRIPTO filter.
+  const [currentValueTouched, setCurrentValueTouched] = useState(false)
 
   const { data: assetsList, isLoading } = useQuery({
     queryKey: ['assets'],
@@ -450,6 +461,22 @@ export default function AssetsV2Page() {
     return Math.round(current * 100) / 100
   }, [formMethod, formPurchasePrice, formGrowthRate, formGrowthType, formGrowthFrequency, formGrowthStartDate, formPurchaseDate])
 
+  // Auto-fill "Valor Atual" with purchase_price × units on manual create
+  // unless the user has typed in the field. This is what guarantees the
+  // backend seeds an initial AssetValue — without it the asset shows up
+  // on the per-card list (via purchase_price fallback) but stays at 0
+  // in the Investments dashboard timeseries/filters.
+  useEffect(() => {
+    if (editingAsset) return
+    if (formMethod !== 'manual') return
+    if (currentValueTouched) return
+    const pp = parseFloat(formPurchasePrice)
+    const u = parseFloat(formUnits)
+    if (!pp || !u) return
+    const total = +(pp * u).toFixed(2)
+    setFormCurrentValue(total.toString())
+  }, [formMethod, formPurchasePrice, formUnits, currentValueTouched, editingAsset])
+
   const activeAssets = assetsList?.filter(a => !a.sell_date && !a.is_archived) ?? []
   const soldAssets = assetsList?.filter(a => a.sell_date) ?? []
 
@@ -539,8 +566,10 @@ export default function AssetsV2Page() {
     setFormCustodian('')
     setFormMaturityDate('')
     setFormUnits('')
+    setFormGroupId('')
     setIconTouched(false)
     setMethodTouched(false)
+    setCurrentValueTouched(false)
     resetMarketPriceForm()
     setDialogOpen(true)
   }
@@ -564,6 +593,10 @@ export default function AssetsV2Page() {
     setFormCustodian(asset.custodian ?? '')
     setFormMaturityDate(asset.maturity_date ?? '')
     setFormUnits(asset.units?.toString() ?? '')  // expose for any method
+    setFormGroupId(asset.group_id ?? '')
+    // On edit don't auto-derive Valor Atual — the user is here to inspect
+    // existing data, not get the field rewritten under them.
+    setCurrentValueTouched(true)
     // On edit treat the icon and method as already chosen so we don't
     // surprise the user by mutating fields they came in to inspect.
     setIconTouched(true)
@@ -603,6 +636,10 @@ export default function AssetsV2Page() {
       units: formUnits ? parseFloat(formUnits) : null,
       custodian: formCustodian.trim() || null,
       maturity_date: formMaturityDate || null,
+      // Wallet (AssetGroup). Empty string means "no wallet" — translate to
+      // null so the backend stores it as ungrouped instead of hitting a
+      // UUID parse error on "".
+      group_id: formGroupId || null,
     }
 
     if (formMethod === 'growth_rule') {
@@ -1319,6 +1356,27 @@ export default function AssetsV2Page() {
               <Input value={formName} onChange={e => setFormName(e.target.value)} />
             </div>
 
+            {/* Carteira (AssetGroup). Optional — empty value falls into the
+                "Sem carteira" bucket on Patrimônio V2. Without exposing
+                this, manually-created assets always landed there and the
+                user had to use the separate "Mover" dialog to fix it. */}
+            <div className="space-y-2">
+              <Label>{t('assets.wallet')}</Label>
+              <select
+                className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
+                value={formGroupId}
+                onChange={e => setFormGroupId(e.target.value)}
+              >
+                <option value="">{t('assets.noWallet')}</option>
+                {(walletsList ?? [])
+                  .slice()
+                  .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
+                  .map(w => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+              </select>
+            </div>
+
             {/* Categoria (asset_class) — required, drives section grouping
                 and now also auto-suggests the icon and the valuation method
                 so the user only has to pick this one to get a sensible
@@ -1676,7 +1734,10 @@ export default function AssetsV2Page() {
               </div>
             )}
 
-            {/* Current Value — manual only */}
+            {/* Current Value — manual only. Auto-fills with purchase_price ×
+                units while untouched (see useEffect above). The hint below
+                tells the user what's happening so the value doesn't look
+                like it appeared by magic. */}
             {!editingAsset && formMethod === 'manual' && (
               <div className="space-y-2">
                 <Label>{t('assets.currentValue')}</Label>
@@ -1684,8 +1745,16 @@ export default function AssetsV2Page() {
                   type="number"
                   step="any"
                   value={formCurrentValue}
-                  onChange={e => setFormCurrentValue(e.target.value)}
+                  onChange={e => {
+                    setFormCurrentValue(e.target.value)
+                    setCurrentValueTouched(true)
+                  }}
                 />
+                {!currentValueTouched && formCurrentValue && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('assets.currentValueAutoHint')}
+                  </p>
+                )}
               </div>
             )}
 
