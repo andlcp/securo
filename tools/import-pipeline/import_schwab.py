@@ -170,6 +170,9 @@ def build_asset_payloads(
                 "asset_class": "STOCKS_US",
                 "custodian": CUSTODIAN,
                 "notes": p["name"],  # full company name for reference
+                # We post explicit BUY transactions later — don't let the
+                # backend auto-seed one or we'd double-count cost basis.
+                "seed_purchase_transaction": False,
             },
         })
     return out

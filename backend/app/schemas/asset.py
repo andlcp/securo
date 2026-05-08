@@ -47,6 +47,14 @@ class AssetCreate(BaseModel):
     asset_class: Optional[AssetClassLiteral] = None
     maturity_date: Optional[date] = None
     custodian: Optional[str] = None
+    # When True (default), the create flow synthesizes a BUY transaction
+    # at purchase_date with qty=units and value=purchase_price×units. This
+    # is what makes the timeseries treat the asset's entry as a cashflow
+    # event rather than a "magic gain" spike on day 1 (where V_end jumps
+    # from 0 to cost_basis with cf=0). Form-based creation gets it for
+    # free; bulk-import scripts that build their own transaction history
+    # set this to False to avoid double-counting.
+    seed_purchase_transaction: bool = True
 
 
 class AssetUpdate(BaseModel):

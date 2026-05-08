@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.asset import Asset
+from app.models.asset_transaction import AssetTransaction
 from app.models.asset_value import AssetValue
 from app.models.user import User
 from app.providers.market_price import (
@@ -369,6 +370,35 @@ async def create_asset(
             rate_field="_no_rate",  # Asset has no rate field
             date_field="purchase_date",
         )
+
+    # Auto-seed a BUY transaction at purchase_date so the timeseries treats
+    # the asset's entry as a cashflow rather than a phantom gain. Without
+    # this, an asset with purchase_date in the past + only a current
+    # AssetValue would have its V_end jump from 0 to cost_basis on
+    # purchase_date with cf=0 — Modified Dietz reads that as +∞% on day 1
+    # (or a several-pp spike on the cumulative TWR line). Bulk-import
+    # scripts that build their own AssetTransaction history pass
+    # seed_purchase_transaction=False to avoid double-counting.
+    if (
+        data.seed_purchase_transaction
+        and data.purchase_date is not None
+        and data.purchase_price is not None
+        and data.units is not None
+        and float(data.units) > 0
+    ):
+        cost_basis = Decimal(str(data.purchase_price)) * Decimal(str(data.units))
+        session.add(AssetTransaction(
+            user_id=user_id,
+            asset_id=asset.id,
+            date=data.purchase_date,
+            type="BUY",
+            qty=data.units,
+            price=data.purchase_price,
+            value=cost_basis.quantize(Decimal("0.01")),
+            fees=Decimal("0"),
+            source="auto",
+            external_id=f"auto-buy-{asset.id}",
+        ))
 
     await session.commit()
     await session.refresh(asset)
