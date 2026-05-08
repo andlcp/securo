@@ -280,6 +280,11 @@ export default function AssetsV2Page() {
   // already exist in the DB but were previously edit-only via API.
   const [formCustodian, setFormCustodian] = useState('')
   const [formMaturityDate, setFormMaturityDate] = useState('')
+  // Renda Fixa metadata (used by the daily refresh_cdb_assets task to
+  // mark CDB / LCI / LCA positions to market with the contract's actual
+  // rate instead of the 105 % CDI heuristic).
+  const [formRfIndexer, setFormRfIndexer] = useState<string>('')  // ''|PRE|CDI|IPCA
+  const [formRfRatePct, setFormRfRatePct] = useState<string>('')   // numeric string
   // Wallet (AssetGroup) selector. Without this in the form, manually
   // created assets land in "Sem carteira" because group_id stays null —
   // and the user has to use the separate "Mover" dialog to fix it.
@@ -566,6 +571,8 @@ export default function AssetsV2Page() {
     setFormGrowthStartDate('')
     setFormCustodian('')
     setFormMaturityDate('')
+    setFormRfIndexer('')
+    setFormRfRatePct('')
     setFormUnits('')
     setFormGroupId('')
     setIconTouched(false)
@@ -593,6 +600,8 @@ export default function AssetsV2Page() {
     setFormGrowthStartDate(asset.growth_start_date ?? '')
     setFormCustodian(asset.custodian ?? '')
     setFormMaturityDate(asset.maturity_date ?? '')
+    setFormRfIndexer(asset.rf_indexer ?? '')
+    setFormRfRatePct(asset.rf_rate_pct != null ? String(asset.rf_rate_pct) : '')
     setFormUnits(asset.units?.toString() ?? '')  // expose for any method
     setFormGroupId(asset.group_id ?? '')
     // On edit don't auto-derive Valor Atual — the user is here to inspect
@@ -637,6 +646,8 @@ export default function AssetsV2Page() {
       units: formUnits ? parseFloat(formUnits) : null,
       custodian: formCustodian.trim() || null,
       maturity_date: formMaturityDate || null,
+      rf_indexer: formRfIndexer || null,
+      rf_rate_pct: formRfRatePct ? parseFloat(formRfRatePct) : null,
       // Wallet (AssetGroup). Empty string means "no wallet" — translate to
       // null so the backend stores it as ungrouped instead of hitting a
       // UUID parse error on "".
@@ -1722,17 +1733,63 @@ export default function AssetsV2Page() {
               </div>
             </div>
 
-            {/* Vencimento — only meaningful for Renda Fixa. Shows as a
-                badge on the asset card; without this field the user had
-                no way to set or edit it from the UI. */}
+            {/* Vencimento + indexador + taxa — only meaningful for Renda
+                Fixa. The indexer + rate are read by the daily refresh_cdb
+                task to mark this asset to market accurately (replacing
+                the 105 % CDI fallback heuristic). */}
             {formAssetClass === 'RENDA_FIXA' && (
-              <div className="space-y-2">
-                <Label>{t('assets.maturityDate')}</Label>
-                <DatePickerInput value={formMaturityDate} onChange={setFormMaturityDate} />
-                <p className="text-[11px] text-muted-foreground">
-                  {t('assets.maturityHelp')}
+              <>
+                <div className="space-y-2">
+                  <Label>{t('assets.maturityDate')}</Label>
+                  <DatePickerInput value={formMaturityDate} onChange={setFormMaturityDate} />
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('assets.maturityHelp')}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>{t('assets.rfIndexer')}</Label>
+                    <select
+                      className="bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-3 py-2 rounded-lg text-foreground text-sm w-full"
+                      value={formRfIndexer}
+                      onChange={e => setFormRfIndexer(e.target.value)}
+                    >
+                      <option value="">{t('assets.rfIndexerNone')}</option>
+                      <option value="PRE">{t('assets.rfIndexerPre')}</option>
+                      <option value="CDI">{t('assets.rfIndexerCdi')}</option>
+                      <option value="IPCA">{t('assets.rfIndexerIpca')}</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>
+                      {formRfIndexer === 'PRE'
+                        ? t('assets.rfRatePre')
+                        : formRfIndexer === 'CDI'
+                          ? t('assets.rfRateCdi')
+                          : formRfIndexer === 'IPCA'
+                            ? t('assets.rfRateIpca')
+                            : t('assets.rfRateGeneric')}
+                    </Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={formRfRatePct}
+                      onChange={e => setFormRfRatePct(e.target.value)}
+                      disabled={!formRfIndexer}
+                      placeholder={
+                        formRfIndexer === 'PRE' ? '15.15'
+                        : formRfIndexer === 'CDI' ? '109'
+                        : formRfIndexer === 'IPCA' ? '7.43'
+                        : '—'
+                      }
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground -mt-2">
+                  {t('assets.rfRateHelp')}
                 </p>
-              </div>
+              </>
             )}
 
             {/* Current Value — manual only. Auto-fills with purchase_price ×

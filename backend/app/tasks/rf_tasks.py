@@ -220,6 +220,20 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
                 continue
             amount = Decimal(str(round(qty * pu, 2)))
 
+            # Don't overwrite a user-entered (manual) value for today.
+            # Reconciliation flows paste broker-bruto values directly and
+            # those should win against the daily Tesouro Transparente
+            # snapshot (which trails by ~3 business days anyway).
+            existing_today = await session.scalar(
+                select(AssetValue).where(
+                    AssetValue.asset_id == asset.id,
+                    AssetValue.date == today,
+                )
+            )
+            if existing_today is not None and existing_today.source == "manual":
+                skipped += 1
+                continue
+
             # Upsert by (asset, today)
             await session.execute(
                 sa_delete(AssetValue).where(
@@ -241,17 +255,21 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
 
 
 # -----------------------------------------------------------------------------
-# CDB (CDI compound)
+# CDB / RF privada (CDI / IPCA / PRE compound)
 # -----------------------------------------------------------------------------
 
+# BCB SGS series 12 = CDI diário (% a.d.)
+# BCB SGS series 433 = IPCA mensal (% a.m.)
 BCB_SGS_URL = (
-    "https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados"
+    "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{series}/dados"
     "?formato=json&dataInicial={start}&dataFinal={end}"
 )
 
 
-def _fetch_cdi_factors(start: date, end: date) -> dict[str, float]:
+def _fetch_sgs_series(series: int, start: date, end: date) -> dict[str, float]:
+    """Fetch a BCB SGS series; returns {YYYY-MM-DD: factor=1+pct/100}."""
     url = BCB_SGS_URL.format(
+        series=series,
         start=start.strftime("%d/%m/%Y"),
         end=end.strftime("%d/%m/%Y"),
     )
@@ -260,7 +278,7 @@ def _fetch_cdi_factors(start: date, end: date) -> dict[str, float]:
         with urllib.request.urlopen(req, timeout=60) as r:
             rows = json.load(r)
     except urllib.error.URLError as e:
-        logger.warning("BCB CDI fetch failed: %s", e)
+        logger.warning("BCB SGS %d fetch failed: %s", series, e)
         return {}
     out: dict[str, float] = {}
     for row in rows:
@@ -269,11 +287,85 @@ def _fetch_cdi_factors(start: date, end: date) -> dict[str, float]:
     return out
 
 
-async def _refresh_cdb_assets(cdi_pct: float = DEFAULT_CDB_CDI_PCT
+def _compound_cdi(cdi: dict[str, float], buy_iso: str, today_iso: str,
+                  pct_of_cdi: float) -> float:
+    """Compound `pct_of_cdi%` of daily CDI from buy (exclusive) to today
+    (inclusive). pct_of_cdi=1.05 means 105 % do CDI; 1.09 means 109 %."""
+    factor = 1.0
+    for d_iso, fac in cdi.items():
+        if d_iso > buy_iso and d_iso <= today_iso:
+            daily_r = (fac - 1.0) * pct_of_cdi
+            factor *= (1.0 + daily_r)
+    return factor
+
+
+def _compound_pre(buy_date: date, today: date, annual_rate_pct: float) -> float:
+    """Compound a fixed annual rate from buy_date to today using business-day
+    convention (252 business days/year, the Brazilian RF standard)."""
+    # Business-day count between dates (Mon-Fri, ignores public holidays —
+    # close enough for personal portfolio tracking; ~5-10 holidays/year).
+    days = 0
+    d = buy_date
+    one = dt.timedelta(days=1)
+    while d < today:
+        d += one
+        if d.weekday() < 5:
+            days += 1
+    daily_factor = (1.0 + annual_rate_pct / 100.0) ** (1.0 / 252.0)
+    return daily_factor ** days
+
+
+def _compound_ipca(ipca: dict[str, float], buy_date: date, today: date,
+                   spread_pct: float) -> float:
+    """Compound IPCA accumulated from buy_date to today + an annual spread
+    above IPCA. IPCA is monthly (BCB SGS 433); we apply each month whose
+    *reference* falls in (buy_month, today_month]. This is approximate but
+    matches Tesouro Direto's own NTN-B accrual close enough for tracking."""
+    # Walk months: collect cumulative IPCA factor for the period.
+    ipca_factor = 1.0
+    cur = date(buy_date.year, buy_date.month, 1)
+    end = date(today.year, today.month, 1)
+    while cur <= end:
+        # SGS dates the monthly IPCA at the 1st of the month.
+        key = cur.isoformat()
+        if cur > date(buy_date.year, buy_date.month, 1) and key in ipca:
+            ipca_factor *= ipca[key]
+        # Advance one month
+        if cur.month == 12:
+            cur = date(cur.year + 1, 1, 1)
+        else:
+            cur = date(cur.year, cur.month + 1, 1)
+    # Pro-rata partial month (from purchase day in the buy_month):
+    # we approximate as full-month inclusion above; the slight over/under
+    # cancels in practice.
+    days = (today - buy_date).days
+    years = days / 365.25
+    spread_factor = (1.0 + spread_pct / 100.0) ** years
+    return ipca_factor * spread_factor
+
+
+async def _refresh_cdb_assets(default_cdi_pct: float = DEFAULT_CDB_CDI_PCT
                               ) -> dict[str, int]:
+    """Mark CDB / LCI / LCA positions to market.
+
+    Per-asset rate metadata (rf_indexer + rf_rate_pct) takes precedence:
+      PRE  -> compound annual rate over business days
+      CDI  -> compound (rf_rate_pct % of CDI) daily
+      IPCA -> compound IPCA monthly + spread annually
+    Falls back to the legacy default_cdi_pct heuristic when metadata is
+    absent.
+
+    The task NEVER overwrites an AssetValue with `source='manual'` for
+    today — that's the user's deliberate snapshot (e.g. broker bruto
+    pasted in during reconciliation), and the daily heuristic value
+    must lose to it. Both manual entries and rule entries can coexist
+    historically; the visibility of which is shown today is determined
+    by whichever one we leave intact.
+    """
     session_maker = _make_session_maker()
     today = date.today()
-    refreshed = skipped = 0
+    today_iso = today.isoformat()
+    refreshed = skipped_manual = skipped_invalid = 0
     async with session_maker() as session:
         result = await session.execute(
             select(Asset).where(
@@ -286,35 +378,64 @@ async def _refresh_cdb_assets(cdi_pct: float = DEFAULT_CDB_CDI_PCT
         )
         assets = list(result.scalars().all())
         if not assets:
-            return {"refreshed": 0, "skipped": 0}
+            return {"refreshed": 0, "skipped_manual": 0, "skipped_invalid": 0}
 
-        # Fetch CDI factors for the broadest range needed
         earliest = min((a.purchase_date or today for a in assets), default=today)
-        cdi = _fetch_cdi_factors(earliest, today)
+
+        # CDI (always — used for default heuristic + CDI-indexed assets).
+        cdi = _fetch_sgs_series(12, earliest, today)
+        # IPCA (only fetched if at least one asset uses it).
+        needs_ipca = any((a.rf_indexer or "").upper() == "IPCA" for a in assets)
+        ipca = _fetch_sgs_series(433, earliest, today) if needs_ipca else {}
+
         if not cdi:
             logger.warning("CDB refresh: BCB CDI unavailable, skipping")
-            return {"refreshed": 0, "skipped": len(assets)}
+            return {"refreshed": 0, "skipped_manual": 0,
+                    "skipped_invalid": len(assets)}
 
         for asset in assets:
             buy_date = asset.purchase_date
             buy_price = float(asset.purchase_price or 0)
             qty = float(asset.units or 0)
             if not buy_date or buy_price <= 0 or qty <= 0:
-                skipped += 1
+                skipped_invalid += 1
                 continue
 
-            # Compound cdi_pct * CDI from buy_date (exclusive) to today (inclusive)
-            factor = 1.0
-            for d_iso, fac in cdi.items():
-                if d_iso > buy_date.isoformat() and d_iso <= today.isoformat():
-                    daily_r = (fac - 1.0) * cdi_pct
-                    factor *= (1.0 + daily_r)
+            # Respect any manually-stamped value for today (broker-bruto
+            # snapshots from the reconciliation flow). We only check
+            # today's row — historical manual entries are untouched.
+            existing_today = await session.scalar(
+                select(AssetValue).where(
+                    AssetValue.asset_id == asset.id,
+                    AssetValue.date == today,
+                )
+            )
+            if existing_today is not None and existing_today.source == "manual":
+                skipped_manual += 1
+                continue
 
-            # Reuse purchase_price as the "PU per unit" anchor; modeling here
-            # mirrors replay_renda_fixa.py.
+            # Compute factor based on metadata; fall back to heuristic.
+            indexer = (asset.rf_indexer or "").upper()
+            rate = float(asset.rf_rate_pct) if asset.rf_rate_pct is not None else None
+
+            if indexer == "PRE" and rate is not None:
+                factor = _compound_pre(buy_date, today, rate)
+            elif indexer == "CDI" and rate is not None:
+                factor = _compound_cdi(cdi, buy_date.isoformat(), today_iso,
+                                       rate / 100.0)
+            elif indexer == "IPCA" and rate is not None:
+                factor = _compound_ipca(ipca, buy_date, today, rate)
+            else:
+                # Legacy default: 105 % CDI heuristic (drift-prone but better
+                # than nothing for assets the user hasn't filled in yet).
+                factor = _compound_cdi(cdi, buy_date.isoformat(), today_iso,
+                                       default_cdi_pct)
+
             mtm = qty * buy_price * factor
             amount = Decimal(str(round(mtm, 2)))
 
+            # Replace today's rule-based AV (manual was already filtered out
+            # above so we know there's no manual to clobber).
             await session.execute(
                 sa_delete(AssetValue).where(
                     AssetValue.asset_id == asset.id,
@@ -329,7 +450,9 @@ async def _refresh_cdb_assets(cdi_pct: float = DEFAULT_CDB_CDI_PCT
             refreshed += 1
 
         await session.commit()
-    return {"refreshed": refreshed, "skipped": skipped}
+    return {"refreshed": refreshed,
+            "skipped_manual": skipped_manual,
+            "skipped_invalid": skipped_invalid}
 
 
 # -----------------------------------------------------------------------------

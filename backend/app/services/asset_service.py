@@ -173,6 +173,9 @@ def _asset_to_read(asset: Asset, latest_value: Optional[AssetValue], value_count
         logo_url=asset.logo_url,
         asset_class=asset.asset_class,
         custodian=asset.custodian,
+        rf_indexer=asset.rf_indexer,
+        rf_rate_pct=float(asset.rf_rate_pct) if asset.rf_rate_pct is not None else None,
+        rf_index_offset_pct=float(asset.rf_index_offset_pct) if asset.rf_index_offset_pct is not None else None,
     )
 
 
@@ -291,6 +294,9 @@ async def create_asset(
         asset_class=data.asset_class,
         maturity_date=data.maturity_date,
         custodian=data.custodian,
+        rf_indexer=data.rf_indexer,
+        rf_rate_pct=data.rf_rate_pct,
+        rf_index_offset_pct=data.rf_index_offset_pct,
     )
     session.add(asset)
     await session.flush()

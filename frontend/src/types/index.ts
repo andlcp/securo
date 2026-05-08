@@ -343,6 +343,9 @@ export interface Asset {
   logo_url: string | null
   asset_class: AssetClass | null
   custodian: string | null
+  rf_indexer: string | null
+  rf_rate_pct: number | null
+  rf_index_offset_pct: number | null
 }
 
 /** Explicit asset-class taxonomy used for grouping/filtering. */

@@ -47,6 +47,11 @@ class AssetCreate(BaseModel):
     asset_class: Optional[AssetClassLiteral] = None
     maturity_date: Optional[date] = None
     custodian: Optional[str] = None
+    # Renda-Fixa metadata for accurate MtM via the refresh_cdb_assets task.
+    # See backend/app/models/asset.py:Asset for semantics.
+    rf_indexer: Optional[Literal["PRE", "CDI", "IPCA"]] = None
+    rf_rate_pct: Optional[Decimal] = None
+    rf_index_offset_pct: Optional[Decimal] = None
     # When True (default), the create flow synthesizes a BUY transaction
     # at purchase_date with qty=units and value=purchase_price×units. This
     # is what makes the timeseries treat the asset's entry as a cashflow
@@ -82,6 +87,9 @@ class AssetUpdate(BaseModel):
     asset_class: Optional[AssetClassLiteral] = None
     maturity_date: Optional[date] = None
     custodian: Optional[str] = None
+    rf_indexer: Optional[Literal["PRE", "CDI", "IPCA"]] = None
+    rf_rate_pct: Optional[Decimal] = None
+    rf_index_offset_pct: Optional[Decimal] = None
 
 
 class AssetRead(BaseModel):
@@ -119,6 +127,9 @@ class AssetRead(BaseModel):
     logo_url: Optional[str] = None
     asset_class: Optional[str] = None
     custodian: Optional[str] = None
+    rf_indexer: Optional[str] = None
+    rf_rate_pct: Optional[float] = None
+    rf_index_offset_pct: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 

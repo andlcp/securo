@@ -59,6 +59,26 @@ class Asset(Base):
     # on the Patrimônio list. Free-text — no FK to a brokers table.
     custodian: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
+    # Renda Fixa metadata. Used by refresh_cdb_assets to mark a CDB / LCI /
+    # LCA position to market using its actual contracted rate instead of
+    # the 105 % CDI heuristic. NULL keeps the heuristic; setting these
+    # fields makes the daily task compute MtM precisely.
+    #
+    # Semantics (depends on rf_indexer):
+    #   PRE  -> rf_rate_pct = annual fixed rate (e.g. 15.15)
+    #   CDI  -> rf_rate_pct = % of CDI (e.g. 109 = 109 % do CDI)
+    #   IPCA -> rf_rate_pct = spread above IPCA in % a.a. (e.g. 7.43)
+    rf_indexer: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    rf_rate_pct: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(precision=8, scale=4), nullable=True
+    )
+    # Reserved for hybrid contracts (CDI + X). Unused for the simple
+    # PRE / CDI / IPCA cases above; column added now to avoid another
+    # migration when we ever support those.
+    rf_index_offset_pct: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(precision=8, scale=4), nullable=True
+    )
+
     # Optional parent group ("wallet"). NULL means ungrouped. Deleting a
     # group nullifies this field rather than removing the asset.
     group_id: Mapped[Optional[uuid.UUID]] = mapped_column(
