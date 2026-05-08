@@ -992,7 +992,7 @@ export default function AssetsV2Page() {
           </div>
         </div>
 
-        {isExpanded && <AssetDetail assetId={asset.id} currency={asset.currency} locale={locale} purchasePrice={asset.purchase_price} purchaseDate={asset.purchase_date} valuationMethod={asset.valuation_method} />}
+        {isExpanded && <AssetDetail name={asset.name} assetId={asset.id} currency={asset.currency} locale={locale} purchasePrice={asset.purchase_price} purchaseDate={asset.purchase_date} valuationMethod={asset.valuation_method} />}
       </div>
     )
   }
@@ -2178,8 +2178,8 @@ function PortfolioChart({ data, wallets, currency, locale: loc, mask }: {
   )
 }
 
-function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDate, valuationMethod }: {
-  assetId: string; currency: string; locale: string
+function AssetDetail({ name, assetId, currency, locale: loc, purchasePrice, purchaseDate, valuationMethod }: {
+  name: string; assetId: string; currency: string; locale: string
   purchasePrice: number | null; purchaseDate: string | null
   valuationMethod: string
 }) {
@@ -2359,6 +2359,18 @@ function AssetDetail({ assetId, currency, locale: loc, purchasePrice, purchaseDa
 
   return (
     <div className="border-t border-border px-5 py-5 space-y-5 bg-muted/5">
+      {/* Full asset name — the row header truncates long names (e.g.
+          "CDB - CDB123F199N - BANCO CNH INDUSTRIAL CAPITAL S/A"
+          becomes "CDB - CDB123F199N - B..."). Repeat the full string
+          here so the user can read the whole identifier without
+          tooltip gymnastics. Discreet (smaller / muted) so it doesn't
+          fight the chart's primary visual. */}
+      <p
+        className="text-[11px] text-muted-foreground/80 break-all leading-snug -mt-1"
+        title={name}
+      >
+        {name}
+      </p>
       {/* Cotação chart — for market_priced assets, fetch daily closes from
           Yahoo via backend. For manual assets (CDB / Tesouro), fall back to
           the user's value trend (the asset has no public quote). */}
