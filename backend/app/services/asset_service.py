@@ -615,10 +615,21 @@ async def get_portfolio_trend(
         )
         vals = [(r[0], float(r[1])) for r in rows.all()]
 
-        # Prepend purchase_price as the first data point if it predates existing values
+        # Prepend purchase_price × units (the cost-basis total) as the first
+        # data point if it predates existing values. Without the units
+        # multiplier this used to insert the per-unit price as if it were
+        # the total position value — for any asset with units != 1 that
+        # placed a wildly inflated point at purchase_date and a fill-forward
+        # to today, then a sharp drop on the day yfinance's first
+        # AssetValue lands. E.g. BTC at 0.074649 units × $49,051.94/unit
+        # was being prepended at $49,051.94 (R$ 241k) instead of $3,661.68
+        # (R$ 18k), making the chart show a R$ 226k cliff on the day the
+        # asset was created.
         if asset.purchase_price is not None and asset.purchase_date is not None:
             if not vals or asset.purchase_date < vals[0][0]:
-                vals.insert(0, (asset.purchase_date, float(asset.purchase_price)))
+                units_for_basis = float(asset.units) if asset.units is not None else 1.0
+                cost_basis = float(asset.purchase_price) * units_for_basis
+                vals.insert(0, (asset.purchase_date, cost_basis))
 
         # If the asset was sold and a sell_price is recorded, treat it as the
         # asset's terminal value on sell_date so the chart reflects the
