@@ -1755,7 +1755,7 @@ export default function AssetsV2Page() {
                       value={formRfIndexer}
                       onChange={e => setFormRfIndexer(e.target.value)}
                     >
-                      <option value="">{t('assets.rfIndexerNone')}</option>
+                      <option value="">— selecionar —</option>
                       <option value="PRE">{t('assets.rfIndexerPre')}</option>
                       <option value="CDI">{t('assets.rfIndexerCdi')}</option>
                       <option value="IPCA">{t('assets.rfIndexerIpca')}</option>

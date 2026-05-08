@@ -47,9 +47,6 @@ TESOURO_CSV_URL = (
     "PrecoTaxaTesouroDireto.csv"
 )
 
-# Default percentage of CDI for CDB MTM. Matches the offline replay default.
-DEFAULT_CDB_CDI_PCT = 1.05
-
 
 def _make_session_maker():
     settings = get_settings()
@@ -344,28 +341,34 @@ def _compound_ipca(ipca: dict[str, float], buy_date: date, today: date,
     return ipca_factor * spread_factor
 
 
-async def _refresh_cdb_assets(default_cdi_pct: float = DEFAULT_CDB_CDI_PCT
-                              ) -> dict[str, int]:
-    """Mark CDB / LCI / LCA positions to market.
+async def _refresh_cdb_assets() -> dict[str, int]:
+    """Mark CDB / LCI / LCA positions to market based on each asset's
+    contracted rate metadata.
 
-    Per-asset rate metadata (rf_indexer + rf_rate_pct) takes precedence:
+    Required per-asset metadata (rf_indexer + rf_rate_pct):
       PRE  -> compound annual rate over business days
       CDI  -> compound (rf_rate_pct % of CDI) daily
       IPCA -> compound IPCA monthly + spread annually
-    Falls back to the legacy default_cdi_pct heuristic when metadata is
-    absent.
+
+    Assets without rf_indexer set are SKIPPED — the previous 105 % CDI
+    heuristic was retired because it was overestimating MtM by ~1.5 %
+    on the user's mix of IPCA+ and prefixado contracts. Skipping
+    preserves the most recent AssetValue for that asset (typically a
+    manual broker-bruto entry) instead of stamping a wrong value over
+    it. New CDBs created via the form must specify rf_indexer + rate
+    to receive automatic daily MtM updates.
 
     The task NEVER overwrites an AssetValue with `source='manual'` for
     today — that's the user's deliberate snapshot (e.g. broker bruto
-    pasted in during reconciliation), and the daily heuristic value
-    must lose to it. Both manual entries and rule entries can coexist
+    pasted in during reconciliation), and the daily computed value
+    must lose to it. Both manual entries and rule entries coexist
     historically; the visibility of which is shown today is determined
     by whichever one we leave intact.
     """
     session_maker = _make_session_maker()
     today = date.today()
     today_iso = today.isoformat()
-    refreshed = skipped_manual = skipped_invalid = 0
+    refreshed = skipped_manual = skipped_no_metadata = skipped_invalid = 0
     async with session_maker() as session:
         result = await session.execute(
             select(Asset).where(
@@ -378,22 +381,36 @@ async def _refresh_cdb_assets(default_cdi_pct: float = DEFAULT_CDB_CDI_PCT
         )
         assets = list(result.scalars().all())
         if not assets:
-            return {"refreshed": 0, "skipped_manual": 0, "skipped_invalid": 0}
+            return {"refreshed": 0, "skipped_manual": 0,
+                    "skipped_no_metadata": 0, "skipped_invalid": 0}
 
-        earliest = min((a.purchase_date or today for a in assets), default=today)
+        # Pre-filter to assets that have indexer metadata; we only fetch
+        # SGS series if there's something to compute.
+        with_metadata = [a for a in assets
+                         if a.rf_indexer and a.rf_rate_pct is not None]
+        skipped_no_metadata = len(assets) - len(with_metadata)
+        if not with_metadata:
+            return {"refreshed": 0, "skipped_manual": 0,
+                    "skipped_no_metadata": skipped_no_metadata,
+                    "skipped_invalid": 0}
 
-        # CDI (always — used for default heuristic + CDI-indexed assets).
-        cdi = _fetch_sgs_series(12, earliest, today)
-        # IPCA (only fetched if at least one asset uses it).
-        needs_ipca = any((a.rf_indexer or "").upper() == "IPCA" for a in assets)
+        earliest = min((a.purchase_date or today for a in with_metadata),
+                       default=today)
+
+        # Fetch only the indexes we'll actually use.
+        needs_cdi = any((a.rf_indexer or "").upper() == "CDI"
+                        for a in with_metadata)
+        needs_ipca = any((a.rf_indexer or "").upper() == "IPCA"
+                         for a in with_metadata)
+        cdi = _fetch_sgs_series(12, earliest, today) if needs_cdi else {}
         ipca = _fetch_sgs_series(433, earliest, today) if needs_ipca else {}
 
-        if not cdi:
-            logger.warning("CDB refresh: BCB CDI unavailable, skipping")
-            return {"refreshed": 0, "skipped_manual": 0,
-                    "skipped_invalid": len(assets)}
+        if needs_cdi and not cdi:
+            logger.warning("CDB refresh: BCB CDI unavailable, skipping CDI-indexed assets")
+        if needs_ipca and not ipca:
+            logger.warning("CDB refresh: BCB IPCA unavailable, skipping IPCA-indexed assets")
 
-        for asset in assets:
+        for asset in with_metadata:
             buy_date = asset.purchase_date
             buy_price = float(asset.purchase_price or 0)
             qty = float(asset.units or 0)
@@ -414,22 +431,27 @@ async def _refresh_cdb_assets(default_cdi_pct: float = DEFAULT_CDB_CDI_PCT
                 skipped_manual += 1
                 continue
 
-            # Compute factor based on metadata; fall back to heuristic.
-            indexer = (asset.rf_indexer or "").upper()
-            rate = float(asset.rf_rate_pct) if asset.rf_rate_pct is not None else None
+            indexer = asset.rf_indexer.upper()
+            rate = float(asset.rf_rate_pct)
 
-            if indexer == "PRE" and rate is not None:
+            if indexer == "PRE":
                 factor = _compound_pre(buy_date, today, rate)
-            elif indexer == "CDI" and rate is not None:
+            elif indexer == "CDI":
+                if not cdi:
+                    skipped_invalid += 1
+                    continue
                 factor = _compound_cdi(cdi, buy_date.isoformat(), today_iso,
                                        rate / 100.0)
-            elif indexer == "IPCA" and rate is not None:
+            elif indexer == "IPCA":
+                if not ipca:
+                    skipped_invalid += 1
+                    continue
                 factor = _compound_ipca(ipca, buy_date, today, rate)
             else:
-                # Legacy default: 105 % CDI heuristic (drift-prone but better
-                # than nothing for assets the user hasn't filled in yet).
-                factor = _compound_cdi(cdi, buy_date.isoformat(), today_iso,
-                                       default_cdi_pct)
+                logger.warning("Unknown rf_indexer %r on asset %s; skipping",
+                               asset.rf_indexer, asset.id)
+                skipped_invalid += 1
+                continue
 
             mtm = qty * buy_price * factor
             amount = Decimal(str(round(mtm, 2)))
@@ -452,6 +474,7 @@ async def _refresh_cdb_assets(default_cdi_pct: float = DEFAULT_CDB_CDI_PCT
         await session.commit()
     return {"refreshed": refreshed,
             "skipped_manual": skipped_manual,
+            "skipped_no_metadata": skipped_no_metadata,
             "skipped_invalid": skipped_invalid}
 
 
