@@ -45,7 +45,9 @@ def _next_due_date(last_date: date, frequency: str) -> date:
 
 def _compute_current_value(asset: Asset, latest_value: Optional[AssetValue]) -> Optional[float]:
     """Compute the current value of an asset from its latest AssetValue.
-    Falls back to purchase_price if no value entries exist yet."""
+    Falls back to cost basis (purchase_price × units) if no AssetValue
+    exists yet — this matches what the user actually invested at entry,
+    not the per-unit price."""
     # Market-priced assets are authoritative on (units × last_price). The
     # AssetValue history exists for the chart, but the "live" number users
     # see should reflect the most recent quote even between scheduled syncs.
@@ -56,8 +58,16 @@ def _compute_current_value(asset: Asset, latest_value: Optional[AssetValue]) -> 
             return float(latest_value.amount)
         return None
     if latest_value is None:
+        # Cost-basis fallback. Previous version returned `purchase_price`
+        # raw, which is *per-unit* — for any asset with units != 1 (crypto
+        # fractions, fractional shares, RF positions where units carries
+        # face value, etc.) this displayed wildly inflated current values.
+        # E.g. Bitcoin at 0.074649 units × $49,051.94/unit reported a
+        # current value of $49,051.94 (R$ 241k) when the real cost basis
+        # was $3,661.68 (R$ 18k). Multiply through.
         if asset.purchase_price is not None:
-            return float(asset.purchase_price)
+            units = float(asset.units) if asset.units is not None else 1.0
+            return float(asset.purchase_price) * units
         return None
     return float(latest_value.amount)
 
@@ -296,6 +306,24 @@ async def create_asset(
             asset_id=asset.id,
             amount=data.current_value,
             date=date.today(),
+            source="manual",
+        ))
+    elif (
+        data.valuation_method == "manual"
+        and data.purchase_price is not None
+        and data.units is not None
+    ):
+        # Manual asset created without an explicit current_value: seed an
+        # initial AssetValue at the cost basis (purchase_price × units)
+        # so the timeseries / dashboard filters / Investments page can
+        # actually find this asset. Without it the asset sits at V=0
+        # forever in the chart and the per-class breakdown ignores it.
+        cost_basis = Decimal(str(data.purchase_price)) * Decimal(str(data.units))
+        seed_date = data.purchase_date or date.today()
+        session.add(AssetValue(
+            asset_id=asset.id,
+            amount=cost_basis,
+            date=seed_date,
             source="manual",
         ))
     elif data.valuation_method == "market_price" and quote is not None:

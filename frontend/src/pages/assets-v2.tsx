@@ -5,6 +5,7 @@ import { assets, assetGroups, currencies as currenciesApi, portfolioTimeseries }
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { CurrencyInput } from '@/components/ui/currency-input'
 import { Label } from '@/components/ui/label'
 import {
   Dialog,
@@ -1678,7 +1679,7 @@ export default function AssetsV2Page() {
               </div>
               <div className="space-y-2">
                 <Label>{t('assets.purchasePrice')}</Label>
-                <Input type="number" step="0.01" value={formPurchasePrice} onChange={e => setFormPurchasePrice(e.target.value)} />
+                <CurrencyInput value={formPurchasePrice} onChange={setFormPurchasePrice} currency={formCurrency} />
               </div>
             </div>
 
@@ -1690,7 +1691,7 @@ export default function AssetsV2Page() {
               </div>
               <div className="space-y-2">
                 <Label>{t('assets.sellPrice')}</Label>
-                <Input type="number" step="0.01" value={formSellPrice} onChange={e => setFormSellPrice(e.target.value)} />
+                <CurrencyInput value={formSellPrice} onChange={setFormSellPrice} currency={formCurrency} />
               </div>
             </div>
 
@@ -1741,14 +1742,13 @@ export default function AssetsV2Page() {
             {!editingAsset && formMethod === 'manual' && (
               <div className="space-y-2">
                 <Label>{t('assets.currentValue')}</Label>
-                <Input
-                  type="number"
-                  step="any"
+                <CurrencyInput
                   value={formCurrentValue}
-                  onChange={e => {
-                    setFormCurrentValue(e.target.value)
+                  onChange={(raw) => {
+                    setFormCurrentValue(raw)
                     setCurrentValueTouched(true)
                   }}
+                  currency={formCurrency}
                 />
                 {!currentValueTouched && formCurrentValue && (
                   <p className="text-[11px] text-muted-foreground">
