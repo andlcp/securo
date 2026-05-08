@@ -19,6 +19,7 @@ from app.providers.market_price import (
     get_market_price_provider,
 )
 from app.schemas.asset import AssetCreate, AssetUpdate, AssetValueCreate, AssetRead, AssetValueRead
+from app.services.portfolio_timeseries_service import invalidate_ts_cache
 from app.services.fx_rate_service import convert, stamp_primary_amount
 
 logger = logging.getLogger(__name__)
@@ -371,6 +372,7 @@ async def create_asset(
 
     await session.commit()
     await session.refresh(asset)
+    invalidate_ts_cache(user_id)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
     return _asset_to_read(asset, latest, count)
@@ -450,6 +452,12 @@ async def update_asset(
 
     await session.commit()
     await session.refresh(asset)
+    # Bust the timeseries cache so the dashboard / KPI bars / Resultado
+    # table see the edit immediately instead of waiting up to 10 minutes
+    # for the result cache to expire. Without this, changing purchase_date
+    # or units left the chart and CRIPTO/STOCKS_US filters showing the
+    # pre-edit state until the TTL ran out, which felt broken.
+    invalidate_ts_cache(user_id)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
     return _asset_to_read(asset, latest, count)
@@ -467,6 +475,7 @@ async def delete_asset(
         return False
     await session.delete(asset)
     await session.commit()
+    invalidate_ts_cache(user_id)
     return True
 
 
@@ -519,6 +528,7 @@ async def add_asset_value(
     result = await session.execute(stmt)
     row = result.scalar_one()
     await session.commit()
+    invalidate_ts_cache(user_id)
     return AssetValueRead.model_validate(row)
 
 
@@ -536,6 +546,7 @@ async def delete_asset_value(
         return False
     await session.delete(value)
     await session.commit()
+    invalidate_ts_cache(user_id)
     return True
 
 
