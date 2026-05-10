@@ -123,22 +123,36 @@ def _generate_growth_values(
     return values
 
 
-def _asset_to_read(asset: Asset, latest_value: Optional[AssetValue], value_count: int) -> AssetRead:
+def _asset_to_read(
+    asset: Asset,
+    latest_value: Optional[AssetValue],
+    value_count: int,
+    total_returned_net: float = 0.0,
+) -> AssetRead:
     """Convert an Asset model + computed fields to AssetRead schema.
 
-    `gain_loss` is the absolute P&L of the position:
-        current_value (qty × last_price) MINUS the total invested capital
-        (avg purchase_price × units). The previous formula subtracted the
-        per-unit average price from the total current value, which is
-        dimensionally wrong and produced 100×+ inflated returns for any
-        asset with units > 1.
+    `gain_loss` is the absolute P&L of the position. For straight buy-and-
+    hold positions (most stocks) it's `current_value - invested`. For
+    positions where capital is returned over time (loans with WITHDRAWAL,
+    stocks with SELL parcials, FIIs / loans with INTEREST+DIVIDEND income)
+    we add `total_returned_net` so the rent display reflects the user's
+    actual money-on-money return rather than treating returned capital as
+    "loss". Without this, a loan that already amortised R$ 28k of a R$
+    113k principal would show -R$ 27k "loss" even though the user is
+    receiving exactly what they expected (capital + interest).
+
+    total_returned_net = Σ(WITHDRAWAL + SELL).value
+                       + Σ(DIVIDEND + JCP + RENDIMENTO + INTEREST + RESGATE)
+                         . (value − fees)
+    Net of fees so NRA tax withheld on US dividends doesn't inflate the
+    return; full value otherwise (BR fees are usually 0).
     """
     current_value = _compute_current_value(asset, latest_value)
     gain_loss = None
     if current_value is not None and asset.purchase_price is not None:
         units = float(asset.units) if asset.units is not None else 1.0
         invested_total = float(asset.purchase_price) * units
-        gain_loss = current_value - invested_total
+        gain_loss = current_value + total_returned_net - invested_total
 
     return AssetRead(
         id=asset.id,
@@ -209,12 +223,47 @@ async def get_assets(
 
     result = await session.execute(query)
     assets = list(result.scalars().all())
+    asset_ids = [a.id for a in assets]
+
+    # Bulk-aggregate transaction sums per asset so the rent display
+    # accounts for returned capital (WITHDRAWAL/SELL) and net income
+    # (DIVIDEND/JCP/RENDIMENTO/INTEREST/RESGATE minus fees). One query
+    # for the whole portfolio rather than N+1.
+    returned_by_asset: dict[uuid.UUID, float] = {}
+    if asset_ids:
+        cf_out_types = ["WITHDRAWAL", "SELL"]
+        income_types = ["DIVIDEND", "JCP", "RENDIMENTO", "INTEREST", "RESGATE"]
+        from app.models.asset_transaction import AssetTransaction
+        agg = await session.execute(
+            select(
+                AssetTransaction.asset_id,
+                AssetTransaction.type,
+                func.sum(AssetTransaction.value),
+                func.sum(AssetTransaction.fees),
+            )
+            .where(
+                AssetTransaction.asset_id.in_(asset_ids),
+                AssetTransaction.type.in_(cf_out_types + income_types),
+            )
+            .group_by(AssetTransaction.asset_id, AssetTransaction.type)
+        )
+        for asset_id, tx_type, value_sum, fees_sum in agg.all():
+            v = float(value_sum or 0)
+            f = float(fees_sum or 0)
+            if tx_type in cf_out_types:
+                # Capital being returned — full value, fees ignored (e.g.
+                # broker commission was already deducted from amount).
+                returned_by_asset[asset_id] = returned_by_asset.get(asset_id, 0) + v
+            else:
+                # Income — net of fees (NRA tax withholding on US divs etc).
+                returned_by_asset[asset_id] = returned_by_asset.get(asset_id, 0) + (v - f)
 
     reads = []
     for asset in assets:
         latest = await _get_latest_value(session, asset.id)
         count = await _get_value_count(session, asset.id)
-        reads.append(_asset_to_read(asset, latest, count))
+        total_returned = returned_by_asset.get(asset.id, 0.0)
+        reads.append(_asset_to_read(asset, latest, count, total_returned))
     return reads
 
 
