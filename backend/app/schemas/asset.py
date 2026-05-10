@@ -14,6 +14,7 @@ AssetClassLiteral = Literal[
     "RENDA_FIXA",
     "STOCKS_US",
     "FIIS",
+    "FUNDOS",
     "CRIPTO",
     "OUTRO",
 ]

@@ -354,6 +354,7 @@ export type AssetClass =
   | 'RENDA_FIXA'
   | 'STOCKS_US'
   | 'FIIS'
+  | 'FUNDOS'
   | 'CRIPTO'
   | 'OUTRO'
 
@@ -362,6 +363,7 @@ export const ASSET_CLASS_LABELS: Record<AssetClass, string> = {
   RENDA_FIXA: 'Renda Fixa',
   STOCKS_US: 'Stocks (Ações Americanas)',
   FIIS: 'FIIs (Fundos Imobiliários)',
+  FUNDOS: 'Fundos de Investimentos',
   CRIPTO: 'Criptomoedas',
   OUTRO: 'Outro',
 }
@@ -371,6 +373,7 @@ export const ASSET_CLASS_OPTIONS: { value: AssetClass; label: string }[] = [
   { value: 'RENDA_FIXA', label: ASSET_CLASS_LABELS.RENDA_FIXA },
   { value: 'STOCKS_US', label: ASSET_CLASS_LABELS.STOCKS_US },
   { value: 'FIIS', label: ASSET_CLASS_LABELS.FIIS },
+  { value: 'FUNDOS', label: ASSET_CLASS_LABELS.FUNDOS },
   { value: 'CRIPTO', label: ASSET_CLASS_LABELS.CRIPTO },
   { value: 'OUTRO', label: ASSET_CLASS_LABELS.OUTRO },
 ]

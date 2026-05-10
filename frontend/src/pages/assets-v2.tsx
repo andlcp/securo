@@ -183,8 +183,12 @@ function suggestedMethodForClass(assetClass: string): string {
     case 'CRIPTO':
       return 'market_price'
     case 'RENDA_FIXA':
+    case 'FUNDOS':
     case 'OUTRO':
     default:
+      // Fundos (FIP / FIDC / FIM / FIA) don't have a public live quote —
+      // valuation is whatever the broker marks them at, updated by the
+      // user manually from the position statement.
       return 'manual'
   }
 }
@@ -202,6 +206,8 @@ function iconTypeForClass(assetClass: string): string {
       return 'real_estate'
     case 'RENDA_FIXA':
       return 'investment'
+    case 'FUNDOS':
+      return 'fund'
     case 'CRIPTO':
       return 'crypto'
     case 'OUTRO':
@@ -726,6 +732,7 @@ export default function AssetsV2Page() {
   function inferDisplayClass(asset: Asset): string {
     if (asset.asset_class === 'FIIS') return 'FIIs'
     if (asset.asset_class === 'STOCKS_US') return 'Stocks (Ações Americanas)'
+    if (asset.asset_class === 'FUNDOS') return 'Fundos de Investimentos'
     if (asset.asset_class === 'CRIPTO') return 'Criptomoedas'
     if (asset.asset_class === 'RENDA_FIXA') return 'Renda Fixa'
     if (asset.asset_class === 'OUTRO') return 'Outro'
@@ -741,7 +748,7 @@ export default function AssetsV2Page() {
   // Order in which subgroups should appear inside a wallet section.
   const SUBGROUP_ORDER = [
     'Ações', 'ETFs', 'FIIs', 'Stocks (Ações Americanas)',
-    'Renda Fixa', 'Criptomoedas', 'Outro',
+    'Fundos de Investimentos', 'Renda Fixa', 'Criptomoedas', 'Outro',
   ]
 
   function groupByDisplayClass(list: Asset[]): { name: string; assets: Asset[] }[] {

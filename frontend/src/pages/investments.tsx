@@ -99,6 +99,7 @@ const CLASS_AXIS_LABELS: Record<string, string> = {
   RENDA_FIXA: 'Renda Fixa',
   STOCKS_US: 'Stocks US',
   FIIS: 'FIIs',
+  FUNDOS: 'Fundos',
   CRIPTO: 'Criptomoedas',
   OUTRO: 'Outro',
 }
