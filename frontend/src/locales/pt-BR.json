@@ -694,6 +694,7 @@
     "typeEtf": "ETF",
     "typeCrypto": "Cripto",
     "typeFund": "Fundo",
+    "typeFixedIncome": "Renda Fixa",
     "typeOther": "Outro",
     "valuationMethod": "Método de Valuação",
     "manual": "Manual",

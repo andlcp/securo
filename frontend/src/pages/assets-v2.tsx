@@ -38,6 +38,7 @@ import {
   Layers,
   Bitcoin,
   PieChart,
+  Landmark,
 } from 'lucide-react'
 import {
   AreaChart,
@@ -129,6 +130,7 @@ const ASSET_TYPE_CONFIG: Record<string, { icon: React.ElementType; color: string
   etf: { icon: Layers, color: 'text-teal-600', bg: 'bg-teal-100' },
   crypto: { icon: Bitcoin, color: 'text-orange-600', bg: 'bg-orange-100' },
   fund: { icon: PieChart, color: 'text-indigo-600', bg: 'bg-indigo-100' },
+  fixed_income: { icon: Landmark, color: 'text-rose-600', bg: 'bg-rose-100' },
   other: { icon: Package, color: 'text-slate-600', bg: 'bg-slate-100' },
 }
 
@@ -141,6 +143,7 @@ const ASSET_TYPES = [
   'etf',
   'crypto',
   'fund',
+  'fixed_income',
   'real_estate',
   'vehicle',
   'valuable',
@@ -203,9 +206,12 @@ function iconTypeForClass(assetClass: string): string {
     case 'RENDA_VARIAVEL_BR':
       return 'stock'
     case 'FIIS':
-      return 'real_estate'
+      // FIIs are technically real-estate funds; the user prefers grouping
+      // them under "Fundo" rather than "Imóvel" since they're cotas, not
+      // direct property ownership.
+      return 'fund'
     case 'RENDA_FIXA':
-      return 'investment'
+      return 'fixed_income'
     case 'FUNDOS':
       return 'fund'
     case 'CRIPTO':
