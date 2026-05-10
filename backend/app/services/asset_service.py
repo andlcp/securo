@@ -267,6 +267,35 @@ async def get_assets(
     return reads
 
 
+async def _get_total_returned_net(
+    session: AsyncSession, asset_id: uuid.UUID
+) -> float:
+    """Per-asset version of the bulk aggregate computed in get_assets.
+    Used by single-asset endpoints (get/create/update) so the gain_loss
+    they return matches the list view."""
+    from app.models.asset_transaction import AssetTransaction
+    cf_out_types = ["WITHDRAWAL", "SELL"]
+    income_types = ["DIVIDEND", "JCP", "RENDIMENTO", "INTEREST", "RESGATE"]
+    total = 0.0
+    rows = await session.execute(
+        select(
+            AssetTransaction.type,
+            func.sum(AssetTransaction.value),
+            func.sum(AssetTransaction.fees),
+        )
+        .where(
+            AssetTransaction.asset_id == asset_id,
+            AssetTransaction.type.in_(cf_out_types + income_types),
+        )
+        .group_by(AssetTransaction.type)
+    )
+    for tx_type, value_sum, fees_sum in rows.all():
+        v = float(value_sum or 0)
+        f = float(fees_sum or 0)
+        total += v if tx_type in cf_out_types else (v - f)
+    return total
+
+
 async def get_asset(
     session: AsyncSession, asset_id: uuid.UUID, user_id: uuid.UUID
 ) -> Optional[AssetRead]:
@@ -279,7 +308,8 @@ async def get_asset(
         return None
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    return _asset_to_read(asset, latest, count)
+    total_returned = await _get_total_returned_net(session, asset.id)
+    return _asset_to_read(asset, latest, count, total_returned)
 
 
 async def create_asset(
@@ -460,7 +490,8 @@ async def create_asset(
     invalidate_ts_cache(user_id)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    return _asset_to_read(asset, latest, count)
+    total_returned = await _get_total_returned_net(session, asset.id)
+    return _asset_to_read(asset, latest, count, total_returned)
 
 
 async def update_asset(
@@ -545,7 +576,8 @@ async def update_asset(
     invalidate_ts_cache(user_id)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    return _asset_to_read(asset, latest, count)
+    total_returned = await _get_total_returned_net(session, asset.id)
+    return _asset_to_read(asset, latest, count, total_returned)
 
 
 async def delete_asset(
