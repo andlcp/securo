@@ -7,6 +7,7 @@ Also computes per-group and per-asset-class returns from the assets table.
 
 import asyncio
 import logging
+import time as _time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -18,6 +19,48 @@ from app.models.asset import Asset
 from app.models.asset_group import AssetGroup
 
 logger = logging.getLogger(__name__)
+
+
+# Yahoo close-history cache.
+#
+# Daily closes for past dates never change. Daily closes for today change
+# every quote tick. So we cache aggressively but with a short TTL on
+# requests whose `end` is today (the most common shape — investments
+# loads call this with end=window_end=today). Older endpoints get a
+# longer TTL.
+#
+# Key: (symbol, start_iso, end_iso) -> (expiry_monotonic, payload).
+# Value `payload` is the same dict {iso_date: close} we return raw.
+#
+# Bust this from refresh tasks (close-of-day) if you want today's bar to
+# show up immediately instead of waiting for the TTL.
+_YAHOO_HIST_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, float]]] = {}
+_YAHOO_HIST_TTL_TODAY_S = 600.0     # 10 min while still trading
+_YAHOO_HIST_TTL_CLOSED_S = 86400.0  # 24h for fully-closed windows
+
+
+def _yahoo_hist_cache_get(key: tuple[str, str, str]) -> Optional[dict[str, float]]:
+    entry = _YAHOO_HIST_CACHE.get(key)
+    if entry is None:
+        return None
+    exp, payload = entry
+    if _time.monotonic() >= exp:
+        _YAHOO_HIST_CACHE.pop(key, None)
+        return None
+    return payload
+
+
+def _yahoo_hist_cache_put(key: tuple[str, str, str], payload: dict[str, float]) -> None:
+    end_iso = key[2]
+    ttl = _YAHOO_HIST_TTL_TODAY_S if end_iso >= date.today().isoformat() \
+        else _YAHOO_HIST_TTL_CLOSED_S
+    _YAHOO_HIST_CACHE[key] = (_time.monotonic() + ttl, payload)
+
+
+def invalidate_yahoo_cache() -> None:
+    """Drop the entire Yahoo history cache. Called after market hours so
+    today's last-print is picked up promptly without waiting for TTL."""
+    _YAHOO_HIST_CACHE.clear()
 
 BACEN_CDI_URL = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?dataInicial={start}&dataFinal={end}&formato=json"
 YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
@@ -139,6 +182,15 @@ async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict
     basis (BLAU3.SA: 14/08/2025 close goes from 9.31 back to 12.10,
     matching the user's actual purchase price).
     """
+    # Cache hit — historical closes don't change for past dates, and we
+    # tolerate a 10-min stale window for today's still-trading bar. This
+    # is the hot path on the Investments / Patrimônio pages: ~85 assets
+    # × ~1s per fetch round-trip = the bulk of the cold-cache wait.
+    _cache_key = (symbol, start.isoformat(), end.isoformat())
+    _cached = _yahoo_hist_cache_get(_cache_key)
+    if _cached is not None:
+        return _cached
+
     period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
     period2 = int(datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
     try:
@@ -230,6 +282,7 @@ async def fetch_yahoo_close_history(symbol: str, start: date, end: date) -> dict
                 if d < cutoff:
                     adj *= ratio
             out[d] = adj
+        _yahoo_hist_cache_put(_cache_key, out)
         return out
     except Exception as exc:
         logger.warning("Yahoo history %s fetch failed: %s", symbol, exc)
