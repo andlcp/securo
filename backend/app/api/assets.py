@@ -161,17 +161,36 @@ async def list_assets(
 ):
     assets = await asset_service.get_assets(session, user.id, include_archived=include_archived)
     primary_currency = user.primary_currency
+
+    # Pre-load today's FX rates for every non-primary currency in the
+    # portfolio. The previous version called `convert()` per asset × per
+    # field, and each convert() ran 2 _get_exact_date_rate queries — for
+    # a 145-asset portfolio with a USD slice that meant ~580 serialized
+    # round-trips to PostgreSQL and pushed /api/assets to 50+ seconds
+    # under pool contention. Now we issue at most N+1 queries where N is
+    # the number of foreign currencies (typically 1: USD).
+    foreign_ccys = {a.currency for a in assets
+                    if a.currency != primary_currency
+                    and a.current_value is not None}
+    rate_cache: dict[str, Decimal] = {}
+    if foreign_ccys:
+        from app.services.fx_rate_service import get_rate
+        for ccy in foreign_ccys:
+            rate_cache[ccy] = await get_rate(session, ccy, primary_currency)
+
     for asset in assets:
-        if asset.currency != primary_currency and asset.current_value is not None:
-            converted, _ = await convert(
-                session, Decimal(str(asset.current_value)), asset.currency, primary_currency,
+        if asset.currency == primary_currency or asset.current_value is None:
+            continue
+        rate = rate_cache.get(asset.currency)
+        if rate is None:
+            continue
+        asset.current_value_primary = float(
+            (Decimal(str(asset.current_value)) * rate).quantize(Decimal("0.01"))
+        )
+        if asset.gain_loss is not None:
+            asset.gain_loss_primary = float(
+                (Decimal(str(asset.gain_loss)) * rate).quantize(Decimal("0.01"))
             )
-            asset.current_value_primary = float(converted)
-            if asset.gain_loss is not None:
-                gl_converted, _ = await convert(
-                    session, Decimal(str(asset.gain_loss)), asset.currency, primary_currency,
-                )
-                asset.gain_loss_primary = float(gl_converted)
     return assets
 
 
