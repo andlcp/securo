@@ -1,16 +1,20 @@
 /**
  * Crescimento mensal do patrimônio
  *
- * Stacked vertical bar chart showing per-month net change in portfolio value,
- * split into two stacks:
- *   - Aportes: signed cashflow of the month (money you added or removed).
- *   - Ganho de capital: gain that came from price movement / interest, i.e.
- *     (V_end − V_start − cashflow).
+ * Vertical bar chart showing per-month net change in portfolio value.
+ * Each bar is V_end − V_prev_end (the bottom-line delta), colored green
+ * when positive and rose when negative. The tooltip decomposes the delta
+ * into Aportes (cashflow) and Ganho de capital (V_end − V_prev − cashflow).
  *
- * The two together equal the period-over-period change in V_end. Negative
- * months render below the zero line. We default to the last 24 months so
- * recent activity is dense enough to be readable but the chart still shows
- * historical context.
+ * The "ganho de capital" line here is money-on-money: V_end minus capital
+ * invested. It differs from the % rentabilidade in the ResultadoTable
+ * because that one uses TWR chained from daily returns (which weights by
+ * time inside the month), while this one is the raw monetary delta. They
+ * agree in sign over long horizons but can disagree in a single month
+ * when cashflows arrive mid-period and the market moves around them.
+ *
+ * Defaults to the last 24 months — dense enough to read trends, short
+ * enough to keep each bar legible.
  */
 import { useMemo } from 'react'
 import {
@@ -27,24 +31,19 @@ import {
 import type { PortfolioPoint } from '@/lib/api'
 
 interface MonthlyGrowthChartProps {
-  /** Monthly portfolio series (since user's first transaction). */
   monthlyData: PortfolioPoint[] | undefined
-  /** Currency code for tooltip formatting. */
   currency: string
-  /** Locale for number formatting. */
   locale: string
-  /** Privacy mask: returns "***" or the formatted value. */
   mask: (s: string) => string
-  /** Max number of trailing months to render (default 24). */
   windowMonths?: number
 }
 
 interface MonthlyGrowth {
-  monthKey: string         // YYYY-MM
-  monthLabel: string       // "Jan/26" or similar
-  aportes: number          // signed cashflow
-  ganho: number            // V_end − V_prev_end − cashflow
-  total: number            // aportes + ganho
+  monthKey: string
+  monthLabel: string
+  aportes: number
+  ganho: number
+  net: number
 }
 
 function formatMoney(v: number, currency: string, locale: string): string {
@@ -56,7 +55,6 @@ function formatMoney(v: number, currency: string, locale: string): string {
 }
 
 function formatMonthLabel(monthEnd: string, locale: string): string {
-  // monthEnd is ISO YYYY-MM-DD (last day of month)
   const d = new Date(monthEnd + 'T00:00:00')
   const fmt = new Intl.DateTimeFormat(locale, { month: 'short', year: '2-digit' })
   return fmt.format(d).replace('.', '')
@@ -71,9 +69,6 @@ export function MonthlyGrowthChart({
 }: MonthlyGrowthChartProps) {
   const rows = useMemo<MonthlyGrowth[]>(() => {
     if (!monthlyData || monthlyData.length === 0) return []
-    // monthlyData is already sorted by month_end ascending. Compute period-
-    // over-period changes; the first point has no predecessor so its "ganho"
-    // is treated as 0 (we can't separate seed capital from organic gain).
     const out: MonthlyGrowth[] = []
     let prevVEnd: number | null = null
     for (const p of monthlyData) {
@@ -85,11 +80,10 @@ export function MonthlyGrowthChart({
         monthLabel: formatMonthLabel(p.month_end, locale),
         aportes,
         ganho,
-        total: aportes + ganho,
+        net: aportes + ganho,
       })
       prevVEnd = vEnd
     }
-    // Tail-trim to the requested window.
     return out.slice(-windowMonths)
   }, [monthlyData, locale, windowMonths])
 
@@ -110,7 +104,6 @@ export function MonthlyGrowthChart({
         <BarChart
           data={rows}
           margin={{ top: 16, right: 20, left: 8, bottom: 8 }}
-          stackOffset="sign"
         >
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
           <XAxis
@@ -135,55 +128,71 @@ export function MonthlyGrowthChart({
           />
           <ReferenceLine y={0} stroke="var(--border)" strokeWidth={1} />
           <Tooltip
-            cursor={{ fill: 'transparent' }}
+            cursor={{ fill: 'var(--muted)', opacity: 0.3 }}
             contentStyle={{
               background: 'var(--card)',
               border: '1px solid var(--border)',
               borderRadius: 8,
               fontSize: 12,
+              padding: 10,
             }}
-            formatter={(value: unknown, key: unknown) => {
-              const v = value as number
-              const labelMap: Record<string, string> = {
-                aportes: 'Aportes',
-                ganho: 'Ganho de capital',
-              }
-              return [mask(formatMoney(v, currency, locale)), labelMap[key as string] ?? key]
-            }}
-            labelFormatter={(label, payload) => {
-              // Show total at the top of the tooltip when both stacks present.
-              const arr = (payload ?? []) as ReadonlyArray<{ payload?: MonthlyGrowth }>
-              const total = arr[0]?.payload?.total ?? 0
-              return `${label} · Total ${mask(formatMoney(total, currency, locale))}`
+            content={(props) => {
+              const payload = (props.payload ?? []) as Array<{ payload?: MonthlyGrowth }>
+              const r = payload[0]?.payload
+              if (!r) return null
+              return (
+                <div style={{
+                  background: 'var(--card)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: 10,
+                  fontSize: 12,
+                  minWidth: 200,
+                }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                    {r.monthLabel}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                    <span style={{ color: 'var(--muted-foreground)' }}>Total do mês</span>
+                    <span style={{ fontWeight: 600, color: r.net >= 0 ? '#16a34a' : '#dc2626' }}>
+                      {(r.net >= 0 ? '+' : '') + mask(formatMoney(r.net, currency, locale))}
+                    </span>
+                  </div>
+                  <div style={{ height: 1, background: 'var(--border)', margin: '6px 0' }} />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginTop: 2 }}>
+                    <span style={{ color: 'var(--muted-foreground)' }}>Aportes</span>
+                    <span style={{ color: r.aportes >= 0 ? '#16a34a' : '#dc2626' }}>
+                      {(r.aportes >= 0 ? '+' : '') + mask(formatMoney(r.aportes, currency, locale))}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                    <span style={{ color: 'var(--muted-foreground)' }}>Ganho de capital</span>
+                    <span style={{ color: r.ganho >= 0 ? '#16a34a' : '#dc2626' }}>
+                      {(r.ganho >= 0 ? '+' : '') + mask(formatMoney(r.ganho, currency, locale))}
+                    </span>
+                  </div>
+                </div>
+              )
             }}
           />
-          <Bar dataKey="aportes" stackId="growth" name="aportes" radius={[0, 0, 0, 0]} maxBarSize={28}>
+          <Bar dataKey="net" name="net" radius={[3, 3, 0, 0]} maxBarSize={28}>
             {rows.map((r) => (
               <Cell
-                key={`aporte-${r.monthKey}`}
-                fill={r.aportes >= 0 ? '#22c55e' : '#fda4af'}
-              />
-            ))}
-          </Bar>
-          <Bar dataKey="ganho" stackId="growth" name="ganho" radius={[3, 3, 0, 0]} maxBarSize={28}>
-            {rows.map((r) => (
-              <Cell
-                key={`ganho-${r.monthKey}`}
-                fill={r.ganho >= 0 ? '#0ea5e9' : '#fb7185'}
+                key={r.monthKey}
+                fill={r.net >= 0 ? '#16a34a' : '#dc2626'}
               />
             ))}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-      {/* Legend (manual — Recharts default legend renders by stackId not Cell colors) */}
       <div className="flex items-center justify-center gap-5 mt-2 text-xs text-muted-foreground">
         <div className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm" style={{ background: '#22c55e' }} />
-          Aportes
+          <span className="w-3 h-3 rounded-sm" style={{ background: '#16a34a' }} />
+          Mês positivo
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm" style={{ background: '#0ea5e9' }} />
-          Ganho de capital
+          <span className="w-3 h-3 rounded-sm" style={{ background: '#dc2626' }} />
+          Mês negativo
         </div>
       </div>
     </div>
