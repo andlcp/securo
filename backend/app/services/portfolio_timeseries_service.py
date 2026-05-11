@@ -169,14 +169,32 @@ def _ts_cache_key(user_id, months, since_start, asset_ids, asset_classes,
 
 def invalidate_ts_cache(user_id=None) -> None:
     """Drop cached entries — call after mutations that could change the
-    timeseries (asset edit, transaction insert, FX rate sync)."""
+    timeseries (asset edit, transaction insert, FX rate sync).
+
+    Also marks the user as "dirty" so the next read drops the materialized
+    portfolio_daily_snapshots rows and rebuilds them. The marker is async-
+    inert (set in memory) — the actual DELETE happens lazily on the next
+    timeseries read inside an `AsyncSession`, which avoids fanning a sync
+    callsite out into the async DB layer.
+    """
     if user_id is None:
         _ts_cache.clear()
+        _DIRTY_USERS.clear()
+        _DIRTY_USERS.add("*")  # invalidate everything
         return
     target = str(user_id)
     for k in list(_ts_cache.keys()):
         if k and k[0] == target:
             del _ts_cache[k]
+    _DIRTY_USERS.add(target)
+
+
+# In-memory set of user_ids (stringified) whose materialized snapshots
+# are known to be out of date because a mutation just happened. Drained
+# by the read path inside _try_serve_from_snapshots: it sees the marker,
+# deletes the user's snapshot rows, and rebuilds. "*" means "wipe all"
+# (used by the no-arg invalidate which the test suite hits during setup).
+_DIRTY_USERS: set[str] = set()
 
 
 def _month_end(y: int, m: int) -> date:
@@ -388,11 +406,121 @@ async def get_timeseries(session: AsyncSession, user: User,
     if cached is not None and cached[0] > now_mono:
         return cached[1]
 
+    # Materialized-snapshot fast path. Only the "no-filter" view is
+    # cached on disk; filtered queries fall through to the live walk.
+    # See portfolio_daily_snapshot_service for the maintenance contract.
+    has_filter = bool(asset_ids or asset_classes or group_ids)
+    if not has_filter:
+        served = await _try_serve_from_snapshots(
+            session, user, months, since_start, granularity,
+            date_from, date_to,
+        )
+        if served is not None:
+            _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, served)
+            return served
+
+    result = await _compute_timeseries_uncached(
+        session, user,
+        months=months, since_start=since_start,
+        asset_ids=asset_ids, asset_classes=asset_classes,
+        group_ids=group_ids, granularity=granularity,
+        date_from=date_from, date_to=date_to,
+    )
+    _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, result)
+    return result
+
+
+async def _try_serve_from_snapshots(
+    session: AsyncSession,
+    user: User,
+    months: Optional[int],
+    since_start: bool,
+    granularity: str,
+    date_from: Optional[date],
+    date_to: Optional[date],
+) -> Optional[list[dict]]:
+    """Return the requested series from the materialized snapshot cache
+    if it covers the window, else None (caller falls back to live walk).
+
+    On a partial-cache hit (e.g. yesterday is cached but today's row is
+    missing because of a fresh mutation), we trigger an incremental
+    rebuild from the missing date forward, then re-read.
+    """
+    from app.services.portfolio_daily_snapshot_service import (
+        invalidate_daily_snapshots,
+        latest_daily_snapshot_date,
+        read_daily_snapshot_rows,
+        rebuild_daily_snapshots,
+        aggregate_monthly,
+        window_daily,
+    )
+
+    user_key = str(user.id)
+    dirty = ("*" in _DIRTY_USERS) or (user_key in _DIRTY_USERS)
+    if dirty:
+        # A recent mutation invalidated the cache. Drop the snapshot rows
+        # so the rebuild below regenerates them from scratch. We pop the
+        # marker after the rebuild succeeds; on failure we leave it set
+        # so the next read tries again.
+        try:
+            await invalidate_daily_snapshots(session, user.id)
+        except Exception as exc:
+            logger.warning("Snapshot invalidation failed: %s", exc)
+            return None
+
+    today_d = date.today()
+    latest = await latest_daily_snapshot_date(session, user.id)
+    if latest is None:
+        # Cold cache — do the full rebuild now and serve from it. The
+        # rebuild itself uses the legacy walk so this first read is just
+        # as slow as before, but every subsequent read (until the next
+        # mutation) is instant.
+        try:
+            await rebuild_daily_snapshots(session, user, from_date=None)
+            _DIRTY_USERS.discard(user_key)
+        except Exception as exc:
+            logger.warning("Initial snapshot build failed: %s", exc)
+            return None
+    elif latest < today_d:
+        # Stale tail — rebuild only the missing days.
+        try:
+            await rebuild_daily_snapshots(
+                session, user, from_date=latest + timedelta(days=1)
+            )
+            _DIRTY_USERS.discard(user_key)
+        except Exception as exc:
+            logger.warning("Incremental snapshot rebuild failed: %s", exc)
+            return None
+    else:
+        # Snapshot is fresh; just drain the marker if present.
+        _DIRTY_USERS.discard(user_key)
+
+    rows = await read_daily_snapshot_rows(session, user.id)
+    if not rows:
+        return None
+    windowed = window_daily(rows, months, since_start, date_from, date_to)
+    if granularity == "monthly":
+        return aggregate_monthly(windowed)
+    return windowed
+
+
+async def _compute_timeseries_uncached(session: AsyncSession, user: User,
+                         months: Optional[int] = None,
+                         since_start: bool = False,
+                         asset_ids: Optional[list[uuid.UUID]] = None,
+                         asset_classes: Optional[list[str]] = None,
+                         group_ids: Optional[list[uuid.UUID]] = None,
+                         granularity: str = "monthly",
+                         date_from: Optional[date] = None,
+                         date_to: Optional[date] = None,
+                         ) -> list[dict]:
+    """The original `get_timeseries` body, extracted so it can be called
+    from the snapshot rebuilder without re-entering the cache layer."""
+    await _ensure_cdi_loaded()
     user_ccy = await _user_primary_currency(session, user)
     assets = await _load_assets(session, user.id, asset_ids, asset_classes,
                                 group_ids)
     if not assets:
-        _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, [])
         return []
 
     # Bulk-load every USD-quoted FX rate into memory at the start so the
@@ -927,7 +1055,6 @@ async def get_timeseries(session: AsyncSession, user: User,
             prev_v_end = v_end_total
             d += timedelta(days=1)
 
-        _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, out)
         return out
 
     # Monthly mode (default): walk one row per month-end.
@@ -1001,5 +1128,4 @@ async def get_timeseries(session: AsyncSession, user: User,
         })
         prev_v_end = v_end_total
 
-    _ts_cache[cache_key] = (now_mono + _TS_CACHE_TTL_S, out)
     return out
