@@ -92,6 +92,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Per-request timing middleware. Logs duration for every /api request so
+# we can see at-a-glance which endpoint is dragging on a slow page load
+# without having to wire a profiler. Cheap: just a perf_counter at each
+# end and a single log line. Remove once we have a proper APM in place.
+import time as _request_timer
+
+@app.middleware("http")
+async def _timing_middleware(request, call_next):
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    t0 = _request_timer.perf_counter()
+    response = await call_next(request)
+    dur_ms = (_request_timer.perf_counter() - t0) * 1000
+    if dur_ms > 100:  # only log slow ones to keep noise down
+        print(f"[TIMING] {dur_ms:>7.1f}ms  {request.method} {request.url.path}{('?' + request.url.query) if request.url.query else ''}", flush=True)
+    response.headers["x-request-duration-ms"] = f"{dur_ms:.1f}"
+    return response
+
 # Auth routes — custom login/logout with 2FA support (mounted first to take precedence)
 app.include_router(
     custom_auth_router,
