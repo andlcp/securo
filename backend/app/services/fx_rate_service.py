@@ -88,6 +88,28 @@ async def sync_rates(
     return count
 
 
+import time as _fx_time
+
+# In-process cache for hot FX rate lookups. `get_rate(USD, BRL, today)`
+# was clocking ~1.4s on cache miss because it tried an exact-date DB
+# read, then triggered an on-demand PTAX sync over the network. The
+# rate doesn't change once it's published for the day, so caching for
+# 10 minutes is comfortably tight and removes the synchronous fetch
+# from the /api/assets and /api/asset-groups hot path.
+#
+# Keyed by (from_currency, to_currency, iso_date) so different days
+# don't collide. Bust via invalidate_fx_cache() when sync_rates writes
+# a new row (so the dashboard's manual refresh button still works).
+_FX_RATE_CACHE: dict[tuple[str, str, str], tuple[float, Decimal]] = {}
+_FX_RATE_CACHE_TTL_S = 600.0
+
+
+def invalidate_fx_cache() -> None:
+    """Drop every cached FX rate. Called after a successful sync_rates
+    so the next get_rate picks up the new row from the DB."""
+    _FX_RATE_CACHE.clear()
+
+
 async def get_rate(
     session: AsyncSession,
     from_currency: str,
@@ -97,12 +119,21 @@ async def get_rate(
     """Get FX rate from from_currency to to_currency.
 
     Uses cross-rate through USD: rate = usd_to_target / usd_to_source.
-    Priority: exact date → on-demand fetch → closest available → fallback 1:1.
+    Priority: cache → exact date → on-demand fetch → closest available
+    → fallback 1:1.
     """
     if from_currency == to_currency:
         return Decimal("1")
 
     target = target_date or date.today()
+
+    cache_key = (from_currency, to_currency, target.isoformat())
+    entry = _FX_RATE_CACHE.get(cache_key)
+    if entry is not None:
+        exp, rate = entry
+        if _fx_time.monotonic() < exp:
+            return rate
+        _FX_RATE_CACHE.pop(cache_key, None)
 
     # Step 1: Try exact date
     usd_to_source = await _get_exact_date_rate(session, from_currency, target)
@@ -142,7 +173,9 @@ async def get_rate(
     if usd_to_source == 0:
         return Decimal("1")
 
-    return usd_to_target / usd_to_source
+    result = usd_to_target / usd_to_source
+    _FX_RATE_CACHE[cache_key] = (_fx_time.monotonic() + _FX_RATE_CACHE_TTL_S, result)
+    return result
 
 
 async def _get_exact_date_rate(session: AsyncSession, currency: str, target: date) -> Optional[Decimal]:
