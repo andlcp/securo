@@ -2,11 +2,13 @@ import logging
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import current_active_user
 from app.core.database import get_async_session
+from app.models.asset import Asset
 from app.models.user import User
 from app.providers.market_price import (
     MarketPriceRateLimitedError,
@@ -192,6 +194,34 @@ async def list_assets(
                 (Decimal(str(asset.gain_loss)) * rate).quantize(Decimal("0.01"))
             )
     return assets
+
+
+@router.get("/{asset_id}/icon")
+async def get_asset_icon(
+    asset_id: uuid.UUID,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Serve the cached logo bytes for an asset.
+
+    Public route by design — favicons are not sensitive, and adding auth
+    would force the frontend to send credentials with every <img src=...>
+    which slows the page down for zero security benefit. The route only
+    returns bytes we previously fetched ourselves, never user data.
+
+    Browser caches aggressively (1 year, immutable) so subsequent page
+    loads don't even hit the network.
+    """
+    row = (await session.execute(
+        select(Asset.logo_data, Asset.logo_content_type)
+        .where(Asset.id == asset_id)
+    )).first()
+    if row is None or row.logo_data is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return Response(
+        content=row.logo_data,
+        media_type=row.logo_content_type or "image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/portfolio-trend")

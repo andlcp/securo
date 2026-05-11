@@ -185,7 +185,19 @@ def _asset_to_read(
         ticker_exchange=asset.ticker_exchange,
         last_price=float(asset.last_price) if asset.last_price is not None else None,
         last_price_at=asset.last_price_at,
-        logo_url=asset.logo_url,
+        # Prefer the locally-cached icon over the external URL. The
+        # frontend renders <img src=logo_url> directly, so swapping in
+        # /api/assets/<id>/icon keeps the call site identical while
+        # eliminating round-trips to gstatic per asset. See
+        # asset_icon_service for the cache contract. We probe with
+        # `logo_content_type` (cheap string column) rather than
+        # `logo_data` (deferred bytes) so the bulk SELECT doesn't have
+        # to pull every favicon blob into the ORM identity map.
+        logo_url=(
+            f"/api/assets/{asset.id}/icon"
+            if asset.logo_content_type is not None
+            else asset.logo_url
+        ),
         asset_class=asset.asset_class,
         custodian=asset.custodian,
         rf_indexer=asset.rf_indexer,
@@ -515,6 +527,20 @@ async def create_asset(
     await session.commit()
     await session.refresh(asset)
     invalidate_ts_cache(user_id)
+    # Best-effort fetch of the logo so the next page load can serve it
+    # from /api/assets/<id>/icon instead of round-tripping to gstatic.
+    # We await inline (vs a background task) because we only created
+    # one asset — the latency is bounded by a single httpx call and
+    # avoids the open-session-in-background-task complications. Failure
+    # is silent: the cache is opportunistic.
+    if asset.logo_url and not asset.logo_url.startswith("/api/"):
+        try:
+            from app.services.asset_icon_service import fetch_and_store_icon
+            await fetch_and_store_icon(session, asset)
+            await session.refresh(asset)
+        except Exception as exc:
+            logger.info("post-create icon fetch failed for %s: %s",
+                        asset.id, exc)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
     total_returned = await _get_total_returned_net(session, asset.id)
@@ -992,7 +1018,21 @@ async def refresh_market_price_asset(
     # alone; manual refreshes and creates cover the fill-in.
     if not asset.logo_url and quote.logo_url:
         asset.logo_url = quote.logo_url
+        # New logo_url — drop the cached blob so the next icon fetch
+        # picks up the fresh URL.
+        asset.logo_data = None
+        asset.logo_content_type = None
     await session.flush()
+    # If we have a logo_url and no cached bytes yet, fetch them now so
+    # subsequent loads come from our backend.
+    if asset.logo_url and asset.logo_content_type is None \
+            and not asset.logo_url.startswith("/api/"):
+        try:
+            from app.services.asset_icon_service import fetch_and_store_icon
+            await fetch_and_store_icon(session, asset, commit=False)
+        except Exception as exc:
+            logger.info("post-refresh icon fetch failed for %s: %s",
+                        asset.id, exc)
     return True
 
 

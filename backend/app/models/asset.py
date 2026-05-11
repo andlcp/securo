@@ -3,9 +3,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, deferred, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -98,6 +98,23 @@ class Asset(Base):
     # assets when a logo provider is configured. Null means "no logo, use
     # the type icon". Frontend swaps to the type icon on <img> load error.
     logo_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Locally-cached logo image. When populated, the API returns a
+    # `/api/assets/{id}/icon` URL instead of the external `logo_url` so
+    # the browser never has to round-trip to t0.gstatic.com or any other
+    # third-party favicon endpoint. ~1-3 KB per asset.
+    #
+    # `deferred()` keeps the bytes off of `SELECT *` — they're only
+    # loaded on demand (in the /icon route's narrow SELECT). Without
+    # this every /api/assets call would pull a few hundred KB of
+    # favicon binaries into the ORM identity map for no reason.
+    logo_data: Mapped[Optional[bytes]] = deferred(
+        mapped_column(LargeBinary, nullable=True)
+    )
+    # Doubles as a "do we have a cached blob?" flag. `logo_content_type IS
+    # NOT NULL` ⇔ logo_data is non-empty. Cheap to load (60-char string)
+    # and the read-path uses it to decide whether to emit /api/assets/<id>
+    # /icon or fall back to the external logo_url.
+    logo_content_type: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
 
     values: Mapped[list["AssetValue"]] = relationship(back_populates="asset", cascade="all, delete-orphan")
     group: Mapped[Optional["AssetGroup"]] = relationship(back_populates="assets")
