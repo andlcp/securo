@@ -183,7 +183,11 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
     async with session_maker() as session:
         result = await session.execute(
             select(Asset).where(
-                Asset.type == "investment",
+                # `investment` was the legacy generic type before we split
+                # RF into its own `fixed_income` badge. Keep both so the
+                # task still picks up assets imported before the
+                # reclassification migration ran.
+                Asset.type.in_(("investment", "fixed_income")),
                 Asset.valuation_method == "manual",
                 Asset.is_archived == False,    # noqa: E712
                 Asset.sell_date.is_(None),
@@ -372,7 +376,9 @@ async def _refresh_cdb_assets() -> dict[str, int]:
     async with session_maker() as session:
         result = await session.execute(
             select(Asset).where(
-                Asset.type == "investment",
+                # Mirrors the Tesouro refresh: both legacy `investment` and
+                # current `fixed_income` types are accepted.
+                Asset.type.in_(("investment", "fixed_income")),
                 Asset.valuation_method == "manual",
                 Asset.is_archived == False,    # noqa: E712
                 Asset.sell_date.is_(None),
