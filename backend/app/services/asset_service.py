@@ -259,10 +259,36 @@ async def get_assets(
                 # Income — net of fees (NRA tax withholding on US divs etc).
                 returned_by_asset[asset_id] = returned_by_asset.get(asset_id, 0) + (v - f)
 
+    # Bulk-fetch the latest AssetValue per asset (DISTINCT ON, single
+    # round-trip) and AV counts so we don't issue 2 SELECTs per asset.
+    # On a 100-asset portfolio that's ~200 fewer round-trips — biggest
+    # win in get_assets latency.
+    latest_by_asset: dict[uuid.UUID, AssetValue] = {}
+    count_by_asset: dict[uuid.UUID, int] = {}
+    if asset_ids:
+        # Postgres DISTINCT ON: keep one row per asset_id, sorted so the
+        # row we keep is the most recent date.
+        latest_rows = (await session.execute(
+            select(AssetValue)
+            .where(AssetValue.asset_id.in_(asset_ids))
+            .order_by(AssetValue.asset_id, AssetValue.date.desc())
+            .distinct(AssetValue.asset_id)
+        )).scalars().all()
+        for av in latest_rows:
+            latest_by_asset[av.asset_id] = av
+
+        count_rows = await session.execute(
+            select(AssetValue.asset_id, func.count(AssetValue.id))
+            .where(AssetValue.asset_id.in_(asset_ids))
+            .group_by(AssetValue.asset_id)
+        )
+        for aid, n in count_rows.all():
+            count_by_asset[aid] = int(n)
+
     reads = []
     for asset in assets:
-        latest = await _get_latest_value(session, asset.id)
-        count = await _get_value_count(session, asset.id)
+        latest = latest_by_asset.get(asset.id)
+        count = count_by_asset.get(asset.id, 0)
         total_returned = returned_by_asset.get(asset.id, 0.0)
         reads.append(_asset_to_read(asset, latest, count, total_returned))
     return reads
