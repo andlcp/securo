@@ -82,7 +82,11 @@ const navItems: NavItem[] = [
   { type: 'link', key: 'import', path: '/import', icon: Upload },
   { type: 'separator', labelKey: 'nav.groupAnalysis' },
   { type: 'link', key: 'reports', path: '/reports', icon: BarChart3 },
-  { type: 'link', key: 'assets', path: '/assets', icon: Landmark },
+  // Legacy "Patrimônio" page hidden from sidebar — kept under /assets so we
+  // continue to receive upstream Securo updates without showing a duplicate
+  // entry next to the newer Patrimônio (assets-v2) the user adopted as
+  // canonical.
+  // { type: 'link', key: 'assets', path: '/assets', icon: Landmark },
   { type: 'link', key: 'assetsV2', path: '/assets-v2', icon: Landmark },
   { type: 'link', key: 'investments', path: '/investments', icon: TrendingUp },
   { type: 'link', key: 'events', path: '/events', icon: ScrollText },

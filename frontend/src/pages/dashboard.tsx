@@ -4,7 +4,10 @@ import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import { ptBR, enUS } from 'date-fns/locale'
-import { dashboard, transactions, budgets, categories as categoriesApi, accounts as accountsApi, goals as goalsApi } from '@/lib/api'
+import { dashboard, transactions, budgets, categories as categoriesApi, accounts as accountsApi, goals as goalsApi, portfolioTimeseries, investmentBenchmarks } from '@/lib/api'
+import type { PortfolioPoint } from '@/lib/api'
+import { MonthlyGrowthChart } from '@/components/monthly-growth-chart'
+import { ResultadoTable } from '@/components/resultado-table'
 import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
@@ -102,6 +105,26 @@ export default function DashboardPage() {
   const { data: summary, isLoading: summaryLoading } = useQuery({
     queryKey: ['dashboard', 'summary', selectedMonth],
     queryFn: () => dashboard.summary(monthParam),
+  })
+
+  // Investment timeseries — feed the monthly growth bar chart + Gorila-style
+  // Resultado table that now live on the dashboard. Both want lifetime data
+  // and ignore the period selector at the top of the page (which is about
+  // expense tracking, not investments).
+  const { data: monthlyPortfolio } = useQuery<PortfolioPoint[]>({
+    queryKey: ['dashboard', 'portfolio-monthly-lifetime'],
+    queryFn: () => portfolioTimeseries.series({ sinceStart: true, granularity: 'monthly' }),
+    staleTime: 1000 * 60 * 5,
+  })
+  const { data: dailyPortfolio } = useQuery<PortfolioPoint[]>({
+    queryKey: ['dashboard', 'portfolio-daily-lifetime'],
+    queryFn: () => portfolioTimeseries.series({ sinceStart: true, granularity: 'daily' }),
+    staleTime: 1000 * 60 * 5,
+  })
+  const { data: lifetimeBench } = useQuery({
+    queryKey: ['dashboard', 'inv-benchmarks-lifetime'],
+    queryFn: () => investmentBenchmarks.series(12, true),
+    staleTime: 1000 * 60 * 30,
   })
 
   const { data: spending, isLoading: spendingLoading } = useQuery({
@@ -524,7 +547,41 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Charts: Category Spending Bars + Balance Flow */}
+      {/* Crescimento mensal do patrimônio (Aportes + Ganho de capital) */}
+      <div className="bg-card rounded-xl border border-border shadow-sm mb-5">
+        <div className="px-5 py-4 border-b border-border">
+          <p className="text-sm font-semibold text-foreground">Crescimento mensal do patrimônio</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Últimos 24 meses · Aportes (entrada de capital) + Ganho de capital (variação de valor dos ativos)
+          </p>
+        </div>
+        <div className="p-4">
+          <MonthlyGrowthChart
+            monthlyData={monthlyPortfolio}
+            currency={primaryCurrency}
+            locale={locale}
+            mask={mask}
+            windowMonths={24}
+          />
+        </div>
+      </div>
+
+      {/* Resultado financeiro e rentabilidade — same Gorila-style table that
+          lives on /investments. Always lifetime (independent of dashboard's
+          month selector at the top). */}
+      <div className="mb-5">
+        <ResultadoTable
+          lifetimeDaily={dailyPortfolio}
+          cdiSeries={lifetimeBench?.cdi}
+          locale={locale}
+          mask={mask}
+        />
+      </div>
+
+      {/* Charts: Category Spending Bars + Balance Flow
+          HIDDEN by user preference (not using the expense-tracking module).
+          Toggle the surrounding `false &&` to bring them back. */}
+      {false && (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5" style={{ gridAutoRows: 'minmax(380px, auto)' }}>
         {/* Category Spending Bars */}
         <div className="bg-card rounded-xl border border-border shadow-sm flex flex-col max-h-[420px]">
@@ -731,8 +788,14 @@ export default function DashboardPage() {
             const footerDay = hoveredDay ?? lastDay
             const footerPrev = balanceHistory?.previous.find(d => d.day === footerDay)?.balance ?? 0
             const footerCurrent = cumulativeData.find(d => d.day === footerDay)?.current ?? totalBalance
-            const footerPct = footerPrev !== 0 ? ((footerCurrent - footerPrev) / Math.abs(footerPrev)) * 100 : null
-            if (footerPrev === 0 || footerPct === null) return null
+            const rawPct = footerPrev !== 0 ? ((footerCurrent - footerPrev) / Math.abs(footerPrev)) * 100 : null
+            if (footerPrev === 0 || rawPct === null) return null
+            // Pin to a non-null local \u2014 when this block is wrapped in a
+            // `{false && (...)}` toggle (which the dashboard currently is for
+            // expense-tracking sections), TS loses the IIFE-internal
+            // narrowing of `rawPct` and reports possibly-null errors at the
+            // usage sites. The explicit assignment restores the narrow.
+            const footerPct = rawPct as number
             return (
               <div className="px-5 pb-4 pt-0 shrink-0">
                 <p className="text-xs text-muted-foreground">
@@ -752,6 +815,7 @@ export default function DashboardPage() {
           })()}
         </div>
       </div>
+      )}
 
       {/* Goals Progress Widget */}
       {goalsSummary && goalsSummary.length > 0 && (
@@ -824,7 +888,10 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Period Transactions */}
+      {/* Period Transactions
+          HIDDEN by user preference (not using transactions module). Toggle
+          the surrounding `false &&` to bring it back. */}
+      {false && (
       <div>
         <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-border flex items-center justify-between">
@@ -925,6 +992,7 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+      )}
 
       <TransactionDrillDown
         filter={drillDown}
