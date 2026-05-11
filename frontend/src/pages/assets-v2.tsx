@@ -95,6 +95,17 @@ function AssetIcon({
           src={logoUrl!}
           alt=""
           className="w-full h-full object-contain"
+          // Lazy + async decoding + low priority: every asset card asks the
+          // browser for its favicon (often t0.gstatic.com/faviconV2 for
+          // yfinance-quoted tickers). On a 145-asset portfolio that was 145
+          // serial requests gated by the per-host connection cap (~6 on
+          // HTTP/1.1), pushing first-paint to ~55s. Lazy defers the off-
+          // screen ones until the user scrolls; decoding=async keeps the
+          // main thread responsive while images render; fetchpriority=low
+          // tells the browser these are decorations, not critical content.
+          loading="lazy"
+          decoding="async"
+          fetchPriority="low"
           onError={() => setErrored(true)}
         />
       ) : (
