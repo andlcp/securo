@@ -6,7 +6,7 @@ import { format } from 'date-fns'
 import { ptBR, enUS } from 'date-fns/locale'
 import { dashboard, transactions, budgets, categories as categoriesApi, accounts as accountsApi, goals as goalsApi, portfolioTimeseries, investmentBenchmarks } from '@/lib/api'
 import type { PortfolioPoint } from '@/lib/api'
-import { MonthlyGrowthChart } from '@/components/monthly-growth-chart'
+import { AssetAllocationTable } from '@/components/asset-allocation-table'
 import { ResultadoTable } from '@/components/resultado-table'
 import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -107,15 +107,10 @@ export default function DashboardPage() {
     queryFn: () => dashboard.summary(monthParam),
   })
 
-  // Investment timeseries — feed the monthly growth bar chart + Gorila-style
-  // Resultado table that now live on the dashboard. Both want lifetime data
-  // and ignore the period selector at the top of the page (which is about
-  // expense tracking, not investments).
-  const { data: monthlyPortfolio } = useQuery<PortfolioPoint[]>({
-    queryKey: ['dashboard', 'portfolio-monthly-lifetime'],
-    queryFn: () => portfolioTimeseries.series({ sinceStart: true, granularity: 'monthly' }),
-    staleTime: 1000 * 60 * 5,
-  })
+  // Investment timeseries — only daily-lifetime still needed by the
+  // Gorila-style Resultado table at the bottom of the page. The monthly
+  // bar chart was replaced by the AssetAllocationTable widget so its
+  // dedicated query was removed.
   const { data: dailyPortfolio } = useQuery<PortfolioPoint[]>({
     queryKey: ['dashboard', 'portfolio-daily-lifetime'],
     queryFn: () => portfolioTimeseries.series({ sinceStart: true, granularity: 'daily' }),
@@ -547,23 +542,13 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Crescimento mensal do patrimônio (Aportes + Ganho de capital) */}
-      <div className="bg-card rounded-xl border border-border shadow-sm mb-5">
-        <div className="px-5 py-4 border-b border-border">
-          <p className="text-sm font-semibold text-foreground">Crescimento mensal do patrimônio</p>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Últimos 24 meses · Aportes (entrada de capital) + Ganho de capital (variação de valor dos ativos)
-          </p>
-        </div>
-        <div className="p-4">
-          <MonthlyGrowthChart
-            monthlyData={monthlyPortfolio}
-            currency={primaryCurrency}
-            locale={locale}
-            mask={mask}
-            windowMonths={24}
-          />
-        </div>
+      {/* Asset allocation targets — "Onde Aportar". Replaces the
+          monthly-growth bar chart that used to live here. Global view:
+          aggregates every wallet (Anderson + Camila + future), every
+          asset class. Goal-driven: user defines target % per bucket
+          and the widget computes deficit per class. */}
+      <div className="mb-5">
+        <AssetAllocationTable locale={locale} mask={mask} />
       </div>
 
       {/* Resultado financeiro e rentabilidade — same Gorila-style table that

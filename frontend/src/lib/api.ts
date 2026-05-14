@@ -749,6 +749,41 @@ export const assetTransactions = {
   },
 }
 
+// Asset allocation targets (the "Onde Aportar" widget on the dashboard).
+// Global view — sums every wallet, every asset class, classified into 8
+// buckets the user defines targets for. See backend
+// asset_allocation_service for the bucket math.
+export interface AssetAllocationCategory {
+  id: string
+  label: string
+  total_brl: number
+  current_pct: number
+  target_pct: number
+  delta_pp: number
+  deficit_brl: number
+  deficit_share_pct: number
+}
+
+export interface AssetAllocationResponse {
+  primary_currency: string
+  total_brl: number
+  categories: AssetAllocationCategory[]
+  targets_sum: number
+  deficit_total_brl: number
+}
+
+export const assetAllocation = {
+  get: async (): Promise<AssetAllocationResponse> => {
+    const { data } = await api.get('/asset-allocation')
+    return data
+  },
+  saveTargets: async (targets: Record<string, number>): Promise<AssetAllocationResponse> => {
+    const { data } = await api.put('/asset-allocation/targets', { targets })
+    return data
+  },
+}
+
+
 // Investment Benchmarks
 export const investmentBenchmarks = {
   series: async (
