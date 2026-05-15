@@ -22,11 +22,12 @@ clobbering the older `portfolio_snapshot_service` which handles the
 offline-pipeline-import flow (separate concern).
 """
 import logging
+import time as _time
 import uuid
 from datetime import date, timedelta
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +35,55 @@ from app.models.portfolio_daily_snapshot import PortfolioDailySnapshot
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
+
+
+# Per-user snapshot "version stamp" — the MAX(computed_at) across the
+# user's snapshot rows. Used by the timeseries cache to detect when an
+# out-of-process rebuild has happened (e.g. a maintenance script running
+# `rebuild_daily_snapshots` directly in psql) and silently invalidate
+# the backend's in-memory result cache without needing a Redis pub/sub.
+#
+# Cached in-process for 5 seconds so the lookup doesn't add a round-trip
+# to every timeseries request; that window is short enough that
+# real-world latency between an external rebuild and the next page load
+# already exceeds it.
+_SNAPSHOT_VERSION_CACHE: dict[uuid.UUID, tuple[float, str]] = {}
+_SNAPSHOT_VERSION_TTL_S = 5.0
+
+
+async def get_snapshot_version(
+    session: AsyncSession, user_id: uuid.UUID,
+) -> str:
+    """Return a stable, monotonic-ish version stamp for the user's
+    snapshot table. Two snapshots with the same MAX(computed_at) are
+    treated as identical for caching purposes.
+
+    Empty snapshots map to the sentinel "none" so a first-read cache
+    entry written before any rebuild still busts after the rebuild
+    fills the table.
+    """
+    now = _time.monotonic()
+    cached = _SNAPSHOT_VERSION_CACHE.get(user_id)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    latest = await session.scalar(
+        select(func.max(PortfolioDailySnapshot.computed_at))
+        .where(PortfolioDailySnapshot.user_id == user_id)
+    )
+    version = latest.isoformat() if latest is not None else "none"
+    _SNAPSHOT_VERSION_CACHE[user_id] = (now + _SNAPSHOT_VERSION_TTL_S, version)
+    return version
+
+
+def invalidate_snapshot_version_cache(user_id: Optional[uuid.UUID] = None) -> None:
+    """Drop the cached version stamp so the next read hits the DB.
+    Called from the same paths that mutate snapshots in-process so the
+    next request immediately sees the new version without waiting on
+    the 5s TTL."""
+    if user_id is None:
+        _SNAPSHOT_VERSION_CACHE.clear()
+    else:
+        _SNAPSHOT_VERSION_CACHE.pop(user_id, None)
 
 
 async def read_daily_snapshot_rows(
@@ -90,6 +140,9 @@ async def write_daily_snapshot_rows(
     )
     await session.execute(stmt)
     await session.commit()
+    # Bust the version cache so callers re-read the new MAX(computed_at)
+    # on their next lookup rather than waiting for the 5s TTL.
+    invalidate_snapshot_version_cache(user_id)
 
 
 async def invalidate_daily_snapshots(
@@ -112,6 +165,7 @@ async def invalidate_daily_snapshots(
         stmt = stmt.where(PortfolioDailySnapshot.date >= from_date)
     result = await session.execute(stmt)
     await session.commit()
+    invalidate_snapshot_version_cache(user_id)
     return result.rowcount or 0
 
 

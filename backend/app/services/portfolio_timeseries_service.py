@@ -153,7 +153,8 @@ _ts_cache: dict[tuple, tuple[float, list]] = {}
 
 
 def _ts_cache_key(user_id, months, since_start, asset_ids, asset_classes,
-                  group_ids, granularity, date_from, date_to) -> tuple:
+                  group_ids, granularity, date_from, date_to,
+                  snapshot_version=None) -> tuple:
     return (
         str(user_id),
         months,
@@ -164,6 +165,7 @@ def _ts_cache_key(user_id, months, since_start, asset_ids, asset_classes,
         granularity,
         date_from.isoformat() if date_from else None,
         date_to.isoformat() if date_to else None,
+        snapshot_version,
     )
 
 
@@ -395,11 +397,23 @@ async def get_timeseries(session: AsyncSession, user: User,
     # cashflow heuristic for Tesouro Selic and CDBs without transactions).
     await _ensure_cdi_loaded()
 
-    # Cache lookup before any DB work. Same (user, filters, window) hit
-    # within the TTL gets the previous walk's result instantly.
+    # Snapshot version stamp goes into the cache key. When an out-of-
+    # process rebuild updates the snapshots (maintenance scripts,
+    # nightly Celery beat, etc.), this version changes and every
+    # previously-cached entry for this user is silently bypassed —
+    # without needing to fan an invalidation signal across processes.
+    from app.services.portfolio_daily_snapshot_service import (
+        get_snapshot_version,
+    )
+    snapshot_version = await get_snapshot_version(session, user.id)
+
+    # Cache lookup before any further DB work. Same (user, filters,
+    # window, snapshot version) hit within the TTL gets the previous
+    # walk's result instantly.
     cache_key = _ts_cache_key(
         user.id, months, since_start, asset_ids, asset_classes,
         group_ids, granularity, date_from, date_to,
+        snapshot_version,
     )
     now_mono = _time.monotonic()
     cached = _ts_cache.get(cache_key)
