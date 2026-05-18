@@ -527,9 +527,20 @@ async def _compute_timeseries_uncached(session: AsyncSession, user: User,
                          granularity: str = "monthly",
                          date_from: Optional[date] = None,
                          date_to: Optional[date] = None,
+                         initial_cum: float = 1.0,
                          ) -> list[dict]:
     """The original `get_timeseries` body, extracted so it can be called
-    from the snapshot rebuilder without re-entering the cache layer."""
+    from the snapshot rebuilder without re-entering the cache layer.
+
+    `initial_cum` seeds the cumulative TWR multiplier. Defaults to 1.0
+    (chart starts at +0 %), which is correct for windowed live calls
+    (1M, 3M, "desde o início") and for cold full rebuilds. The
+    incremental snapshot rebuilder passes `1.0 + prev_twr_cum` so the
+    newly-computed rows extend the existing series instead of
+    restarting at zero — without this, each midnight rebuild plants a
+    visual cliff in the rentabilidade chart at the join between the
+    last cached day and today's freshly-computed row.
+    """
     await _ensure_cdi_loaded()
     user_ccy = await _user_primary_currency(session, user)
     assets = await _load_assets(session, user.id, asset_ids, asset_classes,
@@ -777,7 +788,7 @@ async def _compute_timeseries_uncached(session: AsyncSession, user: User,
         return latest_amount
 
     out: list[dict] = []
-    cum = 1.0
+    cum = initial_cum
 
     if granularity == "daily":
         # Daily mode: walk one row per calendar day. Useful for short

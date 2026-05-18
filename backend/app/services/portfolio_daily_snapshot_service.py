@@ -195,6 +195,15 @@ async def rebuild_daily_snapshots(
     recomputed; the rows are upserted, preserving older snapshots. Used
     after partial invalidations so we don't redo work that's still valid.
 
+    Incremental rebuilds seed `cum` from the snapshot for `from_date - 1
+    day` so the newly-computed `twr_cum` extends the existing curve
+    instead of restarting at zero. Without this seed, every midnight
+    rebuild plants a vertical cliff in the rentabilidade chart at the
+    boundary between yesterday (cached, cum chained from start) and
+    today (freshly computed, cum reset to 1.0). The bug surfaced as
+    "queda súbita de -45 % no fim do gráfico" reported repeatedly by
+    the user; data is fine, only the displayed TWR drops.
+
     Returns number of daily rows written.
     """
     # Local import to break the circular dep — portfolio_timeseries_service
@@ -210,11 +219,45 @@ async def rebuild_daily_snapshots(
             granularity="daily",
         )
     else:
+        initial_cum = 1.0
+        prev_day = from_date - timedelta(days=1)
+        prev_payload = (await session.execute(
+            select(PortfolioDailySnapshot.payload).where(
+                PortfolioDailySnapshot.user_id == user.id,
+                PortfolioDailySnapshot.date == prev_day,
+            )
+        )).scalar_one_or_none()
+        if prev_payload is not None:
+            prev_twr = prev_payload.get("twr_cum")
+            if prev_twr is not None:
+                try:
+                    initial_cum = 1.0 + float(prev_twr)
+                except (TypeError, ValueError):
+                    # Corrupted payload — fall back to a full rebuild
+                    # rather than emitting a broken cliff again.
+                    logger.warning(
+                        "Snapshot %s payload missing/invalid twr_cum; "
+                        "falling back to full rebuild for user=%s",
+                        prev_day, user.id,
+                    )
+                    rows = await _compute_timeseries_uncached(
+                        session, user,
+                        since_start=True,
+                        granularity="daily",
+                    )
+                    await write_daily_snapshot_rows(session, user.id, rows)
+                    logger.info(
+                        "Rebuilt portfolio daily snapshots (fallback full): "
+                        "user=%s rows=%d",
+                        user.id, len(rows),
+                    )
+                    return len(rows)
         rows = await _compute_timeseries_uncached(
             session, user,
             date_from=from_date,
             date_to=date.today(),
             granularity="daily",
+            initial_cum=initial_cum,
         )
     await write_daily_snapshot_rows(session, user.id, rows)
     logger.info(
