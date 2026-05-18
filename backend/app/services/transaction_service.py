@@ -1,6 +1,7 @@
 import re
 import uuid
 from datetime import date
+from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import select, func, or_, update
@@ -11,8 +12,12 @@ from app.models.transaction import Transaction
 from app.models.transaction_attachment import TransactionAttachment
 from app.models.account import Account
 from app.models.bank_connection import BankConnection
+from app.models.category import Category
+from app.models.group import Group, GroupMember
 from app.models.payee import Payee
 from app.schemas.transaction import TransactionCreate, TransactionUpdate, TransferCreate
+from app.schemas.transaction_split import TransactionSplitInput, TransactionSplitsInput
+from app.services import split_service
 from app.services.credit_card_service import apply_effective_date
 from app.services.rule_service import apply_rules_to_transaction
 from app.services.fx_rate_service import stamp_primary_amount, convert as fx_convert
@@ -65,8 +70,17 @@ async def get_transactions(
     accounting_mode: Optional[str] = None,
     tags: Optional[list[str]] = None,
     bill_id: Optional[uuid.UUID] = None,
+    group_id: Optional[uuid.UUID] = None,
     unbilled_only: bool = False,
-) -> tuple[list[Transaction], int]:
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
+    transaction_ids: Optional[list[uuid.UUID]] = None,
+    currency: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+    account_types: Optional[list[str]] = None,
+    include_summary: bool = False,
+) -> tuple[list[Transaction], int, Optional[dict]]:
     # In "accrual" mode, bucket/order by effective_date so list filters
     # line up with the cash-flow view used by the dashboard and reports.
     # When the user has set a manual cycle override (effective_bill_date)
@@ -76,6 +90,20 @@ async def get_transactions(
         Transaction.effective_bill_date,
         Transaction.effective_date if accounting_mode == "accrual" else Transaction.date,
     )
+
+    # Group-scope visibility: when the caller filters by a group they
+    # have access to (owner or linked member), bypass the user-owns-it
+    # check and return that group's transactions instead. Lets a linked
+    # member view the owner's transactions for shared groups.
+    use_group_scope = False
+    if group_id is not None:
+        from app.services.group_service import get_group_visible
+
+        accessible = await get_group_visible(session, group_id, user_id)
+        if accessible is None:
+            return [], 0
+        use_group_scope = True
+
     # CC bill-view date column: when the caller asks "what's in this bill?"
     # (bill_id passed, or in-progress cycle via unbilled_only), the answer
     # is bank-truth — the charges that fell in the cycle by purchase date —
@@ -90,20 +118,59 @@ async def get_transactions(
     )
     in_bill_view = bill_id is not None or unbilled_only
     filter_date_col = bill_view_date_col if in_bill_view else date_col
-    # Base query: user's own transactions (manual or via account)
+    # Base query: user's own transactions (manual or via account), or
+    # group-scoped when `group_id` resolves to a visible group.
     base_query = (
         select(Transaction)
         .outerjoin(Account)
         .outerjoin(BankConnection)
         .outerjoin(Payee, Transaction.payee_id == Payee.id)
-        .where(
+        .outerjoin(Category, Transaction.category_id == Category.id)
+        .options(
+            selectinload(Transaction.category),
+            selectinload(Transaction.account),
+            selectinload(Transaction.payee_entity),
+            selectinload(Transaction.splits),
+        )
+    )
+    if transaction_ids:
+        base_query = base_query.where(Transaction.id.in_(transaction_ids))
+    if use_group_scope:
+        from app.models.group import GroupMember
+        from app.models.transaction_split import TransactionSplit
+
+        member_ids_subq = select(GroupMember.id).where(GroupMember.group_id == group_id)
+        tx_ids_subq = (
+            select(TransactionSplit.transaction_id)
+            .where(TransactionSplit.group_member_id.in_(member_ids_subq))
+            .distinct()
+        )
+        base_query = base_query.where(Transaction.id.in_(tx_ids_subq))
+    else:
+        # Default scope: own transactions PLUS transactions shared
+        # with the user via group splits. Shared rows surface in the
+        # viewer's ledger so their `Concert Tickets · share $90` shows
+        # up alongside their own expenses; account-balance integrity
+        # is preserved because the transaction's account_id still
+        # belongs to the original owner.
+        from app.models.group import GroupMember
+        from app.models.transaction_split import TransactionSplit
+
+        viewer_member_ids = select(GroupMember.id).where(
+            GroupMember.linked_user_id == user_id
+        )
+        shared_tx_ids = (
+            select(TransactionSplit.transaction_id)
+            .where(TransactionSplit.group_member_id.in_(viewer_member_ids))
+            .distinct()
+        )
+        base_query = base_query.where(
             or_(
                 Transaction.user_id == user_id,
                 BankConnection.user_id == user_id,
+                Transaction.id.in_(shared_tx_ids),
             )
         )
-        .options(selectinload(Transaction.category), selectinload(Transaction.account), selectinload(Transaction.payee_entity))
-    )
 
     # Exclude opening_balance transactions from the normal list unless explicitly requested
     if not include_opening_balance:
@@ -130,6 +197,22 @@ async def get_transactions(
         base_query = base_query.where(Transaction.transfer_pair_id.is_(None))
     if txn_type:
         base_query = base_query.where(Transaction.type == txn_type)
+    if currency:
+        # Native-currency filter — match the column verbatim. Lets agents
+        # answer "do I have any EUR transactions?" without text-searching
+        # the description column.
+        base_query = base_query.where(Transaction.currency == currency.upper())
+    if min_amount is not None or max_amount is not None:
+        # Amount filters operate on the primary-currency value when
+        # available so cross-currency totals make sense; fall back to the
+        # native amount on rows that haven't been stamped yet.
+        amount_expr = func.coalesce(Transaction.amount_primary, Transaction.amount)
+        if min_amount is not None:
+            base_query = base_query.where(amount_expr >= min_amount)
+        if max_amount is not None:
+            base_query = base_query.where(amount_expr <= max_amount)
+    if account_types:
+        base_query = base_query.where(Account.type.in_(account_types))
     # Bill-driven filter: when the caller passes bill_id, include
     #   (a) txs linked to this bill via Pluggy's billId mapping (handles
     #       charges the bank rolled into a bill whose nominal range doesn't
@@ -165,9 +248,18 @@ async def get_transactions(
                 # because pending txs there have effective_date pointing
                 # forward to a later bill (ingrid's case stays clean).
                 # Issue #92, abdalanervoso's empty-May.
+                #
+                # Manual override (effective_bill_date) bypasses the
+                # exclusion entirely: the user has hand-corrected the
+                # bucketing and that signal beats both cycle-math
+                # classification and sync-pending caution. Without this
+                # carve-out, a pending tx whose override doesn't snap to
+                # an existing bill's due_date (so bill_id stays null)
+                # gets filtered out of every closed-bill view (issue #162).
                 _not(_and(
                     Transaction.source == "sync",
                     Transaction.status == "pending",
+                    Transaction.effective_bill_date.is_(None),
                     Transaction.effective_date != active_due_subq,
                 )),
             ]
@@ -186,10 +278,32 @@ async def get_transactions(
         # /transactions list and other generic callers leave it False.
         if unbilled_only:
             base_query = base_query.where(Transaction.bill_id.is_(None))
-        if from_date:
-            base_query = base_query.where(filter_date_col >= from_date)
-        if to_date:
-            base_query = base_query.where(filter_date_col <= to_date)
+        # Forward-pointing override catch (issue #162): a manual override
+        # pointing past this cycle's right edge (e.g., user wants the tx
+        # on a future bill that doesn't exist yet) won't fit any closed
+        # bill window either — past bills are by definition behind us.
+        # Honor the user's explicit intent by including those orphans in
+        # the in-progress cycle so the tx stays visible until a real bill
+        # eventually anchors it. Limited to `unbilled_only` so the global
+        # /transactions list isn't reshaped by the same rule.
+        if unbilled_only and to_date is not None:
+            from sqlalchemy import and_ as _and
+            window_clauses = []
+            if from_date:
+                window_clauses.append(filter_date_col >= from_date)
+            window_clauses.append(filter_date_col <= to_date)
+            base_query = base_query.where(or_(
+                _and(*window_clauses),
+                _and(
+                    Transaction.effective_bill_date.is_not(None),
+                    Transaction.effective_bill_date > to_date,
+                ),
+            ))
+        else:
+            if from_date:
+                base_query = base_query.where(filter_date_col >= from_date)
+            if to_date:
+                base_query = base_query.where(filter_date_col <= to_date)
     if search:
         term = f"%{search}%"
         base_query = base_query.where(
@@ -221,11 +335,69 @@ async def get_transactions(
     count_query = select(func.count()).select_from(base_query.subquery())
     total = await session.scalar(count_query)
 
+    # Filtered summary (issue #185): income / expense / net across ALL
+    # rows matching the active filters — not just the current page — so
+    # the UI can show an accurate total even when results span pages.
+    # Cross-currency rows are normalized to their primary-currency amount
+    # when stamped (coalesce → native amount as fallback for unstamped
+    # rows). Computed before pagination so it covers the whole result set.
+    summary: Optional[dict] = None
+    if include_summary:
+        summary_subq = base_query.subquery()
+        amount_norm = func.coalesce(
+            summary_subq.c.amount_primary, summary_subq.c.amount
+        )
+        summary_rows = await session.execute(
+            select(
+                summary_subq.c.type,
+                func.coalesce(func.sum(func.abs(amount_norm)), 0),
+            ).group_by(summary_subq.c.type)
+        )
+        income = Decimal("0")
+        expense = Decimal("0")
+        for row_type, row_total in summary_rows:
+            if row_type == "credit":
+                income = Decimal(str(row_total or 0))
+            elif row_type == "debit":
+                expense = Decimal(str(row_total or 0))
+        summary = {
+            "income": income,
+            "expense": expense,
+            "net": income - expense,
+        }
+
     # Apply ordering (and pagination unless skipped). Bill-view callers
     # order by purchase date so the in-cycle list matches the bank's own
     # statement ordering regardless of accounting mode.
-    order_col = bill_view_date_col if in_bill_view else date_col
-    query = base_query.order_by(order_col.desc(), Transaction.created_at.desc())
+    default_order_col = bill_view_date_col if in_bill_view else date_col
+    sort_columns: dict[str, object] = {
+        # `date` is the cycle/accrual-aware column the UI lists use so its
+        # ordering matches the cash-flow & dashboard views.
+        "date": default_order_col,
+        # `transaction_date` orders strictly by Transaction.date (purchase
+        # date), regardless of effective_bill_date. Useful for "what's my
+        # most recent transaction?" where credit-card bill projections
+        # would otherwise float old purchases to the top because their
+        # bill due date is in the future.
+        "transaction_date": Transaction.date,
+        "amount": Transaction.amount,
+        "description": Transaction.description,
+        "payee": Payee.name,
+        "category": Category.name,
+        "account": Account.name,
+        "type": Transaction.type,
+        "status": Transaction.status,
+        "created_at": Transaction.created_at,
+    }
+    chosen_col = sort_columns.get(sort_by) if sort_by else None
+    if chosen_col is None:
+        # Default: by date desc, with created_at as tiebreaker.
+        query = base_query.order_by(default_order_col.desc(), Transaction.created_at.desc())
+    else:
+        direction = (chosen_col.asc() if sort_dir == "asc" else chosen_col.desc())
+        # Always tie-break on date desc + created_at desc so equal values
+        # stay in a sensible order (e.g. multiple txs with the same amount).
+        query = base_query.order_by(direction, default_order_col.desc(), Transaction.created_at.desc())
     if not skip_pagination:
         query = query.offset((page - 1) * limit).limit(limit)
 
@@ -248,7 +420,139 @@ async def get_transactions(
             tx.attachment_count = counts.get(tx.id, 0)
             tx.payee_name = tx.payee_entity.name if tx.payee_entity else None
 
-    return transactions, total or 0
+        # Tag shared rows with the viewer's share + the source group.
+        # Owned rows stay as-is. We pre-compute the viewer's linked
+        # member ids → group ids once, then look up each transaction's
+        # split that targets one of those member ids.
+        # Run for both default and group-scoped queries: when filtering
+        # by `group_id`, a linked member sees the owner's transactions
+        # and the frontend needs `is_shared` to lock them from edits.
+        await _tag_shared_view(session, transactions, user_id)
+
+    return transactions, total or 0, summary
+
+
+async def _tag_shared_view(
+    session: AsyncSession,
+    transactions: list[Transaction],
+    user_id: uuid.UUID,
+) -> None:
+    """Annotate transactions with split metadata for the viewer:
+
+    - `is_shared`: true when the viewer doesn't own the parent but is a
+      linked split member.
+    - `viewer_share`: the viewer's share amount (only when shared).
+    - `group_id`: the group the splits belong to. Set for both owner
+      and linked-member views so the UI can show a group badge on
+      either side.
+    - `parent_owner_name`: friendly name of the parent owner; only
+      meaningful for shared rows.
+
+    Mutates the in-memory objects so Pydantic's from_attributes picks
+    them up directly.
+    """
+    from app.models.group import GroupMember
+
+    member_rows = await session.execute(
+        select(GroupMember.id, GroupMember.group_id).where(
+            GroupMember.linked_user_id == user_id
+        )
+    )
+    member_to_group = {row.id: row.group_id for row in member_rows}
+
+    # Map every split-member that appears in this batch → group, so we
+    # can also tag owner-side transactions with their group. (The
+    # viewer-linked map above only covers the viewer's own member ids.)
+    all_split_member_ids: set[uuid.UUID] = set()
+    for tx in transactions:
+        for s in tx.splits or []:
+            all_split_member_ids.add(s.group_member_id)
+    split_member_to_group: dict[uuid.UUID, uuid.UUID] = {}
+    if all_split_member_ids:
+        rows = await session.execute(
+            select(GroupMember.id, GroupMember.group_id).where(
+                GroupMember.id.in_(all_split_member_ids)
+            )
+        )
+        split_member_to_group = {row.id: row.group_id for row in rows}
+
+    if not member_to_group and not split_member_to_group:
+        for tx in transactions:
+            tx.is_shared = False
+            tx.viewer_share = None
+            tx.group_id = None
+            tx.parent_owner_name = None
+        return
+
+    # Per-group lookups: the `is_self` member represents the parent
+    # owner / payer. We need this for ALL groups touching this batch,
+    # not just the viewer-linked ones — owners need their own
+    # self-member id to compute their share. Cached once per call.
+    all_group_ids = set(member_to_group.values()) | set(split_member_to_group.values())
+    self_member_rows = await session.execute(
+        select(GroupMember.id, GroupMember.group_id, GroupMember.name).where(
+            GroupMember.group_id.in_(all_group_ids),
+            GroupMember.is_self.is_(True),
+        )
+    )
+    self_member_id_by_group: dict[uuid.UUID, uuid.UUID] = {}
+    owner_name_by_group: dict[uuid.UUID, str] = {}
+    for row in self_member_rows:
+        self_member_id_by_group[row.group_id] = row.id
+        owner_name_by_group[row.group_id] = row.name
+
+    for tx in transactions:
+        if tx.user_id == user_id:
+            # Owner of the parent — not "shared" but still tag the
+            # group_id so the UI can show a group badge for owners.
+            # Also populate viewer_share with the owner's *own* split
+            # share when they participate (is_self member appears in the
+            # splits): the UI surfaces "your share: $X" alongside the
+            # full amount that hit the account.
+            tx.is_shared = False
+            tx.parent_owner_name = None
+            owner_group_id: Optional[uuid.UUID] = None
+            for s in tx.splits or []:
+                gid = split_member_to_group.get(s.group_member_id)
+                if gid is not None:
+                    owner_group_id = gid
+                    break
+            tx.group_id = owner_group_id
+            self_mid = (
+                self_member_id_by_group.get(owner_group_id)
+                if owner_group_id is not None
+                else None
+            )
+            owner_split = (
+                next(
+                    (s for s in tx.splits or [] if s.group_member_id == self_mid),
+                    None,
+                )
+                if self_mid is not None
+                else None
+            )
+            tx.viewer_share = owner_split.share_amount if owner_split else None
+            continue
+        # The viewer doesn't own this; find their split share.
+        match = next(
+            (s for s in (tx.splits or []) if s.group_member_id in member_to_group),
+            None,
+        )
+        if match is None:
+            tx.is_shared = False
+            tx.viewer_share = None
+            tx.group_id = None
+            tx.parent_owner_name = None
+        else:
+            tx.is_shared = True
+            tx.viewer_share = match.share_amount
+            tx.group_id = member_to_group[match.group_member_id]
+            tx.parent_owner_name = owner_name_by_group.get(tx.group_id)
+            # Hide attachment count on shared rows — Bob can see the
+            # paperclip but the API would 403 the actual download
+            # (attachment auth is owner-only). Avoid the dead-end UX
+            # by not advertising files he can't open.
+            tx.attachment_count = 0
 
 
 async def get_transaction(
@@ -265,7 +569,11 @@ async def get_transaction(
                 BankConnection.user_id == user_id,
             ),
         )
-        .options(selectinload(Transaction.category), selectinload(Transaction.payee_entity))
+        .options(
+            selectinload(Transaction.category),
+            selectinload(Transaction.payee_entity),
+            selectinload(Transaction.splits),
+        )
     )
     transaction = result.scalar_one_or_none()
     if transaction:
@@ -328,8 +636,11 @@ async def create_transaction(
     else:
         await stamp_primary_amount(session, user_id, transaction)
 
+    if data.splits is not None:
+        await split_service.replace_splits(session, transaction, data.splits, user_id)
+
     await session.commit()
-    await session.refresh(transaction, ["category"])
+    await session.refresh(transaction, ["category", "splits"])
     return transaction
 
 
@@ -477,6 +788,7 @@ async def get_transfer_candidates(
             selectinload(Transaction.category),
             selectinload(Transaction.account),
             selectinload(Transaction.payee_entity),
+            selectinload(Transaction.splits),
         )
     )
     candidates = list(result.scalars().all())
@@ -629,6 +941,12 @@ async def update_transaction(
         return None
 
     update_data = data.model_dump(exclude_unset=True)
+    apply_to_transfer_pair = update_data.pop("apply_to_transfer_pair", False)
+
+    # Splits are processed separately after column updates land so the
+    # service can validate against the new amount.
+    splits_payload = data.splits if "splits" in update_data else None
+    update_data.pop("splits", None)
 
     # Verify the new account belongs to the user before touching the row.
     # When changing the account on one side of a transfer pair, refuse to
@@ -693,7 +1011,8 @@ async def update_transaction(
 
     # Cascade changes to paired transfer transaction
     cascade_fields = {"amount", "date", "description", "notes"}
-    if transaction.transfer_pair_id and (cascade_fields & update_data.keys()):
+    should_cascade_category = apply_to_transfer_pair and "category_id" in update_data
+    if transaction.transfer_pair_id and ((cascade_fields & update_data.keys()) or should_cascade_category):
         paired = await session.execute(
             select(Transaction).where(
                 Transaction.transfer_pair_id == transaction.transfer_pair_id,
@@ -702,6 +1021,8 @@ async def update_transaction(
         )
         paired_tx = paired.scalar_one_or_none()
         if paired_tx:
+            if should_cascade_category:
+                paired_tx.category_id = transaction.category_id
             for key in cascade_fields & update_data.keys():
                 if key == "amount" and paired_tx.currency != transaction.currency:
                     from decimal import Decimal
@@ -719,8 +1040,11 @@ async def update_transaction(
                 paired_account = await session.get(Account, paired_tx.account_id)
                 apply_effective_date(paired_tx, paired_account)
 
+    if splits_payload is not None:
+        await split_service.replace_splits(session, transaction, splits_payload, user_id)
+
     await session.commit()
-    await session.refresh(transaction)
+    await session.refresh(transaction, ["splits"])
     return transaction
 
 
@@ -831,6 +1155,99 @@ async def bulk_remove_tags(
 
     await session.commit()
     return touched
+
+
+async def bulk_add_to_group(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    transaction_ids: list[uuid.UUID],
+    group_id: uuid.UUID,
+    share_type: str = "equal",
+    member_splits: Optional[list[TransactionSplitInput]] = None,
+) -> dict[str, int]:
+    """Apply the same group-split configuration to every selected transaction.
+
+    Supports `share_type` of "equal" or "percent" only — exact amounts
+    can't generalize across transactions of different totals.
+
+    Conservative semantics (issue #156): transactions that are transfers
+    or already have splits are skipped — never overwritten — so the
+    operation can't destroy prior splitting work.
+    """
+    if share_type not in ("equal", "percent"):
+        raise ValueError(
+            "Bulk add-to-group only supports share_type 'equal' or 'percent' — "
+            "use the per-transaction dialog for exact amounts"
+        )
+
+    if not transaction_ids:
+        return {"updated": 0, "skipped": 0}
+
+    # The caller may own the group OR be a linked member of it.
+    linked_group_ids = (
+        select(GroupMember.group_id)
+        .where(GroupMember.linked_user_id == user_id)
+        .distinct()
+    )
+    group_result = await session.execute(
+        select(Group).where(
+            Group.id == group_id,
+            or_(Group.user_id == user_id, Group.id.in_(linked_group_ids)),
+        )
+    )
+    group = group_result.scalar_one_or_none()
+    if group is None:
+        raise ValueError("Group not found")
+
+    members_result = await session.execute(
+        select(GroupMember).where(GroupMember.group_id == group_id)
+    )
+    members = members_result.scalars().all()
+    if not members:
+        raise ValueError("Group has no members")
+
+    valid_member_ids = {m.id for m in members}
+
+    # If the caller didn't specify, default to all members (the previous
+    # behavior). Otherwise honor the subset they chose.
+    if not member_splits:
+        chosen = [TransactionSplitInput(group_member_id=m.id) for m in members]
+    else:
+        chosen = list(member_splits)
+
+    if not chosen:
+        raise ValueError("At least one member must be selected")
+
+    for entry in chosen:
+        if entry.group_member_id not in valid_member_ids:
+            raise ValueError("One or more split members not found")
+
+    payload = TransactionSplitsInput(share_type=share_type, splits=chosen)
+
+    txs_result = await session.execute(
+        select(Transaction)
+        .where(
+            Transaction.id.in_(transaction_ids),
+            Transaction.user_id == user_id,
+        )
+        .options(selectinload(Transaction.splits))
+    )
+    txs = txs_result.scalars().all()
+
+    updated = 0
+    skipped = 0
+    for tx in txs:
+        if tx.transfer_pair_id is not None or tx.splits:
+            skipped += 1
+            continue
+        await split_service.replace_splits(session, tx, payload, user_id)
+        updated += 1
+
+    # Account for ids that didn't match (wrong user, deleted, etc.)
+    skipped += len(set(transaction_ids)) - len(txs)
+
+    await session.commit()
+    return {"updated": updated, "skipped": skipped}
 
 
 async def delete_transaction(

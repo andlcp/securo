@@ -23,9 +23,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { CategorySelect } from '@/components/category-select'
 import { TransactionAttachments } from '@/components/transaction-attachments'
 import type { AttachmentPreview } from '@/components/transaction-attachments'
-import type { Transaction, RecurringTransaction } from '@/types'
+import { TransactionSplitsSection } from '@/components/transaction-splits-section'
+import type { Transaction, RecurringTransaction, TransactionSplitsInput, CategoryGroup, Category } from '@/types'
 import { toast } from 'sonner'
 
 export type SaveAction = 'save' | 'saveAndNew' | 'saveAndDuplicate'
@@ -63,6 +65,7 @@ export function TransactionDialog({
   onClose,
   transaction,
   categories,
+  categoryGroups,
   accounts,
   recurringMatch,
   onSave,
@@ -77,7 +80,8 @@ export function TransactionDialog({
   open: boolean
   onClose: () => void
   transaction: Transaction | null
-  categories: { id: string; name: string; icon: string }[]
+  categories: Category[]
+  categoryGroups: CategoryGroup[]
   accounts: { id: string; name: string; type?: string }[]
   recurringMatch?: RecurringTransaction
   onSave: (data: Partial<Transaction>, recurringData?: { frequency: string; end_date?: string }, pendingFiles?: File[], action?: SaveAction) => void
@@ -147,6 +151,7 @@ export function TransactionDialog({
               transaction={transaction}
               duplicateDraft={duplicateDraft}
               categories={categories}
+              categoryGroups={categoryGroups}
               accounts={accounts}
               recurringMatch={recurringMatch}
               onSave={onSave}
@@ -262,6 +267,7 @@ function TransactionForm({
   transaction,
   duplicateDraft,
   categories,
+  categoryGroups,
   accounts,
   recurringMatch,
   onSave,
@@ -277,7 +283,8 @@ function TransactionForm({
 }: {
   transaction: Transaction | null
   duplicateDraft: Partial<Transaction> | null
-  categories: { id: string; name: string; icon: string }[]
+  categories: Category[]
+  categoryGroups: CategoryGroup[]
   accounts: { id: string; name: string; type?: string }[]
   recurringMatch?: RecurringTransaction
   onSave: (data: Partial<Transaction>, recurringData?: { frequency: string; end_date?: string }, pendingFiles?: File[], action?: SaveAction) => void
@@ -326,6 +333,30 @@ function TransactionForm({
   const [isRecurring, setIsRecurring] = useState(false)
   const [frequency, setFrequency] = useState<'monthly' | 'weekly' | 'yearly'>('monthly')
   const [endDate, setEndDate] = useState('')
+  // Optional split-with-group payload. `null` = leave splits as-is on
+  // update, or no splits on create. The dedicated section component
+  // owns its own UI state and surfaces a normalized payload here.
+  // Seeded from the transaction's existing splits so the edit dialog
+  // round-trips them rather than appearing empty.
+  const [splitsValid, setSplitsValid] = useState(true)
+  const [splits, setSplits] = useState<TransactionSplitsInput | null>(() => {
+    const existing = (seed as Transaction | null | undefined)?.splits
+    if (!existing || existing.length === 0) return null
+    return {
+      share_type: (existing[0].share_type as TransactionSplitsInput['share_type']) ?? 'equal',
+      splits: existing.map((s) => ({
+        group_member_id: s.group_member_id,
+        share_amount: s.share_amount,
+        share_pct: s.share_pct,
+      })),
+    }
+  })
+  // Captured once at mount so we know whether to send an explicit clear
+  // payload when the user toggles split off on a previously-split tx.
+  const [hadInitialSplits] = useState<boolean>(() => {
+    const existing = (seed as Transaction | null | undefined)?.splits
+    return !!(existing && existing.length > 0)
+  })
   const isCreating = !transaction
   const showConversion = currency !== userCurrency && !isSynced
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
@@ -442,12 +473,22 @@ function TransactionForm({
         const overridePayload: Partial<Transaction> = isCcSelected
           ? { effective_bill_date: effectiveBillDate || null }
           : {}
+        // Splits ride along on the same payload — the backend treats a
+        // missing `splits` field as untouched and a present payload as
+        // full replacement. To clear existing splits when the user
+        // toggles off, send an explicit empty payload.
+        const splitsPayload: { splits?: TransactionSplitsInput } = splits
+          ? { splits }
+          : hadInitialSplits
+            ? { splits: { share_type: 'equal', splits: [] } }
+            : {}
         const txData = isSynced
           ? {
               category_id: categoryId || null,
               payee_id: payeeId || null,
               notes: notes.trim() || null,
               ...overridePayload,
+              ...splitsPayload,
             } as Partial<Transaction>
           : {
               description,
@@ -461,6 +502,7 @@ function TransactionForm({
               notes: notes.trim() || null,
               ...fxFields,
               ...overridePayload,
+              ...splitsPayload,
             } as Partial<Transaction>
         const recurringData = isCreating && isRecurring
           ? { frequency, end_date: endDate || undefined }
@@ -616,17 +658,13 @@ function TransactionForm({
         </div>
         <div className="space-y-2">
           <Label>{t('transactions.category')}</Label>
-          <select
-            className="w-full border border-border rounded-md px-3 py-2 text-sm bg-background disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
+          <CategorySelect
             value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-            disabled={!!transaction?.transfer_pair_id}
-          >
-            <option value="">{t('transactions.noCategory')}</option>
-            {categories.map((cat) => (
-              <option key={cat.id} value={cat.id}>{cat.name}</option>
-            ))}
-          </select>
+            onChange={setCategoryId}
+            categories={categories}
+            groups={categoryGroups}
+            allowNone={true}
+          />
         </div>
       </div>
       <div className={cn("grid gap-4", isSynced ? "grid-cols-1" : "grid-cols-2")}>
@@ -710,6 +748,20 @@ function TransactionForm({
         )
       })()}
 
+      {/* A settlement-sourced transaction *is* the movement clearing a
+          group debt; splitting it would create circular accounting
+          (the share would settle a debt that this debit is already
+          settling). Hide the section entirely in that case. */}
+      {transaction?.source !== 'settlement' && (
+        <TransactionSplitsSection
+          amount={parseFloat(amount) || 0}
+          currency={currency}
+          value={splits}
+          onChange={setSplits}
+          onValidityChange={setSplitsValid}
+        />
+      )}
+
       {!isCreating && transaction ? (
         <TransactionAttachments
           transactionId={transaction.id}
@@ -790,7 +842,7 @@ function TransactionForm({
             <div className="inline-flex">
               <Button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !splitsValid}
                 className="rounded-r-none"
               >
                 {loading ? t('common.loading') : t('common.save')}
@@ -799,7 +851,7 @@ function TransactionForm({
                 <DropdownMenuTrigger asChild>
                   <Button
                     type="button"
-                    disabled={loading}
+                    disabled={loading || !splitsValid}
                     aria-label={t('transactions.moreSaveOptions')}
                     className="rounded-l-none border-l border-l-primary-foreground/20 px-2 has-[>svg]:px-2"
                   >
@@ -817,7 +869,7 @@ function TransactionForm({
               </DropdownMenu>
             </div>
           ) : (
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" disabled={loading || !splitsValid}>
               {loading ? t('common.loading') : t('common.save')}
             </Button>
           )}

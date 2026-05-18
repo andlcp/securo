@@ -20,6 +20,9 @@ from app.models.portfolio_snapshot import PortfolioSnapshot
 from app.models.portfolio_daily_snapshot import PortfolioDailySnapshot
 from app.models.asset_transaction import AssetTransaction
 from app.models.credit_card_bill import CreditCardBill
+from app.models.group import Group, GroupMember
+from app.models.transaction_split import TransactionSplit
+from app.models.group_settlement import GroupSettlement
 
 __all__ = [
     "User",
@@ -45,4 +48,8 @@ __all__ = [
     "PortfolioDailySnapshot",
     "AssetTransaction",
     "CreditCardBill",
+    "Group",
+    "GroupMember",
+    "TransactionSplit",
+    "GroupSettlement",
 ]

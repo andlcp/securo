@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react'
 import { getAccountName } from '@/lib/account-utils'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { categories as categoriesApi, rules as rulesApi, accounts as accountsApi, payees as payeesApi } from '@/lib/api'
+import { categories as categoriesApi, categoryGroups as categoryGroupsApi, rules as rulesApi, accounts as accountsApi, payees as payeesApi } from '@/lib/api'
 import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -15,9 +15,10 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import type { Category, Payee, Rule, RuleCondition, RuleAction } from '@/types'
+import type { Category, CategoryGroup, Payee, Rule, RuleCondition, RuleAction } from '@/types'
 import { Trash2, Plus, RefreshCw, X, Package, Check, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CategorySelect } from '@/components/category-select'
 import { PageHeader } from '@/components/page-header'
 
 function SectionCard({ children }: { children: React.ReactNode }) {
@@ -43,6 +44,7 @@ const CONDITION_FIELDS = [
   { value: 'amount', label: 'rules.fieldAmount' },
   { value: 'type', label: 'rules.fieldType' },
   { value: 'account_id', label: 'rules.fieldAccount' },
+  { value: 'payee_id', label: 'rules.fieldPayee' },
   { value: 'date', label: 'rules.fieldDate' },
 ] as const
 
@@ -67,10 +69,14 @@ const NUMERIC_OPS = [
 function getOpsForField(field: string) {
   if (field === 'amount' || field === 'date') return NUMERIC_OPS
   if (field === 'type') return [{ value: 'equals', label: 'rules.opIs' }]
+  if (field === 'payee_id' || field === 'account_id') return [
+    { value: 'equals', label: 'rules.opIs' },
+    { value: 'not_equals', label: 'rules.opIsNot' },
+  ]
   return STRING_OPS
 }
 
-function conditionSummary(conditions: RuleCondition[], conditionsOp: string, t: (key: string) => string): string {
+function conditionSummary(conditions: RuleCondition[], conditionsOp: string, t: (key: string) => string, payeesList: Payee[]): string {
   const fieldLabel = (f: string) => {
     const key = CONDITION_FIELDS.find(x => x.value === f)?.label
     return key ? t(key) : f
@@ -79,7 +85,14 @@ function conditionSummary(conditions: RuleCondition[], conditionsOp: string, t: 
     const key = getOpsForField(f).find(x => x.value === op)?.label
     return key ? t(key) : op
   }
-  const parts = conditions.map(c => `${fieldLabel(c.field)} ${opLabel(c.field, c.op)} "${c.value}"`)
+  const valueLabel = (c: RuleCondition) => {
+    if (c.field === 'payee_id') {
+      const p = payeesList.find(p => p.id === c.value)
+      return p ? p.name : String(c.value)
+    }
+    return String(c.value)
+  }
+  const parts = conditions.map(c => `${fieldLabel(c.field)} ${opLabel(c.field, c.op)} "${valueLabel(c)}"`)
   return parts.join(` ${conditionsOp === 'or' ? t('rules.orOp') : t('rules.andOp')} `) || t('rules.noConditions')
 }
 
@@ -113,6 +126,11 @@ export default function RulesPage() {
   const { data: categoriesList } = useQuery({
     queryKey: ['categories'],
     queryFn: categoriesApi.list,
+  })
+
+  const { data: categoryGroupsList } = useQuery({
+    queryKey: ['categoryGroups'],
+    queryFn: categoryGroupsApi.list,
   })
 
   const { data: accountsList } = useQuery({
@@ -283,7 +301,7 @@ export default function RulesPage() {
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground font-mono truncate">
-                      {conditionSummary(rule.conditions, rule.conditions_op, t)}
+                      {conditionSummary(rule.conditions, rule.conditions_op, t, payees)}
                     </p>
                     <p className="text-xs text-emerald-600 font-medium mt-0.5">
                       {actionSummary(rule.actions, categories, payees, t)}
@@ -318,6 +336,7 @@ export default function RulesPage() {
         onClose={() => { setDialogOpen(false); setEditing(null) }}
         rule={editing}
         categories={categories}
+        categoryGroups={categoryGroupsList ?? []}
         accounts={accountsList ?? []}
         payees={payees}
         onSave={(data) => {
@@ -336,6 +355,7 @@ export default function RulesPage() {
 function RulePacksDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const [createMissingCategories, setCreateMissingCategories] = useState(true)
 
   const { data: rulePacks } = useQuery({
     queryKey: ['rule-packs'],
@@ -344,12 +364,26 @@ function RulePacksDialog({ open, onClose }: { open: boolean; onClose: () => void
   })
 
   const installPackMutation = useMutation({
-    mutationFn: (code: string) => rulesApi.installPack(code),
+    mutationFn: (code: string) => rulesApi.installPack(code, createMissingCategories),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['rules'] })
       queryClient.invalidateQueries({ queryKey: ['rule-packs'] })
+      if (data.categories_created > 0) {
+        queryClient.invalidateQueries({ queryKey: ['categories'] })
+      }
       if (data.installed === 0) {
-        toast.info(t('rules.packAlreadyInstalled'))
+        if (data.unresolved > 0) {
+          toast.error(t('rules.packMissingCategories'))
+        } else {
+          toast.info(t('rules.packAlreadyInstalled'))
+        }
+      } else if (data.categories_created > 0) {
+        toast.success(
+          t('rules.packInstalledWithCategories', {
+            rules: data.installed,
+            categories: data.categories_created,
+          }),
+        )
       } else {
         toast.success(t('rules.packInstalled', { count: data.installed }))
       }
@@ -363,6 +397,21 @@ function RulePacksDialog({ open, onClose }: { open: boolean; onClose: () => void
         <DialogHeader>
           <DialogTitle>{t('rules.packs')}</DialogTitle>
         </DialogHeader>
+        <div className="flex items-center gap-2 px-1">
+          <input
+            type="checkbox"
+            id="create-missing-categories"
+            checked={createMissingCategories}
+            onChange={(e) => setCreateMissingCategories(e.target.checked)}
+            className="rounded border-border text-primary focus:ring-primary"
+          />
+          <Label
+            htmlFor="create-missing-categories"
+            className="text-xs text-muted-foreground cursor-pointer"
+          >
+            {t('rules.createMissingCategories')}
+          </Label>
+        </div>
         <div className="space-y-2">
           {rulePacks?.map((pack) => (
             <div
@@ -402,12 +451,13 @@ function RulePacksDialog({ open, onClose }: { open: boolean; onClose: () => void
 }
 
 function RuleDialog({
-  open, onClose, rule, categories, accounts, payees, onSave, loading,
+  open, onClose, rule, categories, categoryGroups, accounts, payees, onSave, loading,
 }: {
   open: boolean
   onClose: () => void
   rule: Rule | null
   categories: Category[]
+  categoryGroups: CategoryGroup[]
   accounts: { id: string; name: string }[]
   payees: Payee[]
   onSave: (data: Partial<Rule>) => void
@@ -458,7 +508,7 @@ function RuleDialog({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto overflow-x-hidden">
         <DialogHeader>
           <DialogTitle>{rule ? t('rules.editRule') : t('rules.newRule')}</DialogTitle>
         </DialogHeader>
@@ -497,7 +547,7 @@ function RuleDialog({
             </div>
             <div className="space-y-2">
               {conditions.map((cond, i) => (
-                <div key={i} className="flex items-center gap-2">
+                <div key={i} className="flex items-center gap-2 min-w-0">
                   <select
                     className={`${selectClass} w-32 shrink-0`}
                     value={cond.field}
@@ -518,7 +568,7 @@ function RuleDialog({
                   </select>
                   {cond.field === 'type' ? (
                     <select
-                      className={`${selectClass} flex-1`}
+                      className={`${selectClass} w-0 flex-1 min-w-0`}
                       value={String(cond.value)}
                       onChange={(e) => updateCondition(i, 'value', e.target.value)}
                     >
@@ -527,7 +577,7 @@ function RuleDialog({
                     </select>
                   ) : cond.field === 'account_id' ? (
                     <select
-                      className={`${selectClass} flex-1`}
+                      className={`${selectClass} w-0 flex-1 min-w-0`}
                       value={String(cond.value)}
                       onChange={(e) => updateCondition(i, 'value', e.target.value)}
                     >
@@ -536,9 +586,20 @@ function RuleDialog({
                         <option key={acc.id} value={acc.id}>{getAccountName(acc)}</option>
                       ))}
                     </select>
+                  ) : cond.field === 'payee_id' ? (
+                    <select
+                      className={`${selectClass} w-0 flex-1 min-w-0`}
+                      value={String(cond.value)}
+                      onChange={(e) => updateCondition(i, 'value', e.target.value)}
+                    >
+                      <option value="">{t('rules.selectPayee')}</option>
+                      {payees.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
                   ) : (
                     <Input
-                      className="flex-1 h-8 text-sm"
+                      className="w-0 flex-1 min-w-0 h-8 text-sm"
                       value={String(cond.value)}
                       onChange={(e) => updateCondition(i, 'value', e.target.value)}
                       placeholder={cond.field === 'amount' ? '0.00' : cond.field === 'date' ? 'YYYY-MM-DD' : t('rules.valuePlaceholder')}
@@ -569,7 +630,7 @@ function RuleDialog({
             <Label>{t('rules.actions')}</Label>
             <div className="space-y-2">
               {actions.map((action, i) => (
-                <div key={i} className="flex items-center gap-2">
+                <div key={i} className="flex items-center gap-2 min-w-0">
                   <select
                     className={`${selectClass} w-40 shrink-0`}
                     value={action.op}
@@ -580,20 +641,19 @@ function RuleDialog({
                     <option value="append_notes">{t('rules.appendNotes')}</option>
                   </select>
                   {action.op === 'set_category' ? (
-                    <select
-                      className={`${selectClass} flex-1`}
-                      value={action.value}
-                      onChange={(e) => updateAction(i, 'value', e.target.value)}
-                      required
-                    >
-                      <option value="">{t('rules.selectCategory')}</option>
-                      {categories.map(cat => (
-                        <option key={cat.id} value={cat.id}>{cat.name}</option>
-                      ))}
-                    </select>
+                    <div className="w-0 flex-1 min-w-0">
+                      <CategorySelect
+                        value={action.value}
+                        onChange={(val) => updateAction(i, 'value', val)}
+                        categories={categories}
+                        groups={categoryGroups}
+                        placeholder={t('rules.selectCategory')}
+                        className={`${selectClass} w-full`}
+                      />
+                    </div>
                   ) : action.op === 'set_payee' ? (
                     <select
-                      className={`${selectClass} flex-1`}
+                      className={`${selectClass} w-0 flex-1 min-w-0`}
                       value={action.value}
                       onChange={(e) => updateAction(i, 'value', e.target.value)}
                       required
@@ -605,7 +665,7 @@ function RuleDialog({
                     </select>
                   ) : (
                     <Input
-                      className="flex-1 h-8 text-sm"
+                      className="w-0 flex-1 min-w-0 h-8 text-sm"
                       value={action.value}
                       onChange={(e) => updateAction(i, 'value', e.target.value)}
                       placeholder="Ex: #work #reimbursable"

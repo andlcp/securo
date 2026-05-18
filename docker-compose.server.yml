@@ -34,7 +34,11 @@ services:
       retries: 5
 
   db:
-    image: postgres:16-alpine
+    # Drop-in replacement for postgres:16-alpine that bundles the
+    # pgvector extension — required by agents knowledge-base migration
+    # 046 even though we run with AGENTS_ENABLED=false (the migration
+    # still has to land so the schema stays in sync with upstream).
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

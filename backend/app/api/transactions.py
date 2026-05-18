@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import current_active_user
 from app.core.database import get_async_session
 from app.models.user import User
-from app.schemas.transaction import BulkCategorizeRequest, BulkTagsRequest, LinkTransferRequest, TransactionCreate, TransactionRead, TransactionUpdate, TransferCreate, TransferRead
+from app.schemas.transaction import BulkAddToGroupRequest, BulkCategorizeRequest, BulkTagsRequest, LinkTransferRequest, TransactionCreate, TransactionRead, TransactionUpdate, TransferCreate, TransferRead
 from app.services import transaction_service
 from app.services.admin_service import get_credit_card_accounting_mode
 
@@ -26,11 +26,23 @@ def _tag_fx_fallback(tx: TransactionRead, primary_currency: str) -> TransactionR
     return tx
 
 
+class TransactionsSummary(BaseModel):
+    """Income / expense / net totals across all rows matching the active
+    filters (issue #185). Amounts are in the user's primary currency.
+    Floats (not Decimal) so the JSON payload matches `amount_primary`
+    and the frontend gets plain numbers."""
+    income: float
+    expense: float
+    net: float
+    currency: str
+
+
 class PaginatedTransactions(BaseModel):
     items: list[TransactionRead]
     total: int
     page: int
     limit: int
+    summary: Optional[TransactionsSummary] = None
 
 
 def _merge_id_filters(
@@ -55,6 +67,7 @@ async def list_transactions(
     from_date: Optional[date] = Query(None, alias="from"),
     to_date: Optional[date] = Query(None, alias="to"),
     bill_id: Optional[uuid.UUID] = Query(None, description="Filter by credit-card bill (issue #92); takes precedence over from/to"),
+    group_id: Optional[uuid.UUID] = Query(None, description="Filter to transactions split through this group; widens visibility for linked members"),
     unbilled_only: bool = Query(False, description="Cycle-math fallback only: exclude txs already linked to any bill (used for in-progress CC cycles)"),
     q: Optional[str] = Query(None),
     uncategorized: bool = Query(False),
@@ -64,11 +77,13 @@ async def list_transactions(
     include_opening_balance: bool = Query(False),
     exclude_transfers: bool = Query(False),
     tags: Optional[List[str]] = Query(None),
+    sort_by: Optional[str] = Query(None, description="Column to sort by (date|amount|description|payee|category|account|type|status). Default: date desc."),
+    sort_dir: str = Query("desc", regex="^(asc|desc)$"),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
     accounting_mode = await get_credit_card_accounting_mode(session)
-    transactions, total = await transaction_service.get_transactions(
+    transactions, total, summary = await transaction_service.get_transactions(
         session, user.id,
         account_ids=_merge_id_filters(account_id, account_ids),
         category_ids=_merge_id_filters(category_id, category_ids),
@@ -78,11 +93,20 @@ async def list_transactions(
         accounting_mode=accounting_mode,
         tags=tags,
         bill_id=bill_id,
+        group_id=group_id,
         unbilled_only=unbilled_only,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        include_summary=True,
     )
     primary_currency = user.primary_currency
     items = [_tag_fx_fallback(TransactionRead.model_validate(tx, from_attributes=True), primary_currency) for tx in transactions]
-    return PaginatedTransactions(items=items, total=total, page=page, limit=limit)
+    summary_out = (
+        TransactionsSummary(**summary, currency=primary_currency)
+        if summary is not None
+        else None
+    )
+    return PaginatedTransactions(items=items, total=total, page=page, limit=limit, summary=summary_out)
 
 
 @router.get("/export")
@@ -98,19 +122,30 @@ async def export_transactions(
     uncategorized: bool = Query(False),
     type: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
+    transaction_ids: Optional[List[uuid.UUID]] = Query(None, description="If set, exports exactly these rows (scoped to the user); other filters are ignored."),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(current_active_user),
 ):
     accounting_mode = await get_credit_card_accounting_mode(session)
-    transactions, _ = await transaction_service.get_transactions(
-        session, user.id,
-        account_ids=_merge_id_filters(account_id, account_ids),
-        category_ids=_merge_id_filters(category_id, category_ids),
-        payee_id=payee_id, from_date=from_date, to_date=to_date,
-        search=q, uncategorized=uncategorized, txn_type=type, skip_pagination=True,
-        accounting_mode=accounting_mode,
-        tags=tags,
-    )
+    if transaction_ids:
+        # Selection-only export: bypass user-facing filters but keep the
+        # service-level user/visibility scoping intact.
+        transactions, _, _ = await transaction_service.get_transactions(
+            session, user.id,
+            skip_pagination=True,
+            accounting_mode=accounting_mode,
+            transaction_ids=transaction_ids,
+        )
+    else:
+        transactions, _, _ = await transaction_service.get_transactions(
+            session, user.id,
+            account_ids=_merge_id_filters(account_id, account_ids),
+            category_ids=_merge_id_filters(category_id, category_ids),
+            payee_id=payee_id, from_date=from_date, to_date=to_date,
+            search=q, uncategorized=uncategorized, txn_type=type, skip_pagination=True,
+            accounting_mode=accounting_mode,
+            tags=tags,
+        )
 
     output = io.StringIO()
     output.write("\ufeff")  # UTF-8 BOM for Excel
@@ -177,6 +212,25 @@ async def bulk_remove_tags(
         session, user.id, data.transaction_ids, data.tags
     )
     return {"updated": count}
+
+
+@router.patch("/bulk-add-to-group")
+async def bulk_add_to_group(
+    data: BulkAddToGroupRequest,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    try:
+        return await transaction_service.bulk_add_to_group(
+            session,
+            user.id,
+            data.transaction_ids,
+            data.group_id,
+            share_type=data.share_type,
+            member_splits=data.member_splits,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.post("/transfer", response_model=TransferRead, status_code=status.HTTP_201_CREATED)

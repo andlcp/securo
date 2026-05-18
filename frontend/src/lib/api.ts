@@ -20,6 +20,7 @@ import type {
   BudgetVsActual,
   Rule,
   ImportLog,
+  ImportPreviewTransaction,
   Asset,
   AssetGroup,
   AssetValue,
@@ -32,8 +33,14 @@ import type {
   SpendingByCategory,
   MonthlyTrend,
   BalanceHistory,
-  PaginatedResponse,
+  PaginatedTransactions,
   ReportResponse,
+  Group,
+  GroupKind,
+  GroupMember,
+  GroupSettlement,
+  GroupBalances,
+  TransactionSplitsInput,
 } from '@/types'
 
 const api = axios.create({
@@ -258,6 +265,7 @@ export const transactions = {
     from?: string
     to?: string
     bill_id?: string
+    group_id?: string
     unbilled_only?: boolean
     q?: string
     page?: number
@@ -265,7 +273,9 @@ export const transactions = {
     include_opening_balance?: boolean
     exclude_transfers?: boolean
     tags?: string[]
-  }): Promise<PaginatedResponse<Transaction>> => {
+    sort_by?: string
+    sort_dir?: 'asc' | 'desc'
+  }): Promise<PaginatedTransactions> => {
     const { data } = await api.get('/transactions', {
       params,
       paramsSerializer: { indexes: null },
@@ -280,7 +290,10 @@ export const transactions = {
     const { data } = await api.post('/transactions', transaction)
     return data
   },
-  update: async (id: string, transaction: Partial<Transaction>): Promise<Transaction> => {
+  update: async (
+    id: string,
+    transaction: Partial<Transaction> & { apply_to_transfer_pair?: boolean },
+  ): Promise<Transaction> => {
     const { data } = await api.patch(`/transactions/${id}`, transaction)
     return data
   },
@@ -320,6 +333,22 @@ export const transactions = {
     })
     return data
   },
+  bulkAddToGroup: async (
+    transactionIds: string[],
+    groupId: string,
+    options?: {
+      share_type?: 'equal' | 'percent'
+      member_splits?: { group_member_id: string; share_pct?: number }[]
+    },
+  ): Promise<{ updated: number; skipped: number }> => {
+    const { data } = await api.patch('/transactions/bulk-add-to-group', {
+      transaction_ids: transactionIds,
+      group_id: groupId,
+      ...(options?.share_type ? { share_type: options.share_type } : {}),
+      ...(options?.member_splits ? { member_splits: options.member_splits } : {}),
+    })
+    return data
+  },
   linkTransfer: async (transactionIds: string[]): Promise<{ debit: Transaction; credit: Transaction; transfer_pair_id: string }> => {
     const { data } = await api.post('/transactions/link-transfer', {
       transaction_ids: transactionIds,
@@ -338,7 +367,7 @@ export const transactions = {
     flip_amount?: boolean
     inflow_column?: string
     outflow_column?: string
-  }): Promise<{ transactions: Transaction[]; detected_format: string }> => {
+  }): Promise<{ transactions: ImportPreviewTransaction[]; detected_format: string }> => {
     const formData = new FormData()
     formData.append('file', file)
     if (options?.date_format) formData.append('date_format', options.date_format)
@@ -350,14 +379,14 @@ export const transactions = {
   },
   import: async (
     account_id: string,
-    transactions: Transaction[],
+    transactions: ImportPreviewTransaction[],
     filename: string,
     detected_format: string,
     options?: { detect_duplicates?: boolean },
-  ): Promise<{ imported: number; skipped: number; import_log_id: string }> => {
+  ): Promise<{ imported: number; skipped: number; excluded: number; import_log_id: string }> => {
     const payload: {
       account_id: string
-      transactions: Transaction[]
+      transactions: ImportPreviewTransaction[]
       filename: string
       detected_format: string
       detect_duplicates?: boolean
@@ -380,6 +409,7 @@ export const transactions = {
     from?: string
     to?: string
     q?: string
+    transaction_ids?: string[]
   }): Promise<void> => {
     const { data } = await api.get('/transactions/export', {
       params,
@@ -454,6 +484,132 @@ export const payees = {
   },
 }
 
+// Groups (split transactions)
+export interface GroupCreatePayload {
+  name: string
+  kind?: GroupKind
+  default_currency?: string
+  icon?: string
+  color?: string
+  notes?: string | null
+}
+
+export interface GroupMemberPayload {
+  name: string
+  linked_user_id?: string | null
+  email?: string | null
+  is_self?: boolean
+}
+
+export interface GroupSettlementPayload {
+  from_member_id: string
+  to_member_id: string
+  amount: number
+  currency: string
+  date: string
+  transaction_id?: string | null
+  notes?: string | null
+  // When provided, the backend creates a debit transaction on this
+  // account and links it via transaction_id. Mutually exclusive with
+  // passing transaction_id directly.
+  account_id?: string | null
+  description?: string | null
+}
+
+export const groups = {
+  list: async (includeArchived = false): Promise<Group[]> => {
+    const { data } = await api.get('/groups', { params: { include_archived: includeArchived } })
+    return data
+  },
+  get: async (id: string): Promise<Group> => {
+    const { data } = await api.get(`/groups/${id}`)
+    return data
+  },
+  create: async (payload: GroupCreatePayload): Promise<Group> => {
+    const { data } = await api.post('/groups', payload)
+    return data
+  },
+  update: async (id: string, payload: Partial<GroupCreatePayload> & { is_archived?: boolean }): Promise<Group> => {
+    const { data } = await api.patch(`/groups/${id}`, payload)
+    return data
+  },
+  delete: async (id: string): Promise<void> => {
+    await api.delete(`/groups/${id}`)
+  },
+  members: {
+    list: async (groupId: string): Promise<GroupMember[]> => {
+      const { data } = await api.get(`/groups/${groupId}/members`)
+      return data
+    },
+    create: async (groupId: string, payload: GroupMemberPayload): Promise<GroupMember> => {
+      const { data } = await api.post(`/groups/${groupId}/members`, payload)
+      return data
+    },
+    update: async (groupId: string, memberId: string, payload: Partial<GroupMemberPayload>): Promise<GroupMember> => {
+      const { data } = await api.patch(`/groups/${groupId}/members/${memberId}`, payload)
+      return data
+    },
+    delete: async (groupId: string, memberId: string): Promise<void> => {
+      await api.delete(`/groups/${groupId}/members/${memberId}`)
+    },
+  },
+  settlements: {
+    list: async (groupId: string): Promise<GroupSettlement[]> => {
+      const { data } = await api.get(`/groups/${groupId}/settlements`)
+      return data
+    },
+    create: async (groupId: string, payload: GroupSettlementPayload): Promise<GroupSettlement> => {
+      const { data } = await api.post(`/groups/${groupId}/settlements`, payload)
+      return data
+    },
+    update: async (groupId: string, settlementId: string, payload: Partial<GroupSettlementPayload>): Promise<GroupSettlement> => {
+      const { data } = await api.patch(`/groups/${groupId}/settlements/${settlementId}`, payload)
+      return data
+    },
+    delete: async (groupId: string, settlementId: string): Promise<void> => {
+      await api.delete(`/groups/${groupId}/settlements/${settlementId}`)
+    },
+  },
+  balances: async (groupId: string): Promise<GroupBalances> => {
+    const { data } = await api.get(`/groups/${groupId}/balances`)
+    return data
+  },
+  transactions: async (groupId: string, limit = 20): Promise<Transaction[]> => {
+    const { data } = await api.get(`/groups/${groupId}/transactions`, {
+      params: { limit },
+    })
+    return data
+  },
+}
+
+// Helper re-export so transaction-creation forms have a typed entry point.
+export type { TransactionSplitsInput }
+
+// User lookup: exact-match resolution for linking group members to
+// existing Securo users. Returns null on miss (404).
+export interface UserLookupResult {
+  id: string
+  email: string
+}
+
+export const users = {
+  lookupByEmail: async (email: string): Promise<UserLookupResult | null> => {
+    try {
+      const { data } = await api.get('/users/lookup', { params: { email } })
+      return data
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      if (status === 404) return null
+      throw err
+    }
+  },
+  directory: async (): Promise<UserLookupResult[]> => {
+    const { data } = await api.get('/users/directory')
+    return data
+  },
+}
+
+
 // Categorization Rules
 export const rules = {
   list: async (): Promise<Rule[]> => {
@@ -479,8 +635,13 @@ export const rules = {
     const { data } = await api.get('/rules/packs')
     return data
   },
-  installPack: async (packCode: string): Promise<{ installed: number }> => {
-    const { data } = await api.post(`/rules/packs/${packCode}/install`)
+  installPack: async (
+    packCode: string,
+    createMissingCategories = false,
+  ): Promise<{ installed: number; unresolved: number; categories_created: number }> => {
+    const { data } = await api.post(`/rules/packs/${packCode}/install`, null, {
+      params: { create_missing_categories: createMissingCategories },
+    })
     return data
   },
 }
@@ -1040,6 +1201,245 @@ export const search = {
     if (!q.trim()) return []
     const { data } = await api.get('/search', { params: { q, limit } })
     return data.results as SearchHit[]
+  },
+}
+
+// App-level feature flags (whether optional modules like agents are mounted)
+export interface AppInfo {
+  features: { agents: boolean }
+}
+
+export const info = {
+  get: async (): Promise<AppInfo> => {
+    const { data } = await api.get('/info')
+    return data
+  },
+}
+
+// Agents / MCP / RAG -- only meaningful when info.features.agents === true.
+export interface Agent {
+  id: string
+  name: string
+  description: string | null
+  system_prompt: string
+  icon: string
+  color: string
+  connection_id: string | null
+  provider: string | null
+  model: string | null
+  temperature: number
+  max_history_messages: number
+  top_n: number
+  similarity_threshold: number
+  extra: Record<string, unknown>
+  auto_context: boolean
+  is_archived: boolean
+  is_default: boolean
+  // Populated by GET /agents (list endpoint) for the agents page.
+  // Single-agent endpoints leave them at 0 since the row-level page
+  // already shows tabs for both lists.
+  conversation_count: number
+  knowledge_count: number
+  created_at: string
+  updated_at: string
+}
+
+export type LlmConnectionKind = 'ollama' | 'openai' | 'anthropic' | 'openai_compatible'
+
+export interface LlmConnection {
+  id: string
+  name: string
+  kind: LlmConnectionKind
+  base_url: string | null
+  default_model: string | null
+  extra: Record<string, unknown>
+  is_default: boolean
+  has_api_key: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface LlmConnectionPayload {
+  name: string
+  kind: LlmConnectionKind
+  base_url?: string | null
+  api_key?: string | null
+  default_model?: string | null
+  extra?: Record<string, unknown>
+  is_default?: boolean
+}
+
+export interface LlmConnectionTestResult {
+  ok: boolean
+  detail: string
+  models?: string[]
+}
+
+export interface AgentConversation {
+  id: string
+  agent_id: string
+  channel: string
+  title: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentMessage {
+  id: string
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  ordinal: number
+  content: string | null
+  tool_calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> | null
+  tool_result: { tool_call_id?: string; name?: string; data?: unknown; ok?: boolean } | null
+  citations: unknown[] | null
+  input_tokens: number | null
+  output_tokens: number | null
+  created_at: string
+}
+
+export interface AgentToolHandle {
+  server: string
+  name: string
+  description: string
+  is_proposal: boolean
+  enabled: boolean
+}
+
+export interface KnowledgeDoc {
+  id: string
+  agent_id: string
+  title: string
+  source: string | null
+  mime: string
+  size_bytes: number
+  status: 'pending' | 'processing' | 'ready' | 'failed'
+  error: string | null
+  chunk_count: number
+  pinned: boolean
+  created_at: string
+  updated_at: string
+}
+
+export const agents = {
+  info: async () => {
+    const { data } = await api.get('/agents/info')
+    return data as {
+      enabled: boolean
+      providers: string[]
+      embedding_dim: number
+      default_top_n: number
+      default_similarity_threshold: number
+      extra_mcp_servers_configured: boolean
+    }
+  },
+  list: async (includeArchived = false): Promise<Agent[]> => {
+    const { data } = await api.get('/agents', { params: { include_archived: includeArchived } })
+    return data
+  },
+  // Default agent for the global slide-over chat panel. Returns the
+  // user-flagged default; falls back to the most recent agent.
+  // Throws 404 if the user has no agents at all.
+  getDefault: async (): Promise<Agent> => {
+    const { data } = await api.get('/agents/default')
+    return data
+  },
+  get: async (id: string): Promise<Agent> => {
+    const { data } = await api.get(`/agents/${id}`)
+    return data
+  },
+  create: async (payload: Partial<Agent> & { name: string }): Promise<Agent> => {
+    const { data } = await api.post('/agents', payload)
+    return data
+  },
+  update: async (id: string, payload: Partial<Agent>): Promise<Agent> => {
+    const { data } = await api.patch(`/agents/${id}`, payload)
+    return data
+  },
+  remove: async (id: string): Promise<void> => {
+    await api.delete(`/agents/${id}`)
+  },
+  tools: async (id: string): Promise<{ servers: { name: string }[]; tools: AgentToolHandle[] }> => {
+    const { data } = await api.get(`/agents/${id}/tools`)
+    return data
+  },
+  setTools: async (id: string, items: { server: string; tool_name: string; enabled: boolean }[]): Promise<void> => {
+    await api.put(`/agents/${id}/tools`, items)
+  },
+  knowledge: {
+    list: async (id: string): Promise<{ items: KnowledgeDoc[]; total: number }> => {
+      const { data } = await api.get(`/agents/${id}/knowledge`)
+      return data
+    },
+    upload: async (id: string, file: File, pinned = false): Promise<KnowledgeDoc> => {
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('pinned', String(pinned))
+      const { data } = await api.post(`/agents/${id}/knowledge`, fd)
+      return data
+    },
+    pin: async (agentId: string, docId: string, pinned: boolean): Promise<KnowledgeDoc> => {
+      const { data } = await api.patch(`/agents/${agentId}/knowledge/${docId}/pin`, null, {
+        params: { pinned },
+      })
+      return data
+    },
+    remove: async (agentId: string, docId: string): Promise<void> => {
+      await api.delete(`/agents/${agentId}/knowledge/${docId}`)
+    },
+  },
+  conversations: {
+    list: async (agentId?: string, limit = 50): Promise<AgentConversation[]> => {
+      const { data } = await api.get('/agents/conversations', { params: { agent_id: agentId, limit } })
+      return data
+    },
+    get: async (id: string): Promise<AgentConversation> => {
+      const { data } = await api.get(`/agents/conversations/${id}`)
+      return data
+    },
+    messages: async (id: string, limit = 200): Promise<AgentMessage[]> => {
+      const { data } = await api.get(`/agents/conversations/${id}/messages`, { params: { limit } })
+      return data
+    },
+    rename: async (id: string, title: string): Promise<AgentConversation> => {
+      const { data } = await api.patch(`/agents/conversations/${id}`, { title })
+      return data
+    },
+    generateTitle: async (id: string): Promise<AgentConversation> => {
+      const { data } = await api.post(`/agents/conversations/${id}/generate-title`)
+      return data
+    },
+    remove: async (id: string): Promise<void> => {
+      await api.delete(`/agents/conversations/${id}`)
+    },
+  },
+  // Streaming chat endpoint — caller handles the SSE response themselves
+  // (see lib/agents-stream.ts). We just expose the URL + body builder.
+  chatUrl: (agentId: string) => `/api/agents/${agentId}/chat`,
+
+  connections: {
+    list: async (): Promise<LlmConnection[]> => {
+      const { data } = await api.get('/agents/connections')
+      return data
+    },
+    get: async (id: string): Promise<LlmConnection> => {
+      const { data } = await api.get(`/agents/connections/${id}`)
+      return data
+    },
+    create: async (payload: LlmConnectionPayload): Promise<LlmConnection> => {
+      const { data } = await api.post('/agents/connections', payload)
+      return data
+    },
+    update: async (id: string, payload: Partial<LlmConnectionPayload>): Promise<LlmConnection> => {
+      const { data } = await api.patch(`/agents/connections/${id}`, payload)
+      return data
+    },
+    remove: async (id: string): Promise<void> => {
+      await api.delete(`/agents/connections/${id}`)
+    },
+    test: async (id: string): Promise<LlmConnectionTestResult> => {
+      const { data } = await api.post(`/agents/connections/${id}/test`)
+      return data
+    },
   },
 }
 

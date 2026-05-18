@@ -1,11 +1,16 @@
 import uuid
 from datetime import date as _Date
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.category import CategoryRead
+from app.schemas.transaction_split import (
+    TransactionSplitInput,
+    TransactionSplitRead,
+    TransactionSplitsInput,
+)
 
 
 class TransactionBase(BaseModel):
@@ -28,6 +33,7 @@ class TransactionCreate(TransactionBase):
     amount_primary: Optional[Decimal] = None
     fx_rate_used: Optional[Decimal] = None
     effective_bill_date: Optional[_Date] = None
+    splits: Optional[TransactionSplitsInput] = None
 
 
 class TransactionUpdate(BaseModel):
@@ -42,9 +48,13 @@ class TransactionUpdate(BaseModel):
     notes: Optional[str] = None
     amount_primary: Optional[Decimal] = None
     fx_rate_used: Optional[Decimal] = None
+    apply_to_transfer_pair: bool = False
     # CC bucketing override (issue #92). Empty string / explicit null clears
     # it back to auto. Only meaningful for credit-card accounts.
     effective_bill_date: Optional[_Date] = None
+    # When provided, replaces the transaction's splits wholesale. Pass
+    # an object with an empty `splits` list to clear them.
+    splits: Optional[TransactionSplitsInput] = None
 
 
 class TransactionRead(TransactionBase):
@@ -71,6 +81,18 @@ class TransactionRead(TransactionBase):
     installment_purchase_date: Optional[_Date] = None
     bill_id: Optional[uuid.UUID] = None
     effective_bill_date: Optional[_Date] = None
+    splits: list[TransactionSplitRead] = []
+    # Shared-transaction view fields. Set per-request when the viewer
+    # is a linked member of one of this transaction's splits but not
+    # its owner. The viewer sees their share amount instead of the
+    # parent's full amount, with a back-link to the originating group.
+    is_shared: bool = False
+    viewer_share: Optional[Decimal] = None
+    group_id: Optional[uuid.UUID] = None
+    # Display name of the parent's owner — derived from the group's
+    # is_self member at request time. Helps the UI show who paid
+    # instead of a generic "shared" badge.
+    parent_owner_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -78,6 +100,18 @@ class TransactionRead(TransactionBase):
 class BulkCategorizeRequest(BaseModel):
     transaction_ids: list[uuid.UUID]
     category_id: Optional[uuid.UUID] = None
+
+
+class BulkAddToGroupRequest(BaseModel):
+    transaction_ids: list[uuid.UUID]
+    group_id: uuid.UUID
+    # Bulk supports `equal` and `percent` only — `exact` amounts can't
+    # generalize across transactions of different totals.
+    share_type: Literal["equal", "percent"] = "equal"
+    # Subset of group members to include. Each entry's `share_pct` is
+    # required when share_type='percent' (and must sum to 100). For
+    # share_type='equal' only `group_member_id` is read.
+    member_splits: list[TransactionSplitInput] = Field(default_factory=list)
 
 
 class TransferCreate(BaseModel):
@@ -108,6 +142,11 @@ class TransferRead(BaseModel):
 class TransactionImport(TransactionBase):
     """TransactionBase extended with import-only fields not exposed in read responses."""
     category_name: Optional[str] = None
+    suggested_category_id: Optional[uuid.UUID] = None
+    suggested_category_name: Optional[str] = None
+    excluded: bool = False
+    category_id: Optional[uuid.UUID] = None
+    force_uncategorized: bool = False
 
 
 class TransactionImportPreview(BaseModel):
