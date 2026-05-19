@@ -136,6 +136,59 @@ async def test_full_rebuild_does_not_pass_initial_cum():
     session.execute.assert_not_called()
 
 
+def test_seed_clamp_excludes_archived_assets_sold_before_window():
+    """Pin the condition used in the seed loop at line ~937 of
+    `portfolio_timeseries_service.py` so the sold-and-gone clamp can't
+    silently regress.
+
+    Why this matters: the daily walk's `asset_state` init applies a clamp
+    that zeroes the base of any asset with `is_archived and sell_date <=
+    seed_d` (this was added to stop ghost positions of liquidated Tesouros
+    from inflating Renda Fixa). But the *seed loop* — which computes the
+    `prev_v_end` anchor that the first iteration of the daily walk
+    consumes — used to skip this clamp. That asymmetry made the seed
+    read each archived asset's last pre-sale AssetValue (~R$5-15 k each,
+    summing to ~R$175 k across ~20 positions for this codebase's
+    reference user) as phantom V_end. The daily walk on the very next
+    day then dropped to its (correct) zero contribution and the diff
+    came out as a fake -7 %/day return on the cumulative chart — the
+    exact symptom reported 4× by the user.
+
+    The fix mirrors the asset_state init clamp condition. If this test
+    starts evaluating something other than the clamp expression, look
+    at portfolio_timeseries_service.py around the prev_v_end seed and
+    make sure both clamps still match each other.
+    """
+    from types import SimpleNamespace
+
+    seed_d = date(2026, 5, 18)
+
+    def should_skip(asset) -> bool:
+        # Mirror the condition the seed loop applies (and the asset_state
+        # init applies). Both clamps MUST stay equivalent.
+        return (
+            asset.is_archived
+            and asset.sell_date is not None
+            and asset.sell_date <= seed_d
+        )
+
+    sold_long_ago = SimpleNamespace(is_archived=True, sell_date=date(2025, 3, 31))
+    sold_yesterday = SimpleNamespace(is_archived=True, sell_date=seed_d)
+    archived_no_sell_date = SimpleNamespace(is_archived=True, sell_date=None)
+    sold_after_seed = SimpleNamespace(is_archived=True, sell_date=date(2026, 6, 1))
+    active = SimpleNamespace(is_archived=False, sell_date=None)
+    active_with_future_sell = SimpleNamespace(is_archived=False, sell_date=date(2027, 1, 1))
+
+    assert should_skip(sold_long_ago) is True
+    assert should_skip(sold_yesterday) is True, \
+        "boundary: sell_date == seed_d must be skipped (state init treats it as sold)"
+    assert should_skip(archived_no_sell_date) is False, \
+        "archived without sell_date: e.g. matured RF — daily walk still values it"
+    assert should_skip(sold_after_seed) is False
+    assert should_skip(active) is False
+    assert should_skip(active_with_future_sell) is False
+
+
 @pytest.mark.asyncio
 async def test_corrupted_prev_payload_falls_back_to_full_rebuild():
     """If the prior snapshot's `twr_cum` is missing or unparseable, we

@@ -928,6 +928,19 @@ async def _compute_timeseries_uncached(session: AsyncSession, user: User,
         prev_d = start_d - timedelta(days=1)
         prev_v_end = 0.0
         for a in assets:
+            # Sold-and-gone clamp: mirror the one in asset_state init above
+            # (line ~913). Without this, the seed reads the asset's last
+            # pre-sale AssetValue as phantom V_end and the daily walk's
+            # zero contribution on the next day shows up as an unexplained
+            # -X% drop on r_d for the first day after the window opens.
+            # Tracked down from ~20 archived assets (MDNE3, BEEF3, CSMG3,
+            # ...) with no SELL transaction but stale pre-sell AVs;
+            # together they inflated the seed by ~R$ 175 k and produced
+            # a recurring -7 %/day cliff in the user's chart at every
+            # incremental snapshot rebuild.
+            if (a.is_archived and a.sell_date is not None
+                    and a.sell_date <= prev_d):
+                continue
             v_native = daily_v_native(a, prev_d)
             if v_native == 0:
                 continue
