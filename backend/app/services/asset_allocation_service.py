@@ -1,7 +1,7 @@
 """Asset allocation targets — group every active asset under a fixed set
-of "buckets" the user actually thinks in (Ações, ETFs, FIIs, Renda Fixa,
-Reserva de Valor, Stocks, Outros, R. Emergência) and compute current %
-+ deficit-vs-target for each.
+of "buckets" the user actually thinks in (Ações, FIIs, Renda Fixa,
+Reserva de Valor, Stocks e ETFs Americanos, Outros, R. Emergência) and
+compute current % + deficit-vs-target for each.
 
 The buckets were chosen to mirror the Bastter System "Patrimônio
 Consolidado" widget the user wants to replicate. The mapping is purely
@@ -10,12 +10,16 @@ to be tagged manually:
 
     R_EMERGENCIA    — no auto-mapping (manual reserve placeholder)
     ACOES           — RENDA_VARIAVEL_BR AND type='stock'
-    ETFS            — type='etf' (BR + US together)
     FIIS            — asset_class='FIIS'
     OUTROS          — FUNDOS + OUTRO (loans, misc)
     RENDA_FIXA      — RENDA_FIXA
     RESERVA_VALOR   — CRIPTO
-    STOCKS          — STOCKS_US AND type='stock'
+    STOCKS          — STOCKS_US AND type='stock', OR type='etf' (label
+                      "Stocks e ETFs Americanos" — user holds only
+                      US-exposure ETFs today: IVVB11 BR-listed +
+                      QQQM/SCHD US-listed, treated together). When a
+                      BR-market ETF (e.g. BOVA11) joins the portfolio,
+                      split this back into a separate ETF bucket.
 
 Targets live in user.preferences['asset_allocation_targets'] as a flat
 dict { 'ACOES': 20.0, ... }. Missing keys default to 0.
@@ -43,15 +47,17 @@ from app.services.fx_rate_service import get_rate
 
 # Bucket order matches the Bastter layout the user referenced — alphabetical
 # inside two groups: actively-managed first (Ações → Stocks), reserves last.
+# ETFS bucket was merged into STOCKS as "Stocks e ETFs Americanos" — keep
+# STOCKS as the bucket id (preserves the user's existing target) and just
+# updates the label + classifier.
 BUCKETS: list[tuple[str, str]] = [
     ("R_EMERGENCIA",  "R. Emergência"),
     ("ACOES",         "Ações"),
-    ("ETFS",          "ETFs"),
     ("FIIS",          "FIIs"),
     ("OUTROS",        "Outros"),
     ("RENDA_FIXA",    "Renda Fixa"),
     ("RESERVA_VALOR", "Reserva de Valor"),
-    ("STOCKS",        "Stocks"),
+    ("STOCKS",        "Stocks e ETFs Americanos"),
 ]
 
 
@@ -61,8 +67,12 @@ def _bucket_for(asset: Asset) -> Optional[str]:
     you tweak the mapping."""
     ac = asset.asset_class
     t = asset.type
+    # All ETFs currently in the user's portfolio are American-exposure
+    # (IVVB11 tracks SP500 in BRL; QQQM and SCHD are US-listed). They
+    # share the STOCKS bucket. Reintroduce a separate ETFS bucket only
+    # when a non-American-exposure ETF lands in the portfolio.
     if t == "etf":
-        return "ETFS"
+        return "STOCKS"
     if ac == "RENDA_VARIAVEL_BR" and t == "stock":
         return "ACOES"
     if ac == "STOCKS_US" and t == "stock":
