@@ -217,6 +217,94 @@ async def _get_latest_value(session: AsyncSession, asset_id: uuid.UUID) -> Optio
     return result.scalar_one_or_none()
 
 
+async def _get_value_as_of(
+    session: AsyncSession, asset_id: uuid.UUID, as_of_date: date
+) -> Optional[AssetValue]:
+    """Get the most recent AssetValue for an asset on or before as_of_date."""
+    result = await session.execute(
+        select(AssetValue)
+        .where(AssetValue.asset_id == asset_id, AssetValue.date <= as_of_date)
+        .order_by(desc(AssetValue.date), desc(AssetValue.id))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _load_asset_native_values(
+    session: AsyncSession,
+    assets: list[Asset],
+    up_to_date: Optional[date] = None,
+) -> dict[str, list[tuple[date, float]]]:
+    """Bulk-load AssetValue rows for all assets in one query.
+
+    Returns {aid: [(date, amount), ...]} sorted ascending by (date, id).
+    When purchase_price and purchase_date are both set and purchase_date
+    predates the first recorded value, it is prepended as the earliest anchor.
+    """
+    if not assets:
+        return {}
+
+    asset_ids = [a.id for a in assets]
+    q = (
+        select(AssetValue.asset_id, AssetValue.date, AssetValue.amount)
+        .where(AssetValue.asset_id.in_(asset_ids))
+        .order_by(AssetValue.asset_id, AssetValue.date, AssetValue.id)
+    )
+    if up_to_date is not None:
+        q = q.where(AssetValue.date <= up_to_date)
+
+    rows = (await session.execute(q)).all()
+
+    values_map: dict[str, list[tuple[date, float]]] = {str(a.id): [] for a in assets}
+    for aid, d, amt in rows:
+        values_map[str(aid)].append((d, float(amt)))
+
+    for asset in assets:
+        aid = str(asset.id)
+        vals = values_map[aid]
+        if asset.purchase_price is not None and asset.purchase_date is not None:
+            if not vals or asset.purchase_date < vals[0][0]:
+                # purchase_price is *per-unit* (per the Asset model); the
+                # earliest anchor needs the total cost basis. Without the
+                # multiplier, fractional crypto + RF positions where units
+                # carry face value or fractional shares (Bitcoin at 0.07
+                # units × $49 k/unit) get prepended at per-unit price and
+                # the trend chart spikes to a value matching only one unit.
+                units_for_basis = float(asset.units) if asset.units is not None else 1.0
+                cost_basis = float(asset.purchase_price) * units_for_basis
+                vals.insert(0, (asset.purchase_date, cost_basis))
+
+    return values_map
+
+
+def _fill_forward_at(
+    asset: Asset,
+    sorted_vals: list[tuple[date, float]],
+    as_of: date,
+) -> Optional[float]:
+    """Return the fill-forwarded native value of asset at as_of, or None.
+
+    Scans sorted_vals for the latest entry on or before as_of. Falls back
+    to purchase_price when purchase_date is None (asset predates any known
+    date) and no value history is available for the requested date.
+    """
+    result = None
+    for d, v in sorted_vals:
+        if d <= as_of:
+            result = v
+        else:
+            break
+    if result is None and asset.purchase_price is not None and asset.purchase_date is None:
+        # Same per-unit fix as _load_asset_native_values: purchase_price
+        # is per-unit, so the fallback to cost basis must multiply by
+        # units. Without it, an asset whose purchase_date is unknown but
+        # has units=8 (e.g. a Tesouro position imported without a buy
+        # date) reads as 1/8th of its real cost basis at as_of_date.
+        units_for_basis = float(asset.units) if asset.units is not None else 1.0
+        result = float(asset.purchase_price) * units_for_basis
+    return result
+
+
 async def _get_value_count(session: AsyncSession, asset_id: uuid.UUID) -> int:
     """Get the number of AssetValue entries for an asset."""
     result = await session.scalar(
@@ -759,33 +847,28 @@ async def get_portfolio_trend(
     if not active_assets:
         return {"assets": [], "trend": [], "total": 0.0}
 
-    # Collect all values per asset and all unique dates
-    asset_meta = []
-    asset_values_map: dict[str, list[tuple[date, float]]] = {}
-    sell_date_by_aid: dict[str, date] = {}
-    all_dates: set[date] = set()
-
     # Get user's primary currency for conversion
     user = await session.get(User, user_id)
     primary_currency = user.primary_currency if user else get_settings().default_currency
 
-    # Bulk-load every AssetValue and FX rate up-front so the per-asset
-    # loop is O(N) instead of O(N × DB roundtrip). The previous version
-    # did 1 SELECT for AssetValues + 1 fx convert() per (date, asset) —
-    # for a 100-asset portfolio that was ~400ms of DB chatter alone.
-    asset_ids = [a.id for a in active_assets]
-    all_avs = (await session.execute(
-        select(AssetValue.asset_id, AssetValue.date, AssetValue.amount)
-        .where(AssetValue.asset_id.in_(asset_ids))
-        .order_by(AssetValue.asset_id, AssetValue.date)
-    )).all()
-    av_by_asset: dict[uuid.UUID, list[tuple[date, float]]] = {}
-    for av_aid, av_date, av_amt in all_avs:
-        av_by_asset.setdefault(av_aid, []).append((av_date, float(av_amt)))
+    # Use the shared helper to bulk-load native-currency AVs (and the
+    # purchase_price × units anchor when purchase_date precedes them).
+    # Same source-of-truth used by get_asset_values_at, so the dashboard
+    # widget and the trend chart can't drift apart on prepend logic.
+    values_map = await _load_asset_native_values(session, active_assets)
 
-    # Pre-load FX rates only if some asset has a non-primary currency,
-    # otherwise skip the table scan entirely (most users have everything
-    # in their primary ccy).
+    asset_meta = []
+    asset_currency: dict[str, str] = {}
+    sell_date_by_aid: dict[str, date] = {}
+    all_dates: set[date] = set()
+
+    # Bulk-load every FX rate up-front so the per-(date, asset) loop is
+    # O(1) lookups instead of N×M `convert()` calls hitting the DB. The
+    # upstream version of this function calls convert() inside the trend
+    # loop, which for a 100-asset × 5-year history portfolio means ~6 k
+    # FX queries per request and pushed the Patrimônio page to ~400 ms
+    # of pure DB chatter. We keep the in-memory `fx_at` here and let
+    # convert() handle one-off lookups elsewhere.
     foreign_ccys = {a.currency for a in active_assets if a.currency != primary_currency}
     fx_by_ccy_date: dict[tuple[str, str], float] = {}
     fx_dates_by_ccy: dict[str, list[str]] = {}
@@ -836,18 +919,12 @@ async def get_portfolio_trend(
             "type": asset.type,
             "group_id": str(asset.group_id) if asset.group_id else None,
         })
+        asset_currency[aid] = asset.currency
 
-        vals = av_by_asset.get(asset.id, [])
-
-        # Prepend purchase_price × units (the cost-basis total) as the first
-        # data point if it predates existing values. See historical bug:
-        # BTC at 0.074649 units × $49,051.94/unit was inserted at $49k
-        # instead of $3,661 cost basis without the units multiplier.
-        if asset.purchase_price is not None and asset.purchase_date is not None:
-            if not vals or asset.purchase_date < vals[0][0]:
-                units_for_basis = float(asset.units) if asset.units is not None else 1.0
-                cost_basis = float(asset.purchase_price) * units_for_basis
-                vals = [(asset.purchase_date, cost_basis)] + vals
+        # Prepend (with units multiplier) is now handled centrally inside
+        # _load_asset_native_values so the dashboard widget and the chart
+        # can't disagree about earliest-anchor logic.
+        vals = values_map[aid]
 
         # If the asset was sold and a sell_price is recorded, treat it as the
         # asset's terminal value on sell_date so the chart reflects the
@@ -858,12 +935,18 @@ async def get_portfolio_trend(
                 vals = [(d, v) for d, v in vals if d <= asset.sell_date]
                 if not vals or vals[-1][0] != asset.sell_date:
                     vals.append((asset.sell_date, float(asset.sell_price)))
+                values_map[aid] = vals
 
+        # Convert this asset's series to primary currency up-front so the
+        # trend loop below doesn't need a per-(date, asset) FX call. Each
+        # AV row is FX'd at its own date — same semantics as upstream's
+        # in-loop convert(), but using the bulk-loaded fx_at instead of
+        # round-tripping to the DB N×M times.
         if asset.currency != primary_currency:
             vals = [(d, amt * fx_at(asset.currency, primary_currency, d))
                     for d, amt in vals]
+            values_map[aid] = vals
 
-        asset_values_map[aid] = vals
         for d, _ in vals:
             all_dates.add(d)
 
@@ -876,13 +959,16 @@ async def get_portfolio_trend(
     value_lookup: dict[str, dict[date, float]] = {}
     first_date: dict[str, date] = {}
     for aid in [a["id"] for a in asset_meta]:
-        value_lookup[aid] = {d: v for d, v in asset_values_map[aid]}
-        if asset_values_map[aid]:
-            first_date[aid] = asset_values_map[aid][0][0]
+        value_lookup[aid] = dict(values_map[aid])
+        if values_map[aid]:
+            first_date[aid] = values_map[aid][0][0]
 
-    # Build trend with fill-forward; 0 before first date (for stacking)
+    # Build trend with fill-forward; 0 before first date (for stacking).
+    # Each native-currency amount is converted at the display date `d` so that
+    # fill-forwarded values reflect current FX rates — consistent with
+    # get_asset_values_at(as_of_date=d).
     trend = []
-    last_known: dict[str, float] = {}
+    last_known: dict[str, float] = {}  # native currency amounts
     for aid in [a["id"] for a in asset_meta]:
         last_known[aid] = 0.0
 
@@ -894,33 +980,46 @@ async def get_portfolio_trend(
                 last_known[aid] = value_lookup[aid][d]
             # Use 0 before asset exists (stacking needs numeric values)
             if aid in first_date and d >= first_date[aid]:
-                val = round(last_known[aid], 2)
+                native = last_known[aid]
             else:
-                val = 0
+                native = 0.0
             # After sell_date, the asset has been liquidated — drop to 0 so
             # it stops contributing to the portfolio total going forward.
             if aid in sell_date_by_aid and d > sell_date_by_aid[aid]:
-                val = 0
+                native = 0.0
                 last_known[aid] = 0.0
+
+            # `values_map` was already FX-converted at each (date, asset)
+            # pair upstream of this loop, so `native` is in primary
+            # currency. Skipping the convert() call here drops ~N_dates ×
+            # N_assets DB roundtrips for portfolios with foreign positions.
+            val = round(native, 2)
+
             row[aid] = val
             date_total += val
         row["_total"] = round(date_total, 2)
         trend.append(row)
 
-    # `last_known` already holds primary-currency values (we converted per-date
-    # above when building asset_values_map). Summing directly keeps the header
-    # total in lockstep with the tooltip's `_total` on the final row — any
-    # second conversion here would double-count for non-primary assets.
-    total = sum(last_known.values())
+    # The header total matches the last row's _total — both use the same
+    # per-display-date conversion so no second conversion is needed.
+    total = trend[-1]["_total"] if trend else 0.0
 
     return {"assets": asset_meta, "trend": trend, "total": round(total, 2)}
 
 
-async def get_total_asset_value(
-    session: AsyncSession, user_id: uuid.UUID
-) -> dict[str, float]:
-    """Get total asset value grouped by currency (for dashboard).
-    Only includes non-archived assets that haven't been sold."""
+async def get_asset_values_at(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    as_of_date: Optional[date] = None,
+    primary_currency: Optional[str] = None,
+) -> tuple[dict[str, float], float]:
+    """Return (per_currency_totals, primary_total) for all active assets.
+
+    - as_of_date=None: uses live prices (current view).
+    - as_of_date set: uses the latest AssetValue on or before that date,
+      falling back to purchase_price only if the asset existed by that date.
+    - primary_currency=None: primary_total is 0.0.
+    """
     result = await session.execute(
         select(Asset).where(
             Asset.user_id == user_id,
@@ -931,12 +1030,30 @@ async def get_total_asset_value(
     assets = list(result.scalars().all())
 
     totals: dict[str, float] = {}
+    primary_total = 0.0
+
+    if as_of_date is not None:
+        values_map = await _load_asset_native_values(session, assets, up_to_date=as_of_date)
+
     for asset in assets:
-        latest = await _get_latest_value(session, asset.id)
-        current = _compute_current_value(asset, latest)
-        if current is not None:
-            totals[asset.currency] = totals.get(asset.currency, 0.0) + current
-    return totals
+        if as_of_date is not None:
+            amount: Optional[float] = _fill_forward_at(asset, values_map[str(asset.id)], as_of_date)
+        else:
+            latest = await _get_latest_value(session, asset.id)
+            amount = _compute_current_value(asset, latest)
+
+        if not amount:
+            continue
+
+        totals[asset.currency] = totals.get(asset.currency, 0.0) + amount
+
+        if primary_currency is not None:
+            converted, _ = await convert(
+                session, Decimal(str(amount)), asset.currency, primary_currency, as_of_date
+            )
+            primary_total += float(converted)
+
+    return totals, primary_total
 
 
 # ============================================================================

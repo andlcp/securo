@@ -343,15 +343,22 @@ async def get_transactions(
     # rows). Computed before pagination so it covers the whole result set.
     summary: Optional[dict] = None
     if include_summary:
-        summary_subq = base_query.subquery()
+        ignored_category_ids = select(Category.id).where(Category.is_ignored == True)
+        pnl_subq = base_query.where(
+        Transaction.is_ignored == False,
+        or_(
+            Transaction.category_id.is_(None),
+            Transaction.category_id.not_in(ignored_category_ids),
+        ),
+    ).subquery()
         amount_norm = func.coalesce(
-            summary_subq.c.amount_primary, summary_subq.c.amount
+            pnl_subq.c.amount_primary, pnl_subq.c.amount
         )
         summary_rows = await session.execute(
             select(
-                summary_subq.c.type,
+                pnl_subq.c.type,
                 func.coalesce(func.sum(func.abs(amount_norm)), 0),
-            ).group_by(summary_subq.c.type)
+            ).group_by(pnl_subq.c.type)
         )
         income = Decimal("0")
         expense = Decimal("0")
@@ -419,7 +426,8 @@ async def get_transactions(
         for tx in transactions:
             tx.attachment_count = counts.get(tx.id, 0)
             tx.payee_name = tx.payee_entity.name if tx.payee_entity else None
-
+            if not tx.is_ignored and tx.category and tx.category.is_ignored:
+                tx.is_ignored = True
         # Tag shared rows with the viewer's share + the source group.
         # Owned rows stay as-is. We pre-compute the viewer's linked
         # member ids → group ids once, then look up each transaction's
@@ -888,6 +896,93 @@ async def link_existing_as_transfer(
     return debit_tx, credit_tx
 
 
+async def create_transfer_counterpart(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+    to_account_id: uuid.UUID,
+) -> tuple[Transaction, Transaction]:
+    """Mark an existing transaction as a transfer by auto-creating its
+    counterpart in another account.
+
+    Used when the counterpart account is manual (not bank-synced), so no
+    matching transaction exists to link against. The counterpart mirrors the
+    anchor's date / description / notes with the opposite type, converting the
+    amount when the destination account uses a different currency.
+    """
+    from decimal import Decimal
+
+    anchor = await get_transaction(session, transaction_id, user_id)
+    if not anchor:
+        raise ValueError("Transaction not found")
+    if anchor.transfer_pair_id is not None:
+        raise ValueError("Transaction is already part of a transfer")
+    if anchor.account_id == to_account_id:
+        raise ValueError("Counterpart must be in a different account")
+
+    to_result = await session.execute(
+        select(Account)
+        .outerjoin(BankConnection)
+        .where(
+            Account.id == to_account_id,
+            or_(Account.user_id == user_id, BankConnection.user_id == user_id),
+        )
+    )
+    to_account = to_result.scalar_one_or_none()
+    if not to_account:
+        raise ValueError("Destination account not found")
+
+    opposing_type = "credit" if anchor.type == "debit" else "debit"
+
+    # Convert the amount when the destination account uses another currency.
+    if anchor.currency != to_account.currency:
+        counterpart_amount, _ = await fx_convert(
+            session, Decimal(str(anchor.amount)), anchor.currency, to_account.currency, anchor.date
+        )
+    else:
+        counterpart_amount = anchor.amount
+
+    transfer_pair_id = uuid.uuid4()
+
+    counterpart_tx = Transaction(
+        user_id=user_id,
+        account_id=to_account_id,
+        description=anchor.description,
+        amount=counterpart_amount,
+        currency=to_account.currency,
+        date=anchor.date,
+        type=opposing_type,
+        source="transfer",
+        notes=anchor.notes,
+        transfer_pair_id=transfer_pair_id,
+    )
+    apply_effective_date(counterpart_tx, to_account)
+    session.add(counterpart_tx)
+
+    # Link the anchor into the pair; transfers are excluded from category reports.
+    anchor.transfer_pair_id = transfer_pair_id
+    anchor.category_id = None
+
+    await session.flush()
+    await stamp_primary_amount(session, user_id, counterpart_tx)
+
+    # Cross-currency: keep both sides on the same primary amount.
+    if anchor.currency != to_account.currency and anchor.amount_primary is not None:
+        counterpart_tx.amount_primary = anchor.amount_primary
+        if counterpart_tx.amount and Decimal(str(counterpart_tx.amount)):
+            counterpart_tx.fx_rate_used = Decimal(str(anchor.amount_primary)) / Decimal(
+                str(counterpart_tx.amount)
+            )
+
+    await session.commit()
+    await session.refresh(anchor, ["category"])
+    await session.refresh(counterpart_tx, ["category"])
+
+    debit_tx = anchor if anchor.type == "debit" else counterpart_tx
+    credit_tx = counterpart_tx if anchor.type == "debit" else anchor
+    return debit_tx, credit_tx
+
+
 async def _resync_bill_link_from_override(
     session: AsyncSession, transaction: Transaction, account: Optional[Account]
 ) -> None:
@@ -1248,6 +1343,22 @@ async def bulk_add_to_group(
 
     await session.commit()
     return {"updated": updated, "skipped": skipped}
+
+
+async def toggle_ignore_transaction(
+    session: AsyncSession, transaction_id: uuid.UUID, user_id: uuid.UUID
+) -> Optional[Transaction]:
+    """Flip the is_ignored flag on a transaction. Acts immediately (no
+    other field is touched) so the edit dialog can offer ignore as a
+    one-click action alongside delete, instead of bundling it into the
+    form's Salvar flow."""
+    transaction = await get_transaction(session, transaction_id, user_id)
+    if not transaction:
+        return None
+    transaction.is_ignored = not transaction.is_ignored
+    await session.commit()
+    await session.refresh(transaction)
+    return transaction
 
 
 async def delete_transaction(

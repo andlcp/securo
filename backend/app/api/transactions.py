@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import current_active_user
 from app.core.database import get_async_session
 from app.models.user import User
-from app.schemas.transaction import BulkAddToGroupRequest, BulkCategorizeRequest, BulkTagsRequest, LinkTransferRequest, TransactionCreate, TransactionRead, TransactionUpdate, TransferCreate, TransferRead
+from app.schemas.transaction import BulkAddToGroupRequest, BulkCategorizeRequest, BulkTagsRequest, CreateCounterpartRequest, LinkTransferRequest, TransactionCreate, TransactionRead, TransactionUpdate, TransferCreate, TransferRead
 from app.services import transaction_service
 from app.services.admin_service import get_credit_card_accounting_mode
 
@@ -77,6 +77,8 @@ async def list_transactions(
     include_opening_balance: bool = Query(False),
     exclude_transfers: bool = Query(False),
     tags: Optional[List[str]] = Query(None),
+    min_amount: Optional[float] = Query(None, ge=0, description="Filter to transactions with absolute amount >= this value (primary currency)."),
+    max_amount: Optional[float] = Query(None, ge=0, description="Filter to transactions with absolute amount <= this value (primary currency)."),
     sort_by: Optional[str] = Query(None, description="Column to sort by (date|amount|description|payee|category|account|type|status). Default: date desc."),
     sort_dir: str = Query("desc", regex="^(asc|desc)$"),
     session: AsyncSession = Depends(get_async_session),
@@ -97,6 +99,8 @@ async def list_transactions(
         unbilled_only=unbilled_only,
         sort_by=sort_by,
         sort_dir=sort_dir,
+        min_amount=min_amount,
+        max_amount=max_amount,
         include_summary=True,
     )
     primary_currency = user.primary_currency
@@ -276,6 +280,31 @@ async def link_transfer(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
+@router.post("/{transaction_id}/create-counterpart", response_model=TransferRead, status_code=status.HTTP_201_CREATED)
+async def create_counterpart(
+    transaction_id: uuid.UUID,
+    data: CreateCounterpartRequest,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Mark a transaction as a transfer by auto-creating its counterpart in
+    another (typically manual) account."""
+    try:
+        debit_tx, credit_tx = await transaction_service.create_transfer_counterpart(
+            session, user.id, transaction_id, data.to_account_id
+        )
+        debit_full = await transaction_service.get_transaction(session, debit_tx.id, user.id)
+        credit_full = await transaction_service.get_transaction(session, credit_tx.id, user.id)
+        primary_currency = user.primary_currency
+        return TransferRead(
+            debit=_tag_fx_fallback(TransactionRead.model_validate(debit_full, from_attributes=True), primary_currency),
+            credit=_tag_fx_fallback(TransactionRead.model_validate(credit_full, from_attributes=True), primary_currency),
+            transfer_pair_id=debit_tx.transfer_pair_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 @router.get("/{transaction_id}/transfer-candidates", response_model=list[TransactionRead])
 async def get_transfer_candidates(
     transaction_id: uuid.UUID,
@@ -337,6 +366,19 @@ async def update_transaction(
         transaction = await transaction_service.update_transaction(session, transaction_id, user.id, data)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    if not transaction:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    primary_currency = user.primary_currency
+    return _tag_fx_fallback(TransactionRead.model_validate(transaction, from_attributes=True), primary_currency)
+
+
+@router.patch("/{transaction_id}/ignore", response_model=TransactionRead)
+async def toggle_ignore_transaction(
+    transaction_id: uuid.UUID,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    transaction = await transaction_service.toggle_ignore_transaction(session, transaction_id, user.id)
     if not transaction:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
     primary_currency = user.primary_currency

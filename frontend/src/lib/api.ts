@@ -191,7 +191,10 @@ export const connections = {
     const { data } = await api.post(`/connections/${connectionId}/reconnect-token`)
     return data.access_token
   },
-  updateSettings: async (id: string, settings: Partial<ConnectionSettings>): Promise<BankConnection> => {
+  updateSettings: async (
+    id: string,
+    settings: Partial<ConnectionSettings> & { display_name?: string | null },
+  ): Promise<BankConnection> => {
     const { data } = await api.patch(`/connections/${id}/settings`, settings)
     return data
   },
@@ -273,6 +276,8 @@ export const transactions = {
     include_opening_balance?: boolean
     exclude_transfers?: boolean
     tags?: string[]
+    min_amount?: number
+    max_amount?: number
     sort_by?: string
     sort_dir?: 'asc' | 'desc'
   }): Promise<PaginatedTransactions> => {
@@ -299,6 +304,10 @@ export const transactions = {
   },
   delete: async (id: string): Promise<void> => {
     await api.delete(`/transactions/${id}`)
+  },
+  toggleIgnore: async (id: string): Promise<Transaction> => {
+    const { data } = await api.patch(`/transactions/${id}/ignore`)
+    return data
   },
   createTransfer: async (transfer: {
     from_account_id: string
@@ -355,6 +364,15 @@ export const transactions = {
     })
     return data
   },
+  createTransferCounterpart: async (
+    transactionId: string,
+    toAccountId: string,
+  ): Promise<{ debit: Transaction; credit: Transaction; transfer_pair_id: string }> => {
+    const { data } = await api.post(`/transactions/${transactionId}/create-counterpart`, {
+      to_account_id: toAccountId,
+    })
+    return data
+  },
   transferCandidates: async (transactionId: string, params?: { limit?: number; window_days?: number }): Promise<Transaction[]> => {
     const { data } = await api.get(`/transactions/${transactionId}/transfer-candidates`, { params })
     return data
@@ -367,13 +385,17 @@ export const transactions = {
     flip_amount?: boolean
     inflow_column?: string
     outflow_column?: string
-  }): Promise<{ transactions: ImportPreviewTransaction[]; detected_format: string }> => {
+    column_mapping?: Record<string, string>
+  }): Promise<{ transactions: ImportPreviewTransaction[]; detected_format: string; csv_columns?: string[]; parse_error?: string | null }> => {
     const formData = new FormData()
     formData.append('file', file)
     if (options?.date_format) formData.append('date_format', options.date_format)
     if (options?.flip_amount) formData.append('flip_amount', 'true')
     if (options?.inflow_column) formData.append('inflow_column', options.inflow_column)
     if (options?.outflow_column) formData.append('outflow_column', options.outflow_column)
+    if (options?.column_mapping && Object.keys(options.column_mapping).length > 0) {
+      formData.append('column_mapping', JSON.stringify(options.column_mapping))
+    }
     const { data } = await api.post('/transactions/import/preview', formData)
     return data
   },

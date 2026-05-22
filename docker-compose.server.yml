@@ -67,7 +67,12 @@ services:
 
   celery-worker:
     <<: *backend-base
-    command: celery -A app.worker worker --loglevel=info
+    # --concurrency=2 caps the celery-worker pool size — without it
+    # celery defaults to N_CPUs which spins up a full process per core
+    # (each holding its own SQLAlchemy engine + asyncio loop). On the
+    # 4-core Hetzner box that was ~600 MB of idle worker RAM. Upstream
+    # commit 7186dfd added this for the same reason on docker-compose.yml.
+    command: celery -A app.worker worker --loglevel=info --concurrency=2
 
   celery-beat:
     <<: *backend-base
