@@ -945,14 +945,17 @@ export interface AssetAllocationCategory {
   delta_pp: number
   deficit_brl: number
   deficit_share_pct: number
+  excluded: boolean
 }
 
 export interface AssetAllocationResponse {
   primary_currency: string
   total_brl: number
+  full_total_brl: number
   categories: AssetAllocationCategory[]
   targets_sum: number
   deficit_total_brl: number
+  excluded_ids: string[]
 }
 
 export interface AportePlanCategory {
@@ -984,6 +987,10 @@ export const assetAllocation = {
   },
   saveTargets: async (targets: Record<string, number>): Promise<AssetAllocationResponse> => {
     const { data } = await api.put('/asset-allocation/targets', { targets })
+    return data
+  },
+  saveExcluded: async (excluded: string[]): Promise<AssetAllocationResponse> => {
+    const { data } = await api.put('/asset-allocation/excluded', { excluded })
     return data
   },
   aportePlan: async (amount: number): Promise<AportePlanResponse> => {

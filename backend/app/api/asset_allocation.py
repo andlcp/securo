@@ -23,18 +23,25 @@ class AssetAllocationCategory(BaseModel):
     delta_pp: float
     deficit_brl: float
     deficit_share_pct: float
+    excluded: bool = False
 
 
 class AssetAllocationResponse(BaseModel):
     primary_currency: str
     total_brl: float
+    full_total_brl: float = 0.0
     categories: list[AssetAllocationCategory]
     targets_sum: float
     deficit_total_brl: float
+    excluded_ids: list[str] = Field(default_factory=list)
 
 
 class TargetsPayload(BaseModel):
     targets: dict[str, float] = Field(default_factory=dict)
+
+
+class ExcludedPayload(BaseModel):
+    excluded: list[str] = Field(default_factory=list)
 
 
 class AportePlanCategory(BaseModel):
@@ -74,6 +81,18 @@ async def put_targets(
     user: User = Depends(current_active_user),
 ) -> dict:
     user = await asset_allocation_service.save_targets(session, user, payload.targets)
+    return await asset_allocation_service.compute_allocation(session, user)
+
+
+@router.put("/excluded", response_model=AssetAllocationResponse)
+async def put_excluded(
+    payload: ExcludedPayload,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+) -> dict:
+    """Persist which buckets to leave out of the allocation math (e.g.
+    'Outros' = family loans). Returns the recomputed allocation."""
+    user = await asset_allocation_service.save_excluded(session, user, payload.excluded)
     return await asset_allocation_service.compute_allocation(session, user)
 
 

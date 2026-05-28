@@ -70,15 +70,40 @@ export function AssetAllocationTable({ locale, mask }: AssetAllocationTableProps
     onError: () => toast.error('Erro ao salvar metas'),
   })
 
+  // Toggle whether a class is included in the rebalancing math. Persists
+  // immediately (no separate save button) and refetches both the
+  // allocation and the aporte plan, since exclusion shifts the considered
+  // total and therefore every %.
+  const excludedSet = useMemo(
+    () => new Set(data?.excluded_ids ?? []),
+    [data?.excluded_ids],
+  )
+  const excludeMutation = useMutation({
+    mutationFn: (excluded: string[]) => assetAllocation.saveExcluded(excluded),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['asset-allocation'] })
+      qc.invalidateQueries({ queryKey: ['aporte-plan'] })
+    },
+    onError: () => toast.error('Erro ao atualizar classes consideradas'),
+  })
+  function toggleExcluded(id: string) {
+    const next = new Set(excludedSet)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    excludeMutation.mutate([...next])
+  }
+
   // Live recomputed totals reflecting the user's in-progress edits — we
   // want the "soma 100%" indicator to update as they type, without
-  // hitting the server until they hit Salvar.
+  // hitting the server until they hit Salvar. Excluded classes don't
+  // count toward the 100% target sum (mirrors the backend).
   const draftSum = useMemo(() => {
-    return Object.values(drafts).reduce((sum, raw) => {
+    return Object.entries(drafts).reduce((sum, [id, raw]) => {
+      if (excludedSet.has(id)) return sum
       const n = parseFloat((raw || '0').replace(',', '.'))
       return sum + (isFinite(n) ? n : 0)
     }, 0)
-  }, [drafts])
+  }, [drafts, excludedSet])
 
   const sumOk = Math.abs(draftSum - 100) < 0.01
   const currency = data?.primary_currency ?? 'BRL'
@@ -127,6 +152,9 @@ export function AssetAllocationTable({ locale, mask }: AssetAllocationTableProps
   // the "Onde Aportar" column update as they type even before Salvar.
   // Falls back to backend numbers if total or drafts are inconsistent.
   const liveRows = data.categories.map(c => {
+    if (c.excluded) {
+      return { ...c, target_pct_live: c.target_pct, deficit_live: 0 }
+    }
     const draftRaw = drafts[c.id] ?? ''
     const draftTarget = parseFloat((draftRaw || '0').replace(',', '.'))
     const tgt = isFinite(draftTarget) ? draftTarget : c.target_pct
@@ -148,8 +176,13 @@ export function AssetAllocationTable({ locale, mask }: AssetAllocationTableProps
         <div className="text-right">
           <p className="text-xs text-muted-foreground">Patrimônio total</p>
           <p className="text-base font-bold tabular-nums">
-            {mask(fmtMoney(data.total_brl, currency, locale))}
+            {mask(fmtMoney(data.full_total_brl || data.total_brl, currency, locale))}
           </p>
+          {data.excluded_ids.length > 0 && (
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Base do cálculo: {mask(fmtMoney(data.total_brl, currency, locale))}
+            </p>
+          )}
         </div>
       </div>
 
@@ -172,33 +205,52 @@ export function AssetAllocationTable({ locale, mask }: AssetAllocationTableProps
               const aporteShare = liveDeficitTotal > 0
                 ? (c.deficit_live / liveDeficitTotal) * 100
                 : 0
+              const isExcluded = c.excluded
               return (
                 <tr
                   key={c.id}
                   className={`border-b border-border last:border-b-0 ${
                     i % 2 === 0 ? '' : 'bg-muted/10'
-                  } ${isBelowTarget ? 'bg-emerald-500/5' : ''}`}
+                  } ${isExcluded ? 'opacity-50' : isBelowTarget ? 'bg-emerald-500/5' : ''}`}
                 >
-                  <td className="px-5 py-3 font-medium text-foreground">{c.label}</td>
+                  <td className="px-5 py-3 font-medium text-foreground">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!isExcluded}
+                        disabled={excludeMutation.isPending}
+                        onChange={() => toggleExcluded(c.id)}
+                        className="h-3.5 w-3.5 rounded border-border accent-primary cursor-pointer"
+                        title={isExcluded ? 'Incluir no cálculo' : 'Excluir do cálculo'}
+                      />
+                      <span className={isExcluded ? 'line-through text-muted-foreground' : ''}>{c.label}</span>
+                    </label>
+                  </td>
                   <td className="text-right px-3 py-3 tabular-nums">
                     {mask(fmtMoney(c.total_brl, currency, locale))}
                   </td>
                   <td className="text-right px-3 py-3 tabular-nums text-muted-foreground">
-                    {fmtPct(c.current_pct)}
+                    {isExcluded ? '—' : fmtPct(c.current_pct)}
                   </td>
                   <td className="text-right px-3 py-3 tabular-nums">
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      className="w-20 text-right bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-2 py-1 rounded text-sm tabular-nums"
-                      value={drafts[c.id] ?? ''}
-                      onChange={(e) => setDraft(c.id, e.target.value)}
-                      placeholder="0"
-                    />
-                    <span className="text-muted-foreground ml-1">%</span>
+                    {isExcluded ? (
+                      <span className="text-muted-foreground text-xs">fora do cálculo</span>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          className="w-20 text-right bg-card border border-border focus:outline-none focus:ring-2 focus:ring-primary px-2 py-1 rounded text-sm tabular-nums"
+                          value={drafts[c.id] ?? ''}
+                          onChange={(e) => setDraft(c.id, e.target.value)}
+                          placeholder="0"
+                        />
+                        <span className="text-muted-foreground ml-1">%</span>
+                      </>
+                    )}
                   </td>
                   <td className="text-right px-3 py-3 tabular-nums">
-                    {(() => {
+                    {isExcluded ? <span className="text-muted-foreground">—</span> : (() => {
                       const delta = c.current_pct - c.target_pct_live
                       // Δ pp: positive = above target (we don't want to aporte here),
                       // negative = below target. Color matches the Bastter convention.
@@ -212,12 +264,12 @@ export function AssetAllocationTable({ locale, mask }: AssetAllocationTableProps
                     })()}
                   </td>
                   <td className="text-right px-3 py-3 tabular-nums font-medium">
-                    {isBelowTarget
+                    {!isExcluded && isBelowTarget
                       ? <span className="text-emerald-700">{mask(fmtMoney(c.deficit_live, currency, locale))}</span>
                       : <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="text-right px-5 py-3 tabular-nums font-medium">
-                    {isBelowTarget
+                    {!isExcluded && isBelowTarget
                       ? <span className="text-emerald-700">{aporteShare.toFixed(1)}%</span>
                       : <span className="text-muted-foreground">—</span>}
                   </td>

@@ -105,6 +105,22 @@ def _read_targets(user: User) -> dict[str, float]:
     return out
 
 
+def _read_excluded(user: User) -> set[str]:
+    """Bucket ids the user opted to leave OUT of the allocation math.
+
+    Use case: "Outros" holds family loans the user wants gone — counting
+    them distorts every other class's % and the aporte plan. Excluded
+    buckets still appear in the payload (so the checkbox is visible and
+    re-checkable) but contribute nothing to the considered total, the
+    deficits, or the targets sum."""
+    prefs = user.preferences or {}
+    raw = prefs.get("asset_allocation_excluded") or []
+    valid = {bid for bid, _ in BUCKETS}
+    if isinstance(raw, list):
+        return {str(x) for x in raw if x in valid}
+    return set()
+
+
 async def compute_allocation(
     session: AsyncSession, user: User
 ) -> dict:
@@ -176,13 +192,38 @@ async def compute_allocation(
         by_bucket[bucket] += amt
 
     targets = _read_targets(user)
-    total = sum(by_bucket.values(), Decimal("0"))
+    excluded = _read_excluded(user)
+    # The considered total is the rebalancing universe — excluded buckets
+    # (e.g. family loans parked in "Outros") sit outside it so they don't
+    # skew every other class's % or the aporte split.
+    total = sum(
+        (v for bid, v in by_bucket.items() if bid not in excluded),
+        Decimal("0"),
+    )
+    full_total = sum(by_bucket.values(), Decimal("0"))
 
     # First pass: compute current_pct, target_pct, delta_pp, raw deficit.
     raw_deficits: dict[str, Decimal] = {}
     cats_partial: list[dict] = []
     for bid, label in BUCKETS:
         v = by_bucket[bid]
+        is_excluded = bid in excluded
+        if is_excluded:
+            # Outside the rebalancing universe: keep the R$ value visible
+            # but no %, no target pressure, no deficit.
+            raw_deficits[bid] = Decimal("0")
+            cats_partial.append({
+                "id": bid,
+                "label": label,
+                "total_brl": float(v),
+                "current_pct": 0.0,
+                "target_pct": float(targets.get(bid, 0.0)),
+                "delta_pp": 0.0,
+                "deficit_brl": 0.0,
+                "excluded": True,
+                "_above_target": False,
+            })
+            continue
         current_pct = float(v / total * 100) if total > 0 else 0.0
         target_pct = float(targets.get(bid, 0.0))
         deficit = (Decimal(str(target_pct)) / Decimal("100")) * total - v
@@ -198,6 +239,7 @@ async def compute_allocation(
             "target_pct": round(target_pct, 4),
             "delta_pp": round(current_pct - target_pct, 4),
             "deficit_brl": float(positive_deficit),
+            "excluded": False,
             "_above_target": deficit < 0,
         })
 
@@ -211,12 +253,23 @@ async def compute_allocation(
         # the flag from the wire format (frontend infers from sign).
         cat.pop("_above_target", None)
 
+    # Targets sum is checked only over the INCLUDED buckets — excluding a
+    # bucket with a non-zero target should make the "soma 100%" warning
+    # fire so the user re-normalizes (excluding a 0%-target bucket like
+    # Outros leaves the sum untouched).
+    targets_sum = sum(
+        (targets.get(bid, 0.0) for bid, _ in BUCKETS if bid not in excluded),
+        0.0,
+    )
+
     return {
         "primary_currency": primary,
         "total_brl": float(total),
+        "full_total_brl": float(full_total),
         "categories": cats_partial,
-        "targets_sum": round(sum(targets.values()), 4),
+        "targets_sum": round(targets_sum, 4),
         "deficit_total_brl": float(sum_positive_deficits),
+        "excluded_ids": sorted(excluded),
     }
 
 
@@ -252,10 +305,15 @@ async def compute_aporte_plan(
     X = Decimal(str(max(aporte_brl, 0.0)))
     TA = T + X
 
-    # Per-bucket deficit measured against the POST-aporte total.
+    # Per-bucket deficit measured against the POST-aporte total. Excluded
+    # buckets (carried through from compute_allocation) never receive an
+    # aporte — they're outside the rebalancing universe.
     cats = base["categories"]
     deficits: dict[str, Decimal] = {}
     for cat in cats:
+        if cat.get("excluded"):
+            deficits[cat["id"]] = Decimal("0")
+            continue
         target_amt = (Decimal(str(cat["target_pct"])) / Decimal("100")) * TA
         deficits[cat["id"]] = max(Decimal("0"), target_amt - Decimal(str(cat["total_brl"])))
     total_deficit = sum(deficits.values(), Decimal("0"))
@@ -334,6 +392,23 @@ async def save_targets(
 
     prefs = dict(user.preferences or {})
     prefs["asset_allocation_targets"] = cleaned
+    user.preferences = prefs
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+async def save_excluded(
+    session: AsyncSession, user: User, excluded: list[str]
+) -> User:
+    """Persist the set of buckets to exclude from the allocation math.
+    Unknown bucket ids are dropped silently."""
+    valid_ids = {bid for bid, _ in BUCKETS}
+    cleaned = sorted({x for x in (excluded or []) if x in valid_ids})
+
+    prefs = dict(user.preferences or {})
+    prefs["asset_allocation_excluded"] = cleaned
     user.preferences = prefs
     session.add(user)
     await session.commit()
