@@ -19,7 +19,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { assetAllocation } from '@/lib/api'
-import type { AssetAllocationResponse } from '@/lib/api'
+import type { AssetAllocationResponse, AportePlanResponse } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 
 interface AssetAllocationTableProps {
@@ -95,6 +95,25 @@ export function AssetAllocationTable({ locale, mask }: AssetAllocationTableProps
     }
     saveMutation.mutate(targets)
   }
+
+  // "Tenho R$ X pra aportar" planner. Debounce the input so we don't fire
+  // a request per keystroke, then ask the backend to split the contribution
+  // and report the REAL resulting allocation (computed vs the post-aporte
+  // total — see asset_allocation_service.compute_aporte_plan).
+  const [aporteRaw, setAporteRaw] = useState('')
+  const [aporteDebounced, setAporteDebounced] = useState(0)
+  useEffect(() => {
+    const n = parseFloat((aporteRaw || '0').replace(/\./g, '').replace(',', '.'))
+    const amount = isFinite(n) ? n : 0
+    const h = setTimeout(() => setAporteDebounced(amount), 350)
+    return () => clearTimeout(h)
+  }, [aporteRaw])
+  const { data: aportePlan } = useQuery<AportePlanResponse>({
+    queryKey: ['aporte-plan', aporteDebounced],
+    queryFn: () => assetAllocation.aportePlan(aporteDebounced),
+    enabled: aporteDebounced > 0,
+    staleTime: 1000 * 30,
+  })
 
   if (isLoading || !data) {
     return (
@@ -248,6 +267,84 @@ export function AssetAllocationTable({ locale, mask }: AssetAllocationTableProps
         >
           {saveMutation.isPending ? 'Salvando...' : 'Salvar metas'}
         </Button>
+      </div>
+
+      {/* "Tenho R$ X pra aportar" — distributes a one-shot contribution and
+          shows the REAL resulting allocation (% computed against the
+          post-aporte total, not the static deficit). */}
+      <div className="px-5 py-4 border-t border-border bg-muted/20 rounded-b-xl">
+        <div className="flex items-center gap-3 flex-wrap">
+          <label className="text-sm font-medium text-foreground">
+            Tenho pra aportar:
+          </label>
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm text-muted-foreground">R$</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={aporteRaw}
+              onChange={e => setAporteRaw(e.target.value)}
+              placeholder="50.000"
+              className="w-32 rounded-md border border-border bg-background px-2 py-1 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          {aporteRaw && (
+            <button
+              onClick={() => setAporteRaw('')}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              limpar
+            </button>
+          )}
+        </div>
+
+        {aportePlan && aportePlan.aporte_brl > 0 && (
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs uppercase text-muted-foreground">
+                <tr>
+                  <th className="text-left py-2 font-medium">Classe</th>
+                  <th className="text-right px-3 py-2 font-medium">Aportar</th>
+                  <th className="text-right px-3 py-2 font-medium">% do aporte</th>
+                  <th className="text-right px-3 py-2 font-medium">% atual</th>
+                  <th className="text-right px-3 py-2 font-medium">→ % após</th>
+                  <th className="text-right py-2 font-medium">% alvo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {aportePlan.categories
+                  .filter(c => c.aporte_brl > 0.005)
+                  .sort((a, b) => b.aporte_brl - a.aporte_brl)
+                  .map(c => (
+                    <tr key={c.id} className="border-t border-border/50">
+                      <td className="py-2 text-foreground">{c.label}</td>
+                      <td className="text-right px-3 py-2 tabular-nums font-medium text-emerald-700 dark:text-emerald-400">
+                        {mask(fmtMoney(c.aporte_brl, currency, locale))}
+                      </td>
+                      <td className="text-right px-3 py-2 tabular-nums text-muted-foreground">
+                        {fmtPct(c.aporte_share_pct, 1)}
+                      </td>
+                      <td className="text-right px-3 py-2 tabular-nums text-muted-foreground">
+                        {fmtPct(c.current_pct)}
+                      </td>
+                      <td className="text-right px-3 py-2 tabular-nums font-medium">
+                        {fmtPct(c.result_pct)}
+                      </td>
+                      <td className="text-right py-2 tabular-nums text-muted-foreground">
+                        {fmtPct(c.target_pct, 0)}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Distribuído proporcional ao déficit (classes mais defasadas recebem mais).
+              {aportePlan.remaining_deficit_brl > 1 && (
+                <> Ainda faltariam {mask(fmtMoney(aportePlan.remaining_deficit_brl, currency, locale))} pra bater todas as metas.</>
+              )}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   )

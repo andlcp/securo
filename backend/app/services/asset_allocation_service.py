@@ -220,6 +220,95 @@ async def compute_allocation(
     }
 
 
+async def compute_aporte_plan(
+    session: AsyncSession, user: User, aporte_brl: float
+) -> dict:
+    """Distribute a one-shot contribution `aporte_brl` across the
+    under-target buckets and report the resulting allocation.
+
+    Why this exists: the plain `compute_allocation` deficit is measured
+    against the *current* total, so "aporte R$ 87 k em RF" doesn't
+    actually take RF to 60 % — the act of contributing grows the total
+    and pushes the 60 % line up with it. This function answers the
+    question the user actually has each month ("tenho R$ X, como divido
+    e onde isso me deixa?") by computing everything against the
+    POST-aporte total (T + X) and showing the real resulting %.
+
+    Algorithm (deliberately matches the widget's mental model):
+      1. TA = current_total + aporte
+      2. deficit_i = max(0, target_i % × TA − current_i)   ← vs post total
+      3. if aporte <= Σdeficit: split proportional to deficit_i
+         else: fill every under-target bucket to target, then spread the
+         leftover proportional to the under-target buckets' target weights
+         (keeps them at target ratios instead of dumping it all in one).
+
+    Proportional-to-deficit (rather than greedy water-fill) is chosen for
+    consistency with the existing "% do aporte" column; the resulting-%
+    readout makes the outcome honest regardless of the split rule.
+    """
+    base = await compute_allocation(session, user)
+    primary = base["primary_currency"]
+    T = Decimal(str(base["total_brl"]))
+    X = Decimal(str(max(aporte_brl, 0.0)))
+    TA = T + X
+
+    # Per-bucket deficit measured against the POST-aporte total.
+    cats = base["categories"]
+    deficits: dict[str, Decimal] = {}
+    for cat in cats:
+        target_amt = (Decimal(str(cat["target_pct"])) / Decimal("100")) * TA
+        deficits[cat["id"]] = max(Decimal("0"), target_amt - Decimal(str(cat["total_brl"])))
+    total_deficit = sum(deficits.values(), Decimal("0"))
+
+    alloc: dict[str, Decimal] = {cat["id"]: Decimal("0") for cat in cats}
+    if X > 0 and total_deficit > 0:
+        if X <= total_deficit:
+            for cid, d in deficits.items():
+                alloc[cid] = X * d / total_deficit
+        else:
+            # Everything under-target gets filled to target…
+            for cid, d in deficits.items():
+                alloc[cid] = d
+            # …then the surplus rides along the under-target buckets'
+            # target weights so they stay in proportion to each other.
+            leftover = X - total_deficit
+            under = {cid: Decimal(str(next(c["target_pct"] for c in cats if c["id"] == cid)))
+                     for cid, d in deficits.items() if d > 0}
+            wsum = sum(under.values(), Decimal("0"))
+            for cid, w in under.items():
+                if wsum > 0:
+                    alloc[cid] += leftover * w / wsum
+
+    out_cats = []
+    for cat in cats:
+        add = alloc[cat["id"]]
+        new_val = Decimal(str(cat["total_brl"])) + add
+        new_pct = (new_val / TA * 100) if TA > 0 else Decimal("0")
+        out_cats.append({
+            "id": cat["id"],
+            "label": cat["label"],
+            "current_brl": cat["total_brl"],
+            "current_pct": cat["current_pct"],
+            "target_pct": cat["target_pct"],
+            "aporte_brl": round(float(add), 2),
+            "aporte_share_pct": round(float(add / X * 100), 4) if X > 0 else 0.0,
+            "result_brl": round(float(new_val), 2),
+            "result_pct": round(float(new_pct), 4),
+            "result_delta_pp": round(float(new_pct) - cat["target_pct"], 4),
+        })
+
+    return {
+        "primary_currency": primary,
+        "total_brl": float(T),
+        "aporte_brl": float(X),
+        "total_after_brl": float(TA),
+        # Sum of positive deficits vs the post-aporte total — the amount
+        # that would still be missing to fully hit targets after this aporte.
+        "remaining_deficit_brl": round(float(max(total_deficit - X, Decimal("0"))), 2),
+        "categories": out_cats,
+    }
+
+
 async def save_targets(
     session: AsyncSession, user: User, targets: dict[str, float]
 ) -> User:

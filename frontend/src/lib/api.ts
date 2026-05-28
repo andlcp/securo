@@ -955,6 +955,28 @@ export interface AssetAllocationResponse {
   deficit_total_brl: number
 }
 
+export interface AportePlanCategory {
+  id: string
+  label: string
+  current_brl: number
+  current_pct: number
+  target_pct: number
+  aporte_brl: number
+  aporte_share_pct: number
+  result_brl: number
+  result_pct: number
+  result_delta_pp: number
+}
+
+export interface AportePlanResponse {
+  primary_currency: string
+  total_brl: number
+  aporte_brl: number
+  total_after_brl: number
+  remaining_deficit_brl: number
+  categories: AportePlanCategory[]
+}
+
 export const assetAllocation = {
   get: async (): Promise<AssetAllocationResponse> => {
     const { data } = await api.get('/asset-allocation')
@@ -962,6 +984,10 @@ export const assetAllocation = {
   },
   saveTargets: async (targets: Record<string, number>): Promise<AssetAllocationResponse> => {
     const { data } = await api.put('/asset-allocation/targets', { targets })
+    return data
+  },
+  aportePlan: async (amount: number): Promise<AportePlanResponse> => {
+    const { data } = await api.get('/asset-allocation/aporte-plan', { params: { amount } })
     return data
   },
 }
