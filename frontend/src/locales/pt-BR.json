@@ -853,6 +853,7 @@
     "syncedFrom": "Sincronizado via {{source}}",
     "syncedReadOnly": "Ativos sincronizados são gerenciados pela conexão",
     "maturesOn": "Vence em {{date}}",
+    "contractedRate": "Taxa contratada",
     "wallet": "Carteira",
     "newWallet": "Nova Carteira",
     "editWallet": "Editar carteira",

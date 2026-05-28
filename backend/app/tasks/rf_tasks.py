@@ -84,6 +84,7 @@ _TESOURO_HARDCODED_VENC = {
     "Tesouro Prefixado 2028": "2028-01-01",
     "Tesouro IPCA+ 2026": "2026-08-15",
     "Tesouro IPCA+ 2029": "2029-05-15",
+    "Tesouro IPCA+ 2032": "2032-08-15",
     "Tesouro IPCA+ 2035": "2035-05-15",
     "Tesouro IPCA+ 2040": "2040-08-15",
     "Tesouro IPCA+ 2045": "2045-05-15",

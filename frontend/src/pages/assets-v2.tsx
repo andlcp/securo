@@ -1026,7 +1026,7 @@ export default function AssetsV2Page() {
           </div>
         </div>
 
-        {isExpanded && <AssetDetail name={asset.name} maturityDate={asset.maturity_date} assetId={asset.id} currency={asset.currency} locale={locale} purchasePrice={asset.purchase_price} purchaseDate={asset.purchase_date} valuationMethod={asset.valuation_method} />}
+        {isExpanded && <AssetDetail name={asset.name} maturityDate={asset.maturity_date} assetId={asset.id} currency={asset.currency} locale={locale} purchasePrice={asset.purchase_price} purchaseDate={asset.purchase_date} valuationMethod={asset.valuation_method} rfIndexer={asset.rf_indexer} rfRatePct={asset.rf_rate_pct} />}
       </div>
     )
   }
@@ -2258,11 +2258,26 @@ function PortfolioChart({ data, wallets, currency, locale: loc, mask }: {
   )
 }
 
-function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purchasePrice, purchaseDate, valuationMethod }: {
+/** Human label for a contracted Renda-Fixa rate.
+ *  IPCA  -> "IPCA + 7,80%"   (rf_rate_pct = real spread above inflation)
+ *  CDI   -> "109% do CDI"     (rf_rate_pct = % of CDI)
+ *  PRE   -> "15,15% a.a."     (rf_rate_pct = fixed annual rate)
+ *  Mirrors the rf_rate_pct semantics documented on the Asset model. */
+function formatRfRate(indexer: string | null, rate: number | null, loc: string): string | null {
+  if (!indexer || rate == null) return null
+  const n = rate.toLocaleString(loc, { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+  if (indexer === 'IPCA') return `IPCA + ${n}%`
+  if (indexer === 'CDI') return `${n}% do CDI`
+  if (indexer === 'PRE') return `${n}% a.a.`
+  return `${n}%`
+}
+
+function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purchasePrice, purchaseDate, valuationMethod, rfIndexer, rfRatePct }: {
   name: string; maturityDate: string | null
   assetId: string; currency: string; locale: string
   purchasePrice: number | null; purchaseDate: string | null
   valuationMethod: string
+  rfIndexer: string | null; rfRatePct: number | null
 }) {
   const { t } = useTranslation()
   const { mask } = usePrivacyMode()
@@ -2458,6 +2473,11 @@ function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purch
             {t('assets.maturesOn', {
               date: new Date(maturityDate + 'T00:00:00').toLocaleDateString(loc),
             })}
+          </p>
+        )}
+        {formatRfRate(rfIndexer, rfRatePct, loc) && (
+          <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 leading-snug">
+            {t('assets.contractedRate')}: {formatRfRate(rfIndexer, rfRatePct, loc)}
           </p>
         )}
       </div>
