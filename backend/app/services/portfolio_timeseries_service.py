@@ -236,6 +236,33 @@ async def _fx_rate(session: AsyncSession, ccy_from: str,
         return 1.0
 
 
+def _market_native_value(
+    on: date,
+    today: date,
+    units: Optional[float],
+    last_price: Optional[float],
+    close_price: Optional[float],
+    units_at_on: float,
+) -> Optional[float]:
+    """Native-currency value of a market-priced asset on `on`.
+
+    Leading edge (on >= today): use the live cached quote (units ×
+    last_price) so the daily chart's last point matches the dashboard's
+    Patrimônio, which values market assets the same way. The yfinance
+    daily close trails the live quote — most visibly for crypto, which
+    trades 24/7, so on weekends close and last-quote diverge and the two
+    pages disagree by the FX-weighted gap. Past days have no live quote,
+    so they use the yfinance close (`close_price`) with the units held on
+    that day. Returns None when neither price is available (caller falls
+    back to the AssetValue snapshot).
+    """
+    if on >= today and last_price is not None and units is not None:
+        return units * last_price
+    if close_price is not None:
+        return units_at_on * close_price
+    return None
+
+
 async def _load_assets(session: AsyncSession, user_id: uuid.UUID,
                        asset_ids: Optional[list[uuid.UUID]] = None,
                        asset_classes: Optional[list[str]] = None,
@@ -882,9 +909,15 @@ async def _compute_timeseries_uncached(session: AsyncSession, user: User,
             to the AssetValue snapshot when no history is available (RF and
             non-market-priced assets, or if the fetch failed)."""
             if asset.valuation_method == "market_price":
-                p = price_at(asset, on)
-                if p is not None:
-                    return units_at(asset, on) * p
+                v = _market_native_value(
+                    on, today_d,
+                    float(asset.units) if asset.units is not None else None,
+                    float(asset.last_price) if asset.last_price is not None else None,
+                    price_at(asset, on),
+                    units_at(asset, on),
+                )
+                if v is not None:
+                    return v
             return value_at_for_asset(asset, on)
 
         # Seed prev_v_end with the portfolio value the day before window start.
