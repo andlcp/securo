@@ -53,6 +53,10 @@ class AssetCreate(BaseModel):
     rf_indexer: Optional[Literal["PRE", "CDI", "IPCA"]] = None
     rf_rate_pct: Optional[Decimal] = None
     rf_index_offset_pct: Optional[Decimal] = None
+    # Marcação na curva (carrego) instead of market PU. None lets the
+    # backend pick a sensible default (Tesouro IPCA+ with a contracted
+    # rate → on-curve). See Asset.rf_on_curve.
+    rf_on_curve: Optional[bool] = None
     # When True (default), the create flow synthesizes a BUY transaction
     # at purchase_date with qty=units and value=purchase_price×units. This
     # is what makes the timeseries treat the asset's entry as a cashflow
@@ -91,6 +95,7 @@ class AssetUpdate(BaseModel):
     rf_indexer: Optional[Literal["PRE", "CDI", "IPCA"]] = None
     rf_rate_pct: Optional[Decimal] = None
     rf_index_offset_pct: Optional[Decimal] = None
+    rf_on_curve: Optional[bool] = None
 
 
 class AssetRead(BaseModel):
@@ -131,6 +136,7 @@ class AssetRead(BaseModel):
     rf_indexer: Optional[str] = None
     rf_rate_pct: Optional[float] = None
     rf_index_offset_pct: Optional[float] = None
+    rf_on_curve: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

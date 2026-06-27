@@ -78,6 +78,20 @@ class Asset(Base):
     rf_index_offset_pct: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(precision=8, scale=4), nullable=True
     )
+    # "Marcação na curva" toggle. When True, the daily Tesouro refresh
+    # values this title by accreting purchase_price at the contracted
+    # rate (rf_indexer + rf_rate_pct) instead of pulling the market PU
+    # from Tesouro Transparente. For a hold-to-maturity investor this
+    # shows the smooth carrego (what you'll realize at maturity) rather
+    # than the market-rate swings — and removes the MtM noise from the
+    # portfolio rentabilidade. Requires rf_indexer + rf_rate_pct to be
+    # set; otherwise the refresh falls back to market PU even when True.
+    # CDBs are already valued on-curve by refresh_cdb_assets (retail has
+    # no secondary-market price for them), so this flag mainly matters
+    # for Tesouro IPCA+ / Prefixado.
+    rf_on_curve: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
 
     # Optional parent group ("wallet"). NULL means ungrouped. Deleting a
     # group nullifies this field rather than removing the asset.

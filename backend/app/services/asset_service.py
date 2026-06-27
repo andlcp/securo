@@ -470,6 +470,20 @@ async def create_asset(
                 detail=f"Could not fetch quote for {data.ticker}",
             )
 
+    # Default for marcação na curva: a Tesouro IPCA+ with a contracted
+    # rate is held-to-maturity by nature, so it's born on-curve unless the
+    # caller said otherwise. Everything else defaults to market PU. The
+    # caller can always override by passing rf_on_curve explicitly.
+    if data.rf_on_curve is not None:
+        rf_on_curve = data.rf_on_curve
+    else:
+        rf_on_curve = bool(
+            data.asset_class == "RENDA_FIXA"
+            and (data.rf_indexer or "").upper() == "IPCA"
+            and data.rf_rate_pct is not None
+            and (data.name or "").startswith("Tesouro IPCA+")
+        )
+
     asset = Asset(
         user_id=user_id,
         name=data.name,
@@ -503,6 +517,7 @@ async def create_asset(
         rf_indexer=data.rf_indexer,
         rf_rate_pct=data.rf_rate_pct,
         rf_index_offset_pct=data.rf_index_offset_pct,
+        rf_on_curve=rf_on_curve,
     )
     session.add(asset)
     await session.flush()
@@ -647,6 +662,10 @@ async def update_asset(
     if not asset:
         return None
 
+    # Capture the pre-edit on-curve state so we can detect a flip and
+    # re-value the asset's history na curva (below, after commit).
+    prev_on_curve = bool(asset.rf_on_curve)
+
     update_data = data.model_dump(exclude_unset=True)
     # Prevent changing valuation_method on existing assets
     update_data.pop("valuation_method", None)
@@ -709,6 +728,25 @@ async def update_asset(
 
     await session.commit()
     await session.refresh(asset)
+
+    # On-curve was just switched ON: re-value the asset's whole history na
+    # curva so the chart shows the smooth carrego instead of a market-then-
+    # curve step on the toggle day. Then drop the user's daily snapshots so
+    # they rebuild with the new values. Only runs on the False→True edge to
+    # avoid rewriting history on every unrelated edit.
+    if asset.rf_on_curve and not prev_on_curve:
+        from app.tasks.rf_tasks import backfill_on_curve_history
+        try:
+            n = await backfill_on_curve_history(session, asset)
+            logger.info("on-curve backfill: asset=%s rewrote %d AV rows",
+                        asset.id, n)
+            from app.services.portfolio_daily_snapshot_service import (
+                invalidate_daily_snapshots,
+            )
+            await invalidate_daily_snapshots(session, user_id)
+        except Exception as exc:
+            logger.warning("on-curve backfill failed for %s: %s", asset.id, exc)
+
     # Bust the timeseries cache so the dashboard / KPI bars / Resultado
     # table see the edit immediately instead of waiting up to 10 minutes
     # for the result cache to expire. Without this, changing purchase_date

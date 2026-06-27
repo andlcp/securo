@@ -308,6 +308,8 @@ export default function AssetsV2Page() {
   // rate instead of the 105 % CDI heuristic).
   const [formRfIndexer, setFormRfIndexer] = useState<string>('')  // ''|PRE|CDI|IPCA
   const [formRfRatePct, setFormRfRatePct] = useState<string>('')   // numeric string
+  // Marcação na curva (carrego) vs a mercado. For hold-to-maturity titles.
+  const [formRfOnCurve, setFormRfOnCurve] = useState<boolean>(false)
   // Wallet (AssetGroup) selector. Without this in the form, manually
   // created assets land in "Sem carteira" because group_id stays null —
   // and the user has to use the separate "Mover" dialog to fix it.
@@ -625,6 +627,7 @@ export default function AssetsV2Page() {
     setFormMaturityDate(asset.maturity_date ?? '')
     setFormRfIndexer(asset.rf_indexer ?? '')
     setFormRfRatePct(asset.rf_rate_pct != null ? String(asset.rf_rate_pct) : '')
+    setFormRfOnCurve(Boolean(asset.rf_on_curve))
     setFormUnits(asset.units?.toString() ?? '')  // expose for any method
     setFormGroupId(asset.group_id ?? '')
     // On edit don't auto-derive Valor Atual — the user is here to inspect
@@ -671,6 +674,7 @@ export default function AssetsV2Page() {
       maturity_date: formMaturityDate || null,
       rf_indexer: formRfIndexer || null,
       rf_rate_pct: formRfRatePct ? parseFloat(formRfRatePct) : null,
+      rf_on_curve: formRfOnCurve,
       // Wallet (AssetGroup). Empty string means "no wallet" — translate to
       // null so the backend stores it as ungrouped instead of hitting a
       // UUID parse error on "".
@@ -1026,7 +1030,7 @@ export default function AssetsV2Page() {
           </div>
         </div>
 
-        {isExpanded && <AssetDetail name={asset.name} maturityDate={asset.maturity_date} assetId={asset.id} currency={asset.currency} locale={locale} purchasePrice={asset.purchase_price} purchaseDate={asset.purchase_date} valuationMethod={asset.valuation_method} rfIndexer={asset.rf_indexer} rfRatePct={asset.rf_rate_pct} />}
+        {isExpanded && <AssetDetail name={asset.name} maturityDate={asset.maturity_date} assetId={asset.id} currency={asset.currency} locale={locale} purchasePrice={asset.purchase_price} purchaseDate={asset.purchase_date} valuationMethod={asset.valuation_method} rfIndexer={asset.rf_indexer} rfRatePct={asset.rf_rate_pct} rfOnCurve={asset.rf_on_curve} />}
       </div>
     )
   }
@@ -1812,6 +1816,23 @@ export default function AssetsV2Page() {
                 <p className="text-[11px] text-muted-foreground -mt-2">
                   {t('assets.rfRateHelp')}
                 </p>
+                {/* Marcação na curva toggle — only meaningful with a
+                    contracted rate (the curve is built from it). */}
+                <label className="flex items-start gap-2 cursor-pointer mt-1">
+                  <input
+                    type="checkbox"
+                    checked={formRfOnCurve}
+                    disabled={!formRfIndexer || !formRfRatePct}
+                    onChange={e => setFormRfOnCurve(e.target.checked)}
+                    className="h-4 w-4 mt-0.5 rounded border-border accent-primary cursor-pointer"
+                  />
+                  <span className="text-[12px] leading-snug">
+                    <span className="font-medium">{t('assets.rfOnCurve')}</span>
+                    <span className="block text-[11px] text-muted-foreground">
+                      {t('assets.rfOnCurveHelp')}
+                    </span>
+                  </span>
+                </label>
               </>
             )}
 
@@ -2272,12 +2293,13 @@ function formatRfRate(indexer: string | null, rate: number | null, loc: string):
   return `${n}%`
 }
 
-function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purchasePrice, purchaseDate, valuationMethod, rfIndexer, rfRatePct }: {
+function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purchasePrice, purchaseDate, valuationMethod, rfIndexer, rfRatePct, rfOnCurve }: {
   name: string; maturityDate: string | null
   assetId: string; currency: string; locale: string
   purchasePrice: number | null; purchaseDate: string | null
   valuationMethod: string
   rfIndexer: string | null; rfRatePct: number | null
+  rfOnCurve: boolean
 }) {
   const { t } = useTranslation()
   const { mask } = usePrivacyMode()
@@ -2476,8 +2498,13 @@ function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purch
           </p>
         )}
         {formatRfRate(rfIndexer, rfRatePct, loc) && (
-          <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 leading-snug">
-            {t('assets.contractedRate')}: {formatRfRate(rfIndexer, rfRatePct, loc)}
+          <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 leading-snug flex items-center gap-1.5 flex-wrap">
+            <span>{t('assets.contractedRate')}: {formatRfRate(rfIndexer, rfRatePct, loc)}</span>
+            {rfOnCurve && (
+              <span className="inline-block px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400 text-[10px] font-semibold uppercase tracking-wide">
+                {t('assets.onCurveBadge')}
+              </span>
+            )}
           </p>
         )}
       </div>

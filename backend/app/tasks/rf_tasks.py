@@ -197,6 +197,23 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
         )
         assets = list(result.scalars().all())
 
+        # Pre-fetch BCB series only if some title is marked on-curve and so
+        # needs its contracted-rate accrual (IPCA / CDI) instead of market PU.
+        on_curve_assets = [
+            a for a in assets
+            if a.rf_on_curve and a.rf_indexer and a.rf_rate_pct is not None
+            and a.purchase_date and a.purchase_price
+        ]
+        cdi: dict[str, float] = {}
+        ipca: dict[str, float] = {}
+        if on_curve_assets:
+            earliest = min((a.purchase_date for a in on_curve_assets),
+                           default=today)
+            if any((a.rf_indexer or "").upper() == "CDI" for a in on_curve_assets):
+                cdi = _fetch_sgs_series(12, earliest, today)
+            if any((a.rf_indexer or "").upper() == "IPCA" for a in on_curve_assets):
+                ipca = _fetch_sgs_series(433, earliest, today)
+
         for asset in assets:
             # Skip if already matured
             if asset.maturity_date and asset.maturity_date < today:
@@ -207,20 +224,37 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
                 no_pu += 1
                 continue
             tipo, _year = tipo_year
-            venc = (asset.maturity_date.isoformat() if asset.maturity_date
-                    else _TESOURO_HARDCODED_VENC.get(asset.name))
-            if not venc:
-                no_pu += 1
-                continue
-            pu = pus.get((tipo, venc))
-            if pu is None:
-                no_pu += 1
-                continue
             qty = float(asset.units or 0)
             if qty <= 0:
                 skipped += 1
                 continue
-            amount = Decimal(str(round(qty * pu, 2)))
+
+            # On-curve path: value by the contracted rate (carrego), not the
+            # market PU. A hold-to-maturity title shouldn't swing with the
+            # daily rate cycle. Falls through to market PU if the curve can't
+            # be built (missing rate/index) or the BCB series was unavailable.
+            pu_for_stamp: Optional[float] = None
+            amount: Optional[Decimal] = None
+            if asset.rf_on_curve:
+                factor = _on_curve_factor(asset, today, cdi, ipca)
+                if factor is not None:
+                    buy_price = float(asset.purchase_price or 0)
+                    amount = Decimal(str(round(qty * buy_price * factor, 2)))
+                    pu_for_stamp = buy_price * factor
+
+            if amount is None:
+                # Market PU path (default).
+                venc = (asset.maturity_date.isoformat() if asset.maturity_date
+                        else _TESOURO_HARDCODED_VENC.get(asset.name))
+                if not venc:
+                    no_pu += 1
+                    continue
+                pu = pus.get((tipo, venc))
+                if pu is None:
+                    no_pu += 1
+                    continue
+                amount = Decimal(str(round(qty * pu, 2)))
+                pu_for_stamp = pu
 
             # Don't overwrite a user-entered (manual) value for today.
             # Reconciliation flows paste broker-bruto values directly and
@@ -247,8 +281,10 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
                 asset_id=asset.id, amount=amount,
                 date=today, source="rule"))
             # Bonus: also write the raw last_price / at fields so the UI
-            # can show "atualizado em DD/MM/YYYY"
-            asset.last_price = Decimal(str(round(pu, 6)))
+            # can show "atualizado em DD/MM/YYYY". For on-curve titles this
+            # is the carrego per-unit PU, not the market PU.
+            if pu_for_stamp is not None:
+                asset.last_price = Decimal(str(round(pu_for_stamp, 6)))
             asset.last_price_at = dt.datetime.now(dt.timezone.utc)
             refreshed += 1
 
@@ -344,6 +380,81 @@ def _compound_ipca(ipca: dict[str, float], buy_date: date, today: date,
     years = days / 365.25
     spread_factor = (1.0 + spread_pct / 100.0) ** years
     return ipca_factor * spread_factor
+
+
+def _on_curve_factor(
+    asset: "Asset",
+    on_date: date,
+    cdi: dict[str, float],
+    ipca: dict[str, float],
+) -> Optional[float]:
+    """Carrego factor from purchase to `on_date` using the contracted rate.
+
+    This is the same accrual math refresh_cdb_assets uses, factored out so
+    the Tesouro refresh can value an on-curve title (rf_on_curve=True) by
+    its contracted rate instead of the market PU. Returns None when the
+    metadata needed to build the curve is incomplete (caller then falls
+    back to market PU).
+    """
+    if not (asset.rf_indexer and asset.rf_rate_pct is not None
+            and asset.purchase_date and asset.purchase_price):
+        return None
+    indexer = asset.rf_indexer.upper()
+    rate = float(asset.rf_rate_pct)
+    buy = asset.purchase_date
+    if indexer == "PRE":
+        return _compound_pre(buy, on_date, rate)
+    if indexer == "CDI":
+        return _compound_cdi(cdi, buy.isoformat(), on_date.isoformat(),
+                             rate / 100.0) if cdi else None
+    if indexer == "IPCA":
+        return _compound_ipca(ipca, buy, on_date, rate) if ipca else None
+    return None
+
+
+async def backfill_on_curve_history(session, asset: "Asset") -> int:
+    """Re-value an asset's non-manual AssetValue rows na curva (contracted-
+    rate accrual) from purchase to today.
+
+    Called when rf_on_curve is switched on, so the chart shows the smooth
+    carrego historically instead of a market-then-curve discontinuity on
+    the toggle day (which the snapshot rebuild would otherwise read as a
+    phantom jump). Manual AVs (broker-bruto reconciliation snapshots) are
+    left intact. Single-purchase approximation: uses current units × avg
+    purchase_price × factor — exact for the typical one-buy Tesouro
+    position; a multi-tranche title's early dates are slightly overstated.
+
+    Returns the number of AV rows rewritten.
+    """
+    if not (asset.rf_on_curve and asset.rf_indexer and asset.rf_rate_pct is not None
+            and asset.purchase_date and asset.purchase_price):
+        return 0
+    today = date.today()
+    indexer = asset.rf_indexer.upper()
+    cdi = _fetch_sgs_series(12, asset.purchase_date, today) if indexer == "CDI" else {}
+    ipca = _fetch_sgs_series(433, asset.purchase_date, today) if indexer == "IPCA" else {}
+    qty = float(asset.units or 0)
+    buy_price = float(asset.purchase_price or 0)
+    if qty <= 0 or buy_price <= 0:
+        return 0
+
+    rows = (await session.execute(
+        select(AssetValue).where(
+            AssetValue.asset_id == asset.id,
+            AssetValue.date >= asset.purchase_date,
+            AssetValue.source != "manual",
+        )
+    )).scalars().all()
+    n = 0
+    for av in rows:
+        factor = _on_curve_factor(asset, av.date, cdi, ipca)
+        if factor is None:
+            continue
+        av.amount = Decimal(str(round(qty * buy_price * factor, 2)))
+        av.source = "rule"
+        n += 1
+    await session.commit()
+    return n
 
 
 async def _refresh_cdb_assets() -> dict[str, int]:
