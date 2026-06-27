@@ -743,7 +743,15 @@ async def update_asset(
             from app.services.portfolio_daily_snapshot_service import (
                 invalidate_daily_snapshots,
             )
-            await invalidate_daily_snapshots(session, user_id)
+            # Only drop snapshots from the purchase date forward — the curve
+            # rewrite never touches AVs before purchase. Wiping ALL snapshots
+            # would leave the next incremental rebuild with no prior day to
+            # seed cum from, resetting the cumulative TWR to 0 (the cliff
+            # bug). Surgical invalidation keeps the pre-purchase tail intact
+            # so the rebuild chains correctly.
+            await invalidate_daily_snapshots(
+                session, user_id, from_date=asset.purchase_date
+            )
         except Exception as exc:
             logger.warning("on-curve backfill failed for %s: %s", asset.id, exc)
 
