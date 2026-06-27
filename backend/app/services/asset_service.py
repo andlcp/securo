@@ -203,6 +203,7 @@ def _asset_to_read(
         rf_indexer=asset.rf_indexer,
         rf_rate_pct=float(asset.rf_rate_pct) if asset.rf_rate_pct is not None else None,
         rf_index_offset_pct=float(asset.rf_index_offset_pct) if asset.rf_index_offset_pct is not None else None,
+        rf_on_curve=bool(asset.rf_on_curve),
     )
 
 
