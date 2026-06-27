@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import get_settings
 from app.models.asset import Asset
+from app.models.asset_transaction import AssetTransaction
 from app.models.asset_value import AssetValue
 from app.worker import celery_app
 
@@ -206,6 +207,7 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
         ]
         cdi: dict[str, float] = {}
         ipca: dict[str, float] = {}
+        coupons_by_asset: dict = {}
         if on_curve_assets:
             earliest = min((a.purchase_date for a in on_curve_assets),
                            default=today)
@@ -213,6 +215,19 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
                 cdi = _fetch_sgs_series(12, earliest, today)
             if any((a.rf_indexer or "").upper() == "IPCA" for a in on_curve_assets):
                 ipca = _fetch_sgs_series(433, earliest, today)
+            # Coupons (INTEREST) leave a Juros-Semestrais title, so the
+            # on-curve value must subtract them. Bulk-load once.
+            coupon_rows = (await session.execute(
+                select(AssetTransaction.asset_id, AssetTransaction.date,
+                       AssetTransaction.value)
+                .where(
+                    AssetTransaction.asset_id.in_([a.id for a in on_curve_assets]),
+                    AssetTransaction.type == "INTEREST",
+                )
+            )).all()
+            for aid, cdate, cval in coupon_rows:
+                coupons_by_asset.setdefault(aid, []).append(
+                    (cdate, float(cval or 0)))
 
         for asset in assets:
             # Skip if already matured
@@ -236,11 +251,13 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
             pu_for_stamp: Optional[float] = None
             amount: Optional[Decimal] = None
             if asset.rf_on_curve:
-                factor = _on_curve_factor(asset, today, cdi, ipca)
-                if factor is not None:
-                    buy_price = float(asset.purchase_price or 0)
-                    amount = Decimal(str(round(qty * buy_price * factor, 2)))
-                    pu_for_stamp = buy_price * factor
+                val = _on_curve_value(
+                    asset, today, cdi, ipca,
+                    coupons_by_asset.get(asset.id),
+                )
+                if val is not None:
+                    amount = Decimal(str(round(val, 2)))
+                    pu_for_stamp = val / qty if qty else None
 
             if amount is None:
                 # Market PU path (default).
@@ -382,6 +399,28 @@ def _compound_ipca(ipca: dict[str, float], buy_date: date, today: date,
     return ipca_factor * spread_factor
 
 
+def _accrual_between(
+    indexer: str,
+    rate: float,
+    d1: date,
+    d2: date,
+    cdi: dict[str, float],
+    ipca: dict[str, float],
+) -> Optional[float]:
+    """Contracted-rate accrual factor between two arbitrary dates d1→d2.
+    The same math refresh_cdb_assets uses, parameterized on the start date
+    so it serves both the buy→today carrego and coupon→today accrual."""
+    indexer = (indexer or "").upper()
+    if indexer == "PRE":
+        return _compound_pre(d1, d2, rate)
+    if indexer == "CDI":
+        return _compound_cdi(cdi, d1.isoformat(), d2.isoformat(),
+                             rate / 100.0) if cdi else None
+    if indexer == "IPCA":
+        return _compound_ipca(ipca, d1, d2, rate) if ipca else None
+    return None
+
+
 def _on_curve_factor(
     asset: "Asset",
     on_date: date,
@@ -390,26 +429,57 @@ def _on_curve_factor(
 ) -> Optional[float]:
     """Carrego factor from purchase to `on_date` using the contracted rate.
 
-    This is the same accrual math refresh_cdb_assets uses, factored out so
-    the Tesouro refresh can value an on-curve title (rf_on_curve=True) by
-    its contracted rate instead of the market PU. Returns None when the
-    metadata needed to build the curve is incomplete (caller then falls
-    back to market PU).
+    Returns None when the metadata needed to build the curve is incomplete
+    (caller then falls back to market PU).
     """
     if not (asset.rf_indexer and asset.rf_rate_pct is not None
             and asset.purchase_date and asset.purchase_price):
         return None
-    indexer = asset.rf_indexer.upper()
-    rate = float(asset.rf_rate_pct)
-    buy = asset.purchase_date
-    if indexer == "PRE":
-        return _compound_pre(buy, on_date, rate)
-    if indexer == "CDI":
-        return _compound_cdi(cdi, buy.isoformat(), on_date.isoformat(),
-                             rate / 100.0) if cdi else None
-    if indexer == "IPCA":
-        return _compound_ipca(ipca, buy, on_date, rate) if ipca else None
-    return None
+    return _accrual_between(
+        asset.rf_indexer, float(asset.rf_rate_pct),
+        asset.purchase_date, on_date, cdi, ipca,
+    )
+
+
+def _on_curve_value(
+    asset: "Asset",
+    on_date: date,
+    cdi: dict[str, float],
+    ipca: dict[str, float],
+    coupons: Optional[list[tuple[date, float]]] = None,
+) -> Optional[float]:
+    """Na-curva value of a title at `on_date`.
+
+    Principal-only (no coupons): invested × accrual(buy→on_date).
+
+    Coupon-paying (Tesouro IPCA+ com Juros Semestrais): the coupons are
+    paid out as cash, so they leave the title. We accrete the invested
+    principal at the contracted rate and subtract each coupon paid up to
+    `on_date`, accreted forward from its payment date:
+
+        value = invested × accrual(buy→t)
+                − Σ coupon_i × accrual(coupon_date_i → t)
+
+    Without the coupon subtraction the simple factor overstates a cupom
+    bond badly (JS 2030: R$ 60 k full-accrual vs R$ 46 k coupon-aware).
+    Returns None when the curve can't be built (missing rate/index/series).
+    """
+    factor = _on_curve_factor(asset, on_date, cdi, ipca)
+    if factor is None:
+        return None
+    qty = float(asset.units or 0)
+    buy_price = float(asset.purchase_price or 0)
+    value = qty * buy_price * factor
+    if coupons:
+        indexer = asset.rf_indexer
+        rate = float(asset.rf_rate_pct)
+        for cdate, cval in coupons:
+            if cdate < asset.purchase_date or cdate > on_date:
+                continue
+            f = _accrual_between(indexer, rate, cdate, on_date, cdi, ipca)
+            if f is not None:
+                value -= cval * f
+    return value
 
 
 async def backfill_on_curve_history(session, asset: "Asset") -> int:
@@ -438,6 +508,18 @@ async def backfill_on_curve_history(session, asset: "Asset") -> int:
     if qty <= 0 or buy_price <= 0:
         return 0
 
+    # Coupons paid (INTEREST) — subtracted from the carrego per AV date so a
+    # Juros-Semestrais title isn't overstated. Each AV only nets the coupons
+    # paid on or before its own date (the `cdate > on_date` guard in
+    # _on_curve_value handles that).
+    coupon_rows = (await session.execute(
+        select(AssetTransaction.date, AssetTransaction.value).where(
+            AssetTransaction.asset_id == asset.id,
+            AssetTransaction.type == "INTEREST",
+        )
+    )).all()
+    coupons = [(d, float(v or 0)) for d, v in coupon_rows]
+
     rows = (await session.execute(
         select(AssetValue).where(
             AssetValue.asset_id == asset.id,
@@ -447,10 +529,10 @@ async def backfill_on_curve_history(session, asset: "Asset") -> int:
     )).scalars().all()
     n = 0
     for av in rows:
-        factor = _on_curve_factor(asset, av.date, cdi, ipca)
-        if factor is None:
+        val = _on_curve_value(asset, av.date, cdi, ipca, coupons)
+        if val is None:
             continue
-        av.amount = Decimal(str(round(qty * buy_price * factor, 2)))
+        av.amount = Decimal(str(round(val, 2)))
         av.source = "rule"
         n += 1
     await session.commit()
