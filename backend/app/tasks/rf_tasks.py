@@ -246,8 +246,7 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
 
             # On-curve path: value by the contracted rate (carrego), not the
             # market PU. A hold-to-maturity title shouldn't swing with the
-            # daily rate cycle. Falls through to market PU if the curve can't
-            # be built (missing rate/index) or the BCB series was unavailable.
+            # daily rate cycle.
             pu_for_stamp: Optional[float] = None
             amount: Optional[Decimal] = None
             if asset.rf_on_curve:
@@ -258,6 +257,20 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
                 if val is not None:
                     amount = Decimal(str(round(val, 2)))
                     pu_for_stamp = val / qty if qty else None
+                else:
+                    # Curve couldn't be built (BCB SGS down, or the title's
+                    # rate metadata is incomplete). NEVER regress an on-curve
+                    # title to market PU: the curve-vs-market gap (R$ 7 k on
+                    # the user's IPCA+ 2040 alone) would stamp into the AV as
+                    # a phantom drop and vanish from TWR on the next
+                    # incremental rebuild (seen 2026-07-07 when BCB was
+                    # unreachable). Skip: yesterday's AV carries forward,
+                    # and tomorrow's run heals with one day of catch-up.
+                    logger.warning(
+                        "on-curve %s: curve unavailable (BCB down?), "
+                        "keeping previous AV", asset.name)
+                    skipped += 1
+                    continue
 
             if amount is None:
                 # Market PU path (default).
@@ -306,6 +319,14 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
             refreshed += 1
 
         await session.commit()
+        if refreshed:
+            # Today's snapshot row was materialized before these fresh AVs
+            # existed; drop it so the next dashboard read re-materializes
+            # with today's values (keeps Investimentos == Patrimônio).
+            from app.services.portfolio_daily_snapshot_service import (
+                drop_today_snapshots_all_users,
+            )
+            await drop_today_snapshots_all_users(session)
     return {"refreshed": refreshed, "skipped": skipped, "no_pu": no_pu}
 
 
@@ -672,6 +693,13 @@ async def _refresh_cdb_assets() -> dict[str, int]:
             refreshed += 1
 
         await session.commit()
+        if refreshed:
+            # Same re-materialization contract as the Tesouro refresh: the
+            # fresh AVs invalidate today's midnight snapshot row.
+            from app.services.portfolio_daily_snapshot_service import (
+                drop_today_snapshots_all_users,
+            )
+            await drop_today_snapshots_all_users(session)
     return {"refreshed": refreshed,
             "skipped_manual": skipped_manual,
             "skipped_no_metadata": skipped_no_metadata,

@@ -169,6 +169,36 @@ async def invalidate_daily_snapshots(
     return result.rowcount or 0
 
 
+async def drop_today_snapshots_all_users(session: AsyncSession) -> int:
+    """Delete every user's snapshot row for today.
+
+    Called by the daily celery refresh tasks (market prices, Tesouro, CDB)
+    right after they write fresh AssetValues / last_price. Today's snapshot
+    row was materialized at midnight with the then-current values; without
+    this drop it keeps being served all day, so the Investimentos V_END
+    disagrees with the live dashboard Patrimônio until the next midnight.
+    Deleting just today's row makes the next read re-materialize it — an
+    incremental rebuild seeded from yesterday's stored row, so the day's
+    price move lands in that day's return instead of silently vanishing
+    into the next midnight's recomputed seed.
+
+    DB-level (not the in-memory dirty marker) because celery workers run
+    in a separate process from the API — an in-memory flag would never
+    reach the backend. The snapshot-version cache keys off
+    MAX(computed_at), which this change bumps, so API-side caches miss
+    and re-read naturally.
+    """
+    today = date.today()
+    result = await session.execute(
+        delete(PortfolioDailySnapshot).where(
+            PortfolioDailySnapshot.date >= today
+        )
+    )
+    await session.commit()
+    invalidate_snapshot_version_cache()
+    return result.rowcount or 0
+
+
 async def latest_daily_snapshot_date(
     session: AsyncSession, user_id: uuid.UUID
 ) -> Optional[date]:

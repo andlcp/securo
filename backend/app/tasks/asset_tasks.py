@@ -143,7 +143,18 @@ async def _refresh_market_prices() -> dict[str, int]:
     engine, session_maker = _make_session_maker()
     try:
         async with session_maker() as session:
-            return await refresh_all_market_prices(session)
+            result = await refresh_all_market_prices(session)
+            if result.get("refreshed"):
+                # The fresh last_price values make today's midnight snapshot
+                # row stale — the dashboard Patrimônio reads them live while
+                # the Investimentos page serves the materialized row. Drop
+                # today's row so the next read re-materializes and the two
+                # pages agree intra-day.
+                from app.services.portfolio_daily_snapshot_service import (
+                    drop_today_snapshots_all_users,
+                )
+                await drop_today_snapshots_all_users(session)
+            return result
     finally:
         await engine.dispose()
 
