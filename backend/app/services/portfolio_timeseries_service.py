@@ -243,21 +243,34 @@ def _market_native_value(
     last_price: Optional[float],
     close_price: Optional[float],
     units_at_on: float,
+    last_price_at: Optional[date] = None,
+    close_date: Optional[date] = None,
 ) -> Optional[float]:
     """Native-currency value of a market-priced asset on `on`.
 
-    Leading edge (on >= today): use the live cached quote (units ×
-    last_price) so the daily chart's last point matches the dashboard's
-    Patrimônio, which values market assets the same way. The yfinance
-    daily close trails the live quote — most visibly for crypto, which
-    trades 24/7, so on weekends close and last-quote diverge and the two
-    pages disagree by the FX-weighted gap. Past days have no live quote,
-    so they use the yfinance close (`close_price`) with the units held on
-    that day. Returns None when neither price is available (caller falls
-    back to the AssetValue snapshot).
+    Leading edge (on >= today): use the FRESHER of the live cached quote
+    (units × last_price) and the newest official close. The live quote
+    wins only when its capture date is strictly after the newest close's
+    date — i.e. genuine intraday data the close doesn't cover yet. The
+    official close wins otherwise: the daily refresh may have cached the
+    quote mid-session, and trusting it blindly rewinds the day's move.
+    Seen 2026-07-10: refresh ran at 09:58 BRT (market open), IBOV then
+    rallied ~3%; Saturday's chart point used the stale morning cache and
+    showed a phantom -2% weekend drop across all 43 RV-BR positions.
+
+    Past days have no live quote — always the yfinance close with the
+    units held on that day. Returns None when no price is available
+    (caller falls back to the AssetValue snapshot).
     """
     if on >= today and last_price is not None and units is not None:
-        return units * last_price
+        quote_is_fresher = (
+            close_price is None
+            or close_date is None
+            or (last_price_at is not None and last_price_at > close_date)
+        )
+        if quote_is_fresher:
+            return units * last_price
+        return units * close_price
     if close_price is not None:
         return units_at_on * close_price
     return None
@@ -893,28 +906,37 @@ async def _compute_timeseries_uncached(session: AsyncSession, user: User,
             price_dates_by_asset[_aid] = [d for d, _ in _hist]
             price_vals_by_asset[_aid] = [p for _, p in _hist]
 
-        def price_at(asset: Asset, on: date) -> Optional[float]:
-            """Most recent close <= on. None if no history fetched/available."""
+        def price_at_dated(asset: Asset, on: date) -> tuple[Optional[float], Optional[date]]:
+            """(most recent close <= on, its date). (None, None) if no history."""
             dates = price_dates_by_asset.get(asset.id)
             if not dates:
-                return None
+                return None, None
             target = on.isoformat()
             idx = bisect.bisect_right(dates, target) - 1
             if idx < 0:
-                return None
-            return price_vals_by_asset[asset.id][idx]
+                return None, None
+            return (price_vals_by_asset[asset.id][idx],
+                    date.fromisoformat(dates[idx]))
+
+        def price_at(asset: Asset, on: date) -> Optional[float]:
+            """Most recent close <= on. None if no history fetched/available."""
+            return price_at_dated(asset, on)[0]
 
         def daily_v_native(asset: Asset, on: date) -> float:
             """Preferred daily-mode value: units * yfinance close. Falls back
             to the AssetValue snapshot when no history is available (RF and
             non-market-priced assets, or if the fetch failed)."""
             if asset.valuation_method == "market_price":
+                close_p, close_d = price_at_dated(asset, on)
                 v = _market_native_value(
                     on, today_d,
                     float(asset.units) if asset.units is not None else None,
                     float(asset.last_price) if asset.last_price is not None else None,
-                    price_at(asset, on),
+                    close_p,
                     units_at(asset, on),
+                    last_price_at=(asset.last_price_at.date()
+                                   if asset.last_price_at is not None else None),
+                    close_date=close_d,
                 )
                 if v is not None:
                     return v

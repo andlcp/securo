@@ -13,28 +13,54 @@ from app.services.portfolio_timeseries_service import _market_native_value
 TODAY = date(2026, 6, 27)
 
 
-def test_today_uses_live_last_price():
-    # last_price 12.10, close 12.00 — today must use the live quote.
+def test_today_uses_live_quote_when_fresher_than_close():
+    # Quote captured today; newest close is yesterday's — intraday data
+    # the close doesn't cover yet, so the live quote wins.
     v = _market_native_value(
         on=TODAY, today=TODAY, units=100.0,
         last_price=12.10, close_price=12.00, units_at_on=100.0,
+        last_price_at=TODAY, close_date=date(2026, 6, 26),
     )
     assert v == 100.0 * 12.10
 
 
-def test_future_date_also_uses_last_price():
-    # on > today (shouldn't normally happen, but the >= guard must hold).
+def test_today_prefers_close_when_quote_is_stale():
+    # The phantom-weekend-drop case (2026-07-10): quote cached at market
+    # open, the market rallied, official close is for the SAME day as the
+    # quote — the close is fresher and must win.
     v = _market_native_value(
-        on=date(2026, 6, 28), today=TODAY, units=10.0,
-        last_price=5.0, close_price=4.0, units_at_on=10.0,
+        on=TODAY, today=TODAY, units=100.0,
+        last_price=12.10, close_price=12.50, units_at_on=100.0,
+        last_price_at=date(2026, 6, 26), close_date=date(2026, 6, 26),
+    )
+    assert v == 100.0 * 12.50
+
+
+def test_today_without_close_uses_quote():
+    v = _market_native_value(
+        on=TODAY, today=TODAY, units=10.0,
+        last_price=5.0, close_price=None, units_at_on=10.0,
+        last_price_at=date(2026, 6, 26), close_date=None,
     )
     assert v == 50.0
+
+
+def test_today_unknown_quote_age_prefers_close():
+    # No last_price_at timestamp: we can't prove the quote is fresher, so
+    # the official close wins.
+    v = _market_native_value(
+        on=TODAY, today=TODAY, units=100.0,
+        last_price=12.10, close_price=12.50, units_at_on=100.0,
+        last_price_at=None, close_date=date(2026, 6, 27),
+    )
+    assert v == 100.0 * 12.50
 
 
 def test_past_day_uses_close():
     v = _market_native_value(
         on=date(2026, 6, 20), today=TODAY, units=100.0,
         last_price=12.10, close_price=12.00, units_at_on=80.0,
+        last_price_at=TODAY, close_date=date(2026, 6, 19),
     )
     # Past day: yfinance close × units held that day (units_at_on, not units).
     assert v == 80.0 * 12.00
@@ -44,6 +70,7 @@ def test_today_without_last_price_falls_to_close():
     v = _market_native_value(
         on=TODAY, today=TODAY, units=100.0,
         last_price=None, close_price=12.00, units_at_on=100.0,
+        last_price_at=None, close_date=date(2026, 6, 26),
     )
     assert v == 100.0 * 12.00
 
@@ -52,5 +79,6 @@ def test_no_prices_returns_none():
     v = _market_native_value(
         on=TODAY, today=TODAY, units=100.0,
         last_price=None, close_price=None, units_at_on=100.0,
+        last_price_at=None, close_date=None,
     )
     assert v is None
