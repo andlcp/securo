@@ -32,21 +32,37 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.asset_tasks.apply_asset_growth_rules",
         "schedule": 60 * 60,  # every hour; idempotent (checks last value date)
     },
-    "refresh-market-prices-daily": {
+    # Market prices (stocks / ETFs / FIIs / crypto via yfinance). Three
+    # complementary schedules — all fixed-hour crontabs, never intervals:
+    # interval schedules fire relative to celery-beat's boot, so a
+    # mid-morning deploy once made the refresh land at 09:58 BRT
+    # (mid-session) and the cached last_price missed the rest of the
+    # day's +3% IBOV rally, painting a phantom weekend drop.
+    #
+    # Load: ~80 tickers/run. Intraday = 16 runs on weekdays + closes +
+    # weekend crypto ≈ 1.5 k quote calls/day, spread out — well under
+    # Yahoo's unofficial caps, and refresh_all_market_prices halts itself
+    # on MarketPriceRateLimitedError. Each run drops today's snapshot
+    # rows, so the charts re-materialize on the next read.
+    "refresh-market-prices-intraday": {
         "task": "app.tasks.asset_tasks.refresh_market_prices",
-        # Once a day is enough for personal portfolio tracking — keeps us
-        # well under Yahoo's unofficial per-IP caps and avoids the bot
-        # heuristics that trip on a chatty schedule. Task upserts today's
-        # AssetValue so history stays at one row per day per asset.
-        #
-        # Fixed post-close hour instead of an interval: interval schedules
-        # fire relative to celery-beat's boot, so a mid-morning deploy made
-        # the refresh land at 09:58 BRT (mid-session) and the cached
-        # last_price missed the rest of the day. 2026-07-10's +3% IBOV
-        # rally never entered the cache and the chart showed a phantom
-        # weekend drop. 21:30 UTC = 18:30 BRT, after B3 (~17:55 BRT) and
-        # NYSE (20:00/21:00 UTC depending on DST) have both closed.
+        # Every 30 min through the B3 + NYSE sessions (13:00-20:30 UTC =
+        # 10:00-17:30 BRT), weekdays only.
+        "schedule": crontab(minute="0,30", hour="13-20", day_of_week="mon-fri"),
+    },
+    "refresh-market-prices-close": {
+        "task": "app.tasks.asset_tasks.refresh_market_prices",
+        # End-of-day capture at 21:30 UTC = 18:30 BRT, after B3 (~17:55
+        # BRT) and NYSE (20:00/21:00 UTC depending on DST) have closed —
+        # guarantees the cached quote is the official close overnight.
         "schedule": crontab(hour=21, minute=30),
+    },
+    "refresh-market-prices-weekend": {
+        "task": "app.tasks.asset_tasks.refresh_market_prices",
+        # Crypto trades 24/7 — refresh every 3 h on weekends so Bitcoin
+        # doesn't freeze at Friday's quote. Stocks return their Friday
+        # close from Yahoo, which is a harmless no-op for them.
+        "schedule": crontab(minute=0, hour="*/3", day_of_week="sat,sun"),
     },
     "sync-dividends-daily": {
         "task": "app.tasks.asset_tasks.sync_dividends",
