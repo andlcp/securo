@@ -8,7 +8,8 @@ Consolidado" widget the user wants to replicate. The mapping is purely
 derived from existing asset metadata (asset_class + type); nothing has
 to be tagged manually:
 
-    R_EMERGENCIA    — no auto-mapping (manual reserve placeholder)
+    R_EMERGENCIA    — type='other' AND name starts with 'CAIXA'
+                      (uninvested cash placeholder, one per wallet)
     ACOES           — RENDA_VARIAVEL_BR AND type='stock'
     FIIS            — asset_class='FIIS'
     OUTROS          — FUNDOS + OUTRO (loans, misc)
@@ -51,7 +52,7 @@ from app.services.fx_rate_service import get_rate
 # STOCKS as the bucket id (preserves the user's existing target) and just
 # updates the label + classifier.
 BUCKETS: list[tuple[str, str]] = [
-    ("R_EMERGENCIA",  "R. Emergência"),
+    ("R_EMERGENCIA",  "R. Emergência / Caixa"),
     ("ACOES",         "Ações"),
     ("FIIS",          "FIIs"),
     ("OUTROS",        "Outros"),
@@ -67,6 +68,16 @@ def _bucket_for(asset: Asset) -> Optional[str]:
     you tweak the mapping."""
     ac = asset.asset_class
     t = asset.type
+    # Uninvested cash: one "CAIXA" placeholder asset per wallet, matched
+    # by name. It fills the R. Emergência bucket (the Bastter layout's
+    # manual reserve slot) instead of OUTROS — the user excludes OUTROS
+    # (family loans) from the allocation math, and cash MUST count: with
+    # a 0% target, the widget then pushes the idle cash toward whichever
+    # classes are under target. A dedicated asset_class would ripple
+    # through the taxonomy Literal + frontend badges/filters for what is
+    # a single special-cased row; the name rule is deliberate.
+    if t == "other" and (asset.name or "").strip().upper().startswith("CAIXA"):
+        return "R_EMERGENCIA"
     # All ETFs currently in the user's portfolio are American-exposure
     # (IVVB11 tracks SP500 in BRL; QQQM and SCHD are US-listed). They
     # share the STOCKS bucket. Reintroduce a separate ETFS bucket only
