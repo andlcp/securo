@@ -830,6 +830,14 @@ export const assets = {
     const { data } = await api.get('/assets/portfolio-trend')
     return data
   },
+  custodianSummary: async (): Promise<{
+    primary_currency: string
+    total: number
+    rows: { custodian: string; wallet: string; count: number; total: number; share_pct: number }[]
+  }> => {
+    const { data } = await api.get('/assets/custodian-summary')
+    return data
+  },
   marketSearch: async (q: string, limit = 15): Promise<MarketSymbolMatch[]> => {
     const { data } = await api.get('/assets/market/search', { params: { q, limit } })
     return data

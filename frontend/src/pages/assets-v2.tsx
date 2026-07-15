@@ -233,6 +233,82 @@ function iconTypeForClass(assetClass: string): string {
   }
 }
 
+/** "Por instituição" — collapsible reconciliation table. Groups live asset
+ *  values by (custodian, wallet) so the user can check each broker
+ *  statement against the app (accounts are per CPF, hence the wallet
+ *  column). Collapsed by default: reconciliation is an occasional chore,
+ *  not a daily view. */
+function CustodianSummary({ currency, locale, mask }: {
+  currency: string; locale: string; mask: (s: string) => string
+}) {
+  const [open, setOpen] = useState(false)
+  const { data } = useQuery({
+    queryKey: ['custodian-summary'],
+    queryFn: () => assets.custodianSummary(),
+    enabled: open,
+    staleTime: 1000 * 60,
+  })
+
+  return (
+    <div className="bg-card rounded-xl border border-border">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full px-5 py-3 flex items-center justify-between group"
+      >
+        <div className="flex items-center gap-2">
+          {open ? <ChevronDown size={14} className="text-muted-foreground" />
+                : <ChevronRight size={14} className="text-muted-foreground" />}
+          <span className="text-sm font-semibold text-foreground">Por instituição</span>
+          <span className="text-xs text-muted-foreground">
+            conferência com corretoras
+          </span>
+        </div>
+        {data && (
+          <span className="text-sm font-bold tabular-nums">
+            {mask(formatCurrency(data.total, currency, locale))}
+          </span>
+        )}
+      </button>
+      {open && data && (
+        <div className="px-5 pb-4 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-xs uppercase text-muted-foreground border-b border-border">
+              <tr>
+                <th className="text-left py-2 font-medium">Instituição</th>
+                <th className="text-left px-3 py-2 font-medium">Carteira</th>
+                <th className="text-right px-3 py-2 font-medium">Ativos</th>
+                <th className="text-right px-3 py-2 font-medium">Total</th>
+                <th className="text-right py-2 font-medium">% do portfólio</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((r, i) => (
+                <tr key={`${r.custodian}-${r.wallet}`}
+                    className={`border-b border-border/50 last:border-b-0 ${i % 2 ? 'bg-muted/10' : ''}`}>
+                  <td className="py-2 text-foreground">{r.custodian}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{r.wallet}</td>
+                  <td className="text-right px-3 py-2 tabular-nums text-muted-foreground">{r.count}</td>
+                  <td className="text-right px-3 py-2 tabular-nums font-medium">
+                    {mask(formatCurrency(r.total, currency, locale))}
+                  </td>
+                  <td className="text-right py-2 tabular-nums text-muted-foreground">
+                    {r.share_pct.toFixed(2)}%
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Valores ao vivo (mesma valuação do Patrimônio), convertidos pra {currency}.
+            Títulos na curva mostram o carrego — a corretora pode exibir o valor a mercado, então
+            uma diferença nos Tesouro IPCA+ é esperada.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function AssetsV2Page() {
   const { t, i18n } = useTranslation()
   const locale = i18n.language === 'en' ? 'en-US' : i18n.language
@@ -1302,6 +1378,10 @@ export default function AssetsV2Page() {
           mask={mask}
         />
       )}
+
+      {/* Por instituição — broker reconciliation view */}
+      <CustodianSummary currency={userCurrency} locale={locale} mask={mask} />
+
 
       {isLoading ? (
         <div className="space-y-3">

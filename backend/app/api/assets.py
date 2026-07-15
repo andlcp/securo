@@ -232,6 +232,16 @@ async def portfolio_trend(
     return await asset_service.get_portfolio_trend(session, user.id)
 
 
+@router.get("/custodian-summary")
+async def custodian_summary(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    """Live portfolio totals grouped by (custodian, wallet) — the broker
+    reconciliation view. Registered before /{asset_id} on purpose."""
+    return await asset_service.get_custodian_summary(session, user.id)
+
+
 @router.get("/{asset_id}", response_model=AssetRead)
 async def get_asset(
     asset_id: uuid.UUID,

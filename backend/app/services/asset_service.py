@@ -1103,6 +1103,91 @@ async def get_asset_values_at(
     return totals, primary_total
 
 
+async def get_custodian_summary(
+    session: AsyncSession, user_id: uuid.UUID
+) -> dict:
+    """Live portfolio totals grouped by (custodian, wallet) — the broker
+    reconciliation view ("bater com a corretora"). Wallet matters because
+    broker accounts are per CPF: BTG-Anderson and BTG-Camila are separate
+    statements even though the custodian string is the same.
+
+    Values use the same live valuation as the dashboard Patrimônio
+    (_compute_current_value: units × last_price for market assets, latest
+    AV otherwise) so the numbers here match what the user reconciles
+    against, converted to the primary currency at the latest FX rate.
+    """
+    from app.models.asset_group import AssetGroup
+
+    user = await session.get(User, user_id)
+    primary = (user.primary_currency if user else None) or "BRL"
+
+    assets = list((await session.execute(
+        select(Asset).where(
+            Asset.user_id == user_id,
+            Asset.is_archived == False,   # noqa: E712
+            Asset.sell_date.is_(None),
+        )
+    )).scalars().all())
+
+    groups = {
+        g.id: g.name
+        for g in (await session.execute(
+            select(AssetGroup).where(AssetGroup.user_id == user_id)
+        )).scalars().all()
+    }
+
+    # Bulk latest AV per asset (same pattern as get_assets).
+    asset_ids = [a.id for a in assets]
+    latest_by_asset: dict[uuid.UUID, AssetValue] = {}
+    if asset_ids:
+        rows = (await session.execute(
+            select(AssetValue)
+            .where(AssetValue.asset_id.in_(asset_ids))
+            .order_by(AssetValue.asset_id, AssetValue.date.desc())
+            .distinct(AssetValue.asset_id)
+        )).scalars().all()
+        latest_by_asset = {r.asset_id: r for r in rows}
+
+    agg: dict[tuple[str, str], dict] = {}
+    total_primary = 0.0
+    for a in assets:
+        amount = _compute_current_value(a, latest_by_asset.get(a.id))
+        if not amount:
+            continue
+        if a.currency != primary:
+            converted, _ = await convert(
+                session, Decimal(str(amount)), a.currency, primary, None)
+            amount_primary = float(converted)
+        else:
+            amount_primary = float(amount)
+        key = (
+            (a.custodian or "").strip() or "(sem custodiante)",
+            groups.get(a.group_id) or "Sem carteira",
+        )
+        bucket = agg.setdefault(key, {"count": 0, "total": 0.0})
+        bucket["count"] += 1
+        bucket["total"] += amount_primary
+        total_primary += amount_primary
+
+    out = [
+        {
+            "custodian": cust,
+            "wallet": wallet,
+            "count": v["count"],
+            "total": round(v["total"], 2),
+            "share_pct": round(v["total"] / total_primary * 100, 4)
+            if total_primary > 0 else 0.0,
+        }
+        for (cust, wallet), v in agg.items()
+    ]
+    out.sort(key=lambda r: (r["wallet"], -r["total"]))
+    return {
+        "primary_currency": primary,
+        "total": round(total_primary, 2),
+        "rows": out,
+    }
+
+
 # ============================================================================
 # Market-price refresh
 # ============================================================================
