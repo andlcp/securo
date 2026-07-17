@@ -788,6 +788,7 @@
     "quantityPlaceholder": "10",
     "wallet": "Wallet",
     "currentValueAutoHint": "Computed from Purchase Price × Quantity. Edit it to use the live market value instead.",
+    "currentValueEditHint": "Changing this value records today's new balance in the asset's history.",
     "currency": "Currency",
     "typeRealEstate": "Real Estate",
     "typeVehicle": "Vehicle",

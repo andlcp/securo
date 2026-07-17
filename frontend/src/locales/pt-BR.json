@@ -788,6 +788,7 @@
     "quantityPlaceholder": "10",
     "wallet": "Carteira",
     "currentValueAutoHint": "Calculado a partir de Preço de Compra × Quantidade. Edite se quiser usar a cotação atual.",
+    "currentValueEditHint": "Alterar este valor registra o novo saldo de hoje no histórico do ativo.",
     "currency": "Moeda",
     "typeRealEstate": "Imóvel",
     "typeVehicle": "Veículo",

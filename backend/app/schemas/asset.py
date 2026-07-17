@@ -96,6 +96,12 @@ class AssetUpdate(BaseModel):
     rf_rate_pct: Optional[Decimal] = None
     rf_index_offset_pct: Optional[Decimal] = None
     rf_on_curve: Optional[bool] = None
+    # Editing a manual asset's live value from the Edit dialog: upserts
+    # today's AssetValue (source=manual). Only sent by the frontend when
+    # the user actually typed a new value — a same-value re-send would
+    # still stamp a manual AV that blocks the daily RF refresh for the
+    # day, so the form guards against it.
+    current_value: Optional[Decimal] = None
 
 
 class AssetRead(BaseModel):

@@ -670,8 +670,34 @@ async def update_asset(
     update_data = data.model_dump(exclude_unset=True)
     # Prevent changing valuation_method on existing assets
     update_data.pop("valuation_method", None)
+    # Not a column — handled below as an AssetValue upsert.
+    new_current_value = update_data.pop("current_value", None)
     for key, value in update_data.items():
         setattr(asset, key, value)
+
+    # "Valor atual" edited in the dialog (manual assets): upsert today's
+    # AV so the card reflects it immediately. Manual source wins over the
+    # daily refresh for today, which is the user's intent when they type
+    # a value by hand.
+    if new_current_value is not None and asset.valuation_method == "manual":
+        today = date.today()
+        existing_av = (await session.execute(
+            select(AssetValue).where(
+                AssetValue.asset_id == asset.id,
+                AssetValue.date == today,
+            )
+        )).scalar_one_or_none()
+        if existing_av is not None:
+            existing_av.amount = Decimal(str(new_current_value))
+            existing_av.source = "manual"
+        else:
+            session.add(AssetValue(
+                asset_id=asset.id, date=today,
+                amount=Decimal(str(new_current_value)), source="manual"))
+        from app.services.portfolio_daily_snapshot_service import (
+            invalidate_daily_snapshots,
+        )
+        await invalidate_daily_snapshots(session, user_id, from_date=today)
 
     # Regenerate growth-rule values if requested
     if regenerate_growth and asset.valuation_method == "growth_rule":

@@ -694,7 +694,10 @@ export default function AssetsV2Page() {
     setFormPurchasePrice(asset.purchase_price?.toString() ?? '')
     setFormSellDate(asset.sell_date ?? '')
     setFormSellPrice(asset.sell_price?.toString() ?? '')
-    setFormCurrentValue('')
+    // Pre-fill with the live value so the manual-asset "Valor atual"
+    // field shows reality; only sent on save if the user edits it
+    // (currentValueTouched reset below tracks that).
+    setFormCurrentValue(asset.current_value?.toString() ?? '')
     setFormGrowthType(asset.growth_type ?? 'percentage')
     setFormGrowthRate(asset.growth_rate?.toString() ?? '')
     setFormGrowthFrequency(asset.growth_frequency ?? 'monthly')
@@ -707,8 +710,12 @@ export default function AssetsV2Page() {
     setFormUnits(asset.units?.toString() ?? '')  // expose for any method
     setFormGroupId(asset.group_id ?? '')
     // On edit don't auto-derive Valor Atual — the user is here to inspect
-    // existing data, not get the field rewritten under them.
-    setCurrentValueTouched(true)
+    // existing data, not get the field rewritten under them. False here
+    // means "not yet edited by the user": the save path only includes
+    // current_value in the PATCH when the user actually typed (touched),
+    // so an untouched edit never stamps a manual AV (which would block
+    // the daily RF refresh for Tesouro/CDB manual assets for the day).
+    setCurrentValueTouched(false)
     // On edit treat the icon and method as already chosen so we don't
     // surprise the user by mutating fields they came in to inspect.
     setIconTouched(true)
@@ -770,6 +777,13 @@ export default function AssetsV2Page() {
     }
 
     if (!editingAsset && formCurrentValue) {
+      payload.current_value = parseFloat(formCurrentValue)
+    }
+
+    // Edit path: only send current_value when the user actually typed in
+    // the field. An untouched re-send would stamp a manual AV for today,
+    // which blocks the daily RF refresh on Tesouro/CDB manual assets.
+    if (editingAsset && currentValueTouched && formMethod === 'manual' && formCurrentValue) {
       payload.current_value = parseFloat(formCurrentValue)
     }
 
@@ -1916,11 +1930,13 @@ export default function AssetsV2Page() {
               </>
             )}
 
-            {/* Current Value — manual only. Auto-fills with purchase_price ×
-                units while untouched (see useEffect above). The hint below
-                tells the user what's happening so the value doesn't look
-                like it appeared by magic. */}
-            {!editingAsset && formMethod === 'manual' && (
+            {/* Current Value — manual only. On create it auto-fills with
+                purchase_price × units while untouched (see useEffect
+                above). On EDIT it shows the asset's live value and, when
+                changed, upserts today's AssetValue — closes the "não tem
+                onde alterar o valor" gap the user hit on the CAIXA asset
+                (the Adicionar Valor row sits behind this very modal). */}
+            {formMethod === 'manual' && (
               <div className="space-y-2">
                 <Label>{t('assets.currentValue')}</Label>
                 <CurrencyInput
@@ -1931,9 +1947,14 @@ export default function AssetsV2Page() {
                   }}
                   currency={formCurrency}
                 />
-                {!currentValueTouched && formCurrentValue && (
+                {!editingAsset && !currentValueTouched && formCurrentValue && (
                   <p className="text-[11px] text-muted-foreground">
                     {t('assets.currentValueAutoHint')}
+                  </p>
+                )}
+                {editingAsset && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('assets.currentValueEditHint')}
                   </p>
                 )}
               </div>
