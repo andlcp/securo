@@ -124,12 +124,64 @@ def _generate_growth_values(
     return values
 
 
+def _tw_capital(
+    flows: list[tuple[date, str, float]], as_of: date
+) -> Optional[float]:
+    """Time-weighted average capital deployed (Modified Dietz denominator).
+
+    flows: (date, type, amount) where type in BUY/DEPOSIT (money in) or
+    SELL/WITHDRAWAL (money out). Each flow is weighted by the fraction of
+    the holding period it was actually deployed:
+
+        w_i = days(flow_i → as_of) / days(first_flow → as_of)
+
+    Why: dividing the P&L by the raw sum of buys treats a dollar that
+    stayed 2 days the same as one that stayed 15 months. NVDA case: two
+    lots bought (US$ 2,079), one flipped 2 days later near cost, the
+    survivor doubled — profit/total-deployed said +51% while the user's
+    honest experience was ~+100%. Weighting the flipped lot by its 2/470
+    days keeps it from diluting the metric. Income (dividends/juros) is
+    NOT a capital flow — it belongs in the gain, not the denominator.
+
+    CLOSED positions: the caller must cap `as_of` at the close date
+    (sell_date). With as_of = today, every calendar day after the close
+    shrinks the denominator further while the realized gain stays fixed,
+    so a position sold at +15% in 2022 would display +203% today and keep
+    inflating daily — then snap discontinuously to +15% when tw crosses 0.
+    Capping at the close makes every outflow weight 0 at period end, so
+    tw == invested and Dietz degenerates to the honest money-on-money
+    return over the actual holding period.
+
+    Returns None when there are no inflows (caller falls back to the
+    plain invested basis).
+    """
+    if not flows:
+        return None
+    inflow_dates = [f[0] for f in flows if f[1] in ("BUY", "DEPOSIT")]
+    if not inflow_dates:
+        return None
+    # Window starts at the first capital IN. A stray SELL predating the
+    # first BUY (ghost rows on reconciled/archived assets) must not
+    # define the window start nor carry weight > 1 — clamp w to [0, 1].
+    first = min(inflow_dates)
+    total_days = max((as_of - first).days, 1)
+    tw = 0.0
+    for fdate, ftype, amount in flows:
+        w = min(max((as_of - fdate).days, 0) / total_days, 1.0)
+        if ftype in ("BUY", "DEPOSIT"):
+            tw += amount * w
+        else:  # SELL / WITHDRAWAL
+            tw -= amount * w
+    return tw
+
+
 def _asset_to_read(
     asset: Asset,
     latest_value: Optional[AssetValue],
     value_count: int,
     total_returned_net: float = 0.0,
     invested_txs: Optional[float] = None,
+    tw_capital: Optional[float] = None,
 ) -> AssetRead:
     """Convert an Asset model + computed fields to AssetRead schema.
 
@@ -166,6 +218,25 @@ def _asset_to_read(
     gain_loss = None
     if current_value is not None and invested_total is not None:
         gain_loss = current_value + total_returned_net - invested_total
+
+    # Rent %: money-weighted (Modified Dietz) — gain over the TIME-
+    # WEIGHTED capital, so a dollar deployed for 2 days doesn't dilute
+    # the return of a dollar deployed for 15 months. NVDA: profit /
+    # total-deployed said +51% after a 2-day near-cost flip of half the
+    # capital, while the surviving lot had doubled; Dietz gives ~+108%,
+    # matching the investor's experience. Falls back to plain
+    # gain/invested when there's no ledger (CAIXA, manual assets) or the
+    # position was opened today (tw = 0). Single-buy positions are
+    # unchanged by construction (tw == invested).
+    rent_pct = None
+    if gain_loss is not None:
+        denom = None
+        if tw_capital is not None and tw_capital > 0:
+            denom = tw_capital
+        elif invested_total is not None and invested_total > 0:
+            denom = invested_total
+        if denom:
+            rent_pct = round(gain_loss / denom * 100, 4)
 
     return AssetRead(
         id=asset.id,
@@ -217,6 +288,7 @@ def _asset_to_read(
         rf_index_offset_pct=float(asset.rf_index_offset_pct) if asset.rf_index_offset_pct is not None else None,
         rf_on_curve=bool(asset.rf_on_curve),
         invested_total=round(invested_total, 2) if invested_total is not None else None,
+        rent_pct=rent_pct,
     )
 
 
@@ -346,40 +418,61 @@ async def get_assets(
     # for the whole portfolio rather than N+1.
     returned_by_asset: dict[uuid.UUID, float] = {}
     invested_by_asset: dict[uuid.UUID, float] = {}
+    tw_by_asset: dict[uuid.UUID, Optional[float]] = {}
     if asset_ids:
         cf_in_types = ["BUY", "DEPOSIT"]
         cf_out_types = ["WITHDRAWAL", "SELL"]
         income_types = ["DIVIDEND", "JCP", "RENDIMENTO", "INTEREST", "RESGATE"]
         from app.models.asset_transaction import AssetTransaction
-        agg = await session.execute(
+        # Raw rows (not GROUP BY sums): the Dietz denominator needs each
+        # flow's date. Portfolio-wide this is a few hundred rows — cheaper
+        # than it looks, and still a single round-trip.
+        tx_rows = (await session.execute(
             select(
                 AssetTransaction.asset_id,
                 AssetTransaction.type,
-                func.sum(AssetTransaction.value),
-                func.sum(AssetTransaction.fees),
+                AssetTransaction.date,
+                AssetTransaction.value,
+                AssetTransaction.fees,
             )
             .where(
                 AssetTransaction.asset_id.in_(asset_ids),
                 AssetTransaction.type.in_(cf_in_types + cf_out_types + income_types),
             )
-            .group_by(AssetTransaction.asset_id, AssetTransaction.type)
-        )
-        for asset_id, tx_type, value_sum, fees_sum in agg.all():
-            v = float(value_sum or 0)
-            f = float(fees_sum or 0)
+        )).all()
+        flows_by_asset: dict[uuid.UUID, list[tuple[date, str, float]]] = {}
+        for asset_id, tx_type, tx_date, value, fees in tx_rows:
+            v = float(value or 0)
+            f = float(fees or 0)
             if tx_type in cf_in_types:
                 # Money in — the true invested basis (fees add to cost).
                 # Preferred over purchase_price × units, which shrinks
                 # with partial sells and turned sold principal into
                 # phantom profit on the rent display.
                 invested_by_asset[asset_id] = invested_by_asset.get(asset_id, 0) + v + f
+                flows_by_asset.setdefault(asset_id, []).append((tx_date, tx_type, v + f))
             elif tx_type in cf_out_types:
                 # Capital being returned — full value, fees ignored (e.g.
                 # broker commission was already deducted from amount).
                 returned_by_asset[asset_id] = returned_by_asset.get(asset_id, 0) + v
+                flows_by_asset.setdefault(asset_id, []).append((tx_date, tx_type, v))
             else:
                 # Income — net of fees (NRA tax withholding on US divs etc).
+                # Not a capital flow: goes into the gain, not the Dietz
+                # denominator.
                 returned_by_asset[asset_id] = returned_by_asset.get(asset_id, 0) + (v - f)
+        today_d = date.today()
+        # Closed positions measure Dietz over their actual holding period
+        # (first buy → sell_date), not to today — see _tw_capital's
+        # docstring for why an uncapped window inflates sold assets' rent
+        # a little more every calendar day.
+        sell_date_by_id = {a.id: a.sell_date for a in assets}
+        for aid, flows in flows_by_asset.items():
+            end = today_d
+            sd = sell_date_by_id.get(aid)
+            if sd is not None and sd < end:
+                end = sd
+            tw_by_asset[aid] = _tw_capital(flows, end)
 
     # Bulk-fetch the latest AssetValue per asset (DISTINCT ON, single
     # round-trip) and AV counts so we don't issue 2 SELECTs per asset.
@@ -413,47 +506,58 @@ async def get_assets(
         count = count_by_asset.get(asset.id, 0)
         total_returned = returned_by_asset.get(asset.id, 0.0)
         invested_txs = invested_by_asset.get(asset.id)
+        tw = tw_by_asset.get(asset.id)
         reads.append(_asset_to_read(asset, latest, count, total_returned,
-                                    invested_txs))
+                                    invested_txs, tw))
     return reads
 
 
 async def _get_tx_aggregates(
-    session: AsyncSession, asset_id: uuid.UUID
-) -> tuple[float, Optional[float]]:
+    session: AsyncSession, asset_id: uuid.UUID,
+    sell_date: Optional[date] = None,
+) -> tuple[float, Optional[float], Optional[float]]:
     """Per-asset version of the bulk aggregate computed in get_assets.
-    Returns (total_returned_net, invested_txs). Used by single-asset
-    endpoints (get/create/update) so the gain_loss they return matches
-    the list view. invested_txs is None when the asset has no BUY/DEPOSIT
-    rows (caller falls back to purchase_price × units)."""
+    Returns (total_returned_net, invested_txs, tw_capital). Used by
+    single-asset endpoints (get/create/update) so the gain_loss and
+    rent_pct they return match the list view. invested_txs / tw_capital
+    are None when the asset has no BUY/DEPOSIT rows (caller falls back
+    to purchase_price × units). `sell_date` caps the Dietz window for
+    closed positions (same contract as the bulk path)."""
     from app.models.asset_transaction import AssetTransaction
     cf_in_types = ["BUY", "DEPOSIT"]
     cf_out_types = ["WITHDRAWAL", "SELL"]
     income_types = ["DIVIDEND", "JCP", "RENDIMENTO", "INTEREST", "RESGATE"]
     returned = 0.0
     invested: Optional[float] = None
+    flows: list[tuple[date, str, float]] = []
     rows = await session.execute(
         select(
             AssetTransaction.type,
-            func.sum(AssetTransaction.value),
-            func.sum(AssetTransaction.fees),
+            AssetTransaction.date,
+            AssetTransaction.value,
+            AssetTransaction.fees,
         )
         .where(
             AssetTransaction.asset_id == asset_id,
             AssetTransaction.type.in_(cf_in_types + cf_out_types + income_types),
         )
-        .group_by(AssetTransaction.type)
     )
-    for tx_type, value_sum, fees_sum in rows.all():
-        v = float(value_sum or 0)
-        f = float(fees_sum or 0)
+    for tx_type, tx_date, value, fees in rows.all():
+        v = float(value or 0)
+        f = float(fees or 0)
         if tx_type in cf_in_types:
             invested = (invested or 0.0) + v + f
+            flows.append((tx_date, tx_type, v + f))
         elif tx_type in cf_out_types:
             returned += v
+            flows.append((tx_date, tx_type, v))
         else:
             returned += v - f
-    return returned, invested
+    end = date.today()
+    if sell_date is not None and sell_date < end:
+        end = sell_date
+    tw = _tw_capital(flows, end) if flows else None
+    return returned, invested, tw
 
 
 async def get_asset(
@@ -468,8 +572,9 @@ async def get_asset(
         return None
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    total_returned, invested_txs = await _get_tx_aggregates(session, asset.id)
-    return _asset_to_read(asset, latest, count, total_returned, invested_txs)
+    total_returned, invested_txs, tw = await _get_tx_aggregates(
+        session, asset.id, asset.sell_date)
+    return _asset_to_read(asset, latest, count, total_returned, invested_txs, tw)
 
 
 async def create_asset(
@@ -679,8 +784,9 @@ async def create_asset(
                         asset.id, exc)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    total_returned, invested_txs = await _get_tx_aggregates(session, asset.id)
-    return _asset_to_read(asset, latest, count, total_returned, invested_txs)
+    total_returned, invested_txs, tw = await _get_tx_aggregates(
+        session, asset.id, asset.sell_date)
+    return _asset_to_read(asset, latest, count, total_returned, invested_txs, tw)
 
 
 async def update_asset(
@@ -822,8 +928,9 @@ async def update_asset(
     invalidate_ts_cache(user_id)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    total_returned, invested_txs = await _get_tx_aggregates(session, asset.id)
-    return _asset_to_read(asset, latest, count, total_returned, invested_txs)
+    total_returned, invested_txs, tw = await _get_tx_aggregates(
+        session, asset.id, asset.sell_date)
+    return _asset_to_read(asset, latest, count, total_returned, invested_txs, tw)
 
 
 async def delete_asset(

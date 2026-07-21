@@ -1024,8 +1024,10 @@ export default function AssetsV2Page() {
             <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Investido</p>
             <p className="text-xs font-semibold text-foreground">
               {/* invested_total = Σ compras (backend). Fallback pp×units
-                  covers assets without a tx ledger. Must match the rent
-                  denominator below or the card contradicts itself. */}
+                  covers assets without a tx ledger. Note: the Rent %
+                  column is money-WEIGHTED (Dietz) so it intentionally
+                  does NOT equal gain/investido for positions with
+                  partial sells — the tooltip on the % explains it. */}
               {(() => {
                 const inv = asset.invested_total
                   ?? (asset.purchase_price != null && asset.units != null
@@ -1053,23 +1055,33 @@ export default function AssetsV2Page() {
               // "losses" because (current_value - invested) ignores all
               // the cash that already came back. gain_loss handles all
               // the cases — buy-and-hold stocks, DRIPs, and loans alike.
-              // invested_total (Σ BUY+DEPOSIT from the backend) is the same
-              // basis gain_loss was computed against. purchase_price×units
-              // shrinks after partial sells and made a ~+50% NVDA position
-              // (2 lots, 1 sold) display +201%.
-              const invested = asset.invested_total
-                ?? ((asset.purchase_price != null && asset.units != null)
-                    ? Number(asset.purchase_price) * Number(asset.units)
-                    : null)
+              // rent_pct is the backend's money-weighted return (Modified
+              // Dietz): gain over TIME-WEIGHTED capital, so a 2-day flip
+              // of half the capital doesn't halve the displayed rent (the
+              // NVDA case: +51% money-on-money vs ~+108% Dietz, matching
+              // "the position doubled"). Fallback derives gain/invested
+              // for older cached payloads.
               const gain = asset.gain_loss
-              if (invested == null || gain == null || invested <= 0) {
+              let v: number | null = asset.rent_pct != null ? asset.rent_pct / 100 : null
+              if (v == null) {
+                const invested = asset.invested_total
+                  ?? ((asset.purchase_price != null && asset.units != null)
+                      ? Number(asset.purchase_price) * Number(asset.units)
+                      : null)
+                if (invested != null && gain != null && invested > 0) {
+                  v = gain / invested
+                }
+              }
+              if (v == null) {
                 return <p className="text-xs text-muted-foreground">—</p>
               }
-              const v = gain / invested
               return (
-                <p className={`text-xs font-semibold ${
-                  v >= 0 ? 'text-emerald-600' : 'text-rose-500'
-                }`}>
+                <p
+                  className={`text-xs font-semibold ${
+                    v >= 0 ? 'text-emerald-600' : 'text-rose-500'
+                  }`}
+                  title="Rentabilidade ponderada pelo tempo de uso do capital (Dietz modificado). Pode diferir de Ganho ÷ Investido quando houve vendas parciais — dinheiro que ficou pouco tempo pesa menos."
+                >
                   {mask(`${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)}
                 </p>
               )

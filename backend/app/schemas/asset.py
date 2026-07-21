@@ -143,12 +143,15 @@ class AssetRead(BaseModel):
     rf_rate_pct: Optional[float] = None
     rf_index_offset_pct: Optional[float] = None
     rf_on_curve: bool = False
-    # Money-in basis for the rent display: Σ(BUY+DEPOSIT value+fees) when
-    # the asset has a transaction ledger, else purchase_price × units.
-    # The frontend must divide gain_loss by THIS, not by
-    # purchase_price × units — after a partial sell those diverge and the
-    # naive basis inflates the rent (sold principal reads as profit).
+    # Money-in basis for the INVESTIDO display: Σ(BUY+DEPOSIT value+fees)
+    # when the asset has a transaction ledger, else purchase_price × units.
     invested_total: Optional[float] = None
+    # Money-weighted return % (Modified Dietz since inception): gain_loss
+    # over the TIME-WEIGHTED capital, so briefly-deployed dollars don't
+    # dilute long-held ones. The frontend should render THIS instead of
+    # deriving a % from gain/invested — for positions with partial sells
+    # the two diverge (see _tw_capital in asset_service).
+    rent_pct: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 

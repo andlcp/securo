@@ -474,6 +474,7 @@ export interface Asset {
   rf_index_offset_pct: number | null
   rf_on_curve: boolean
   invested_total: number | null
+  rent_pct: number | null
 }
 
 /** Explicit asset-class taxonomy used for grouping/filtering. */
