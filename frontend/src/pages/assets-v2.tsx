@@ -1023,9 +1023,17 @@ export default function AssetsV2Page() {
           <div className="hidden md:block text-right shrink-0 w-[110px] tabular-nums">
             <p className="text-[10px] uppercase text-muted-foreground tracking-wider">Investido</p>
             <p className="text-xs font-semibold text-foreground">
-              {asset.purchase_price != null && asset.units != null
-                ? mask(formatCurrency(asset.purchase_price * asset.units, asset.currency, locale))
-                : '—'}
+              {/* invested_total = Σ compras (backend). Fallback pp×units
+                  covers assets without a tx ledger. Must match the rent
+                  denominator below or the card contradicts itself. */}
+              {(() => {
+                const inv = asset.invested_total
+                  ?? (asset.purchase_price != null && asset.units != null
+                      ? asset.purchase_price * asset.units : null)
+                return inv != null
+                  ? mask(formatCurrency(inv, asset.currency, locale))
+                  : '—'
+              })()}
             </p>
           </div>
           <div className="hidden md:block text-right shrink-0 w-[180px]">
@@ -1045,9 +1053,14 @@ export default function AssetsV2Page() {
               // "losses" because (current_value - invested) ignores all
               // the cash that already came back. gain_loss handles all
               // the cases — buy-and-hold stocks, DRIPs, and loans alike.
-              const invested = (asset.purchase_price != null && asset.units != null)
-                ? Number(asset.purchase_price) * Number(asset.units)
-                : null
+              // invested_total (Σ BUY+DEPOSIT from the backend) is the same
+              // basis gain_loss was computed against. purchase_price×units
+              // shrinks after partial sells and made a ~+50% NVDA position
+              // (2 lots, 1 sold) display +201%.
+              const invested = asset.invested_total
+                ?? ((asset.purchase_price != null && asset.units != null)
+                    ? Number(asset.purchase_price) * Number(asset.units)
+                    : null)
               const gain = asset.gain_loss
               if (invested == null || gain == null || invested <= 0) {
                 return <p className="text-xs text-muted-foreground">—</p>

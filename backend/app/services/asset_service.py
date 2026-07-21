@@ -129,6 +129,7 @@ def _asset_to_read(
     latest_value: Optional[AssetValue],
     value_count: int,
     total_returned_net: float = 0.0,
+    invested_txs: Optional[float] = None,
 ) -> AssetRead:
     """Convert an Asset model + computed fields to AssetRead schema.
 
@@ -149,10 +150,21 @@ def _asset_to_read(
     return; full value otherwise (BR fees are usually 0).
     """
     current_value = _compute_current_value(asset, latest_value)
-    gain_loss = None
-    if current_value is not None and asset.purchase_price is not None:
+    # Money-in basis. Prefer the transaction ledger (Σ BUY+DEPOSIT,
+    # value+fees) over purchase_price × units: after a partial SELL,
+    # purchase_price × units only covers the REMAINING shares while
+    # total_returned_net includes the gross proceeds of the sold ones —
+    # the sold principal masqueraded as pure profit. Seen on NVDA: two
+    # lots bought (US$ 2,078.90), one sold two days later near cost;
+    # the card showed +201% on a position that had gained ~50%.
+    invested_total = None
+    if invested_txs is not None and invested_txs > 0:
+        invested_total = invested_txs
+    elif asset.purchase_price is not None:
         units = float(asset.units) if asset.units is not None else 1.0
         invested_total = float(asset.purchase_price) * units
+    gain_loss = None
+    if current_value is not None and invested_total is not None:
         gain_loss = current_value + total_returned_net - invested_total
 
     return AssetRead(
@@ -204,6 +216,7 @@ def _asset_to_read(
         rf_rate_pct=float(asset.rf_rate_pct) if asset.rf_rate_pct is not None else None,
         rf_index_offset_pct=float(asset.rf_index_offset_pct) if asset.rf_index_offset_pct is not None else None,
         rf_on_curve=bool(asset.rf_on_curve),
+        invested_total=round(invested_total, 2) if invested_total is not None else None,
     )
 
 
@@ -332,7 +345,9 @@ async def get_assets(
     # (DIVIDEND/JCP/RENDIMENTO/INTEREST/RESGATE minus fees). One query
     # for the whole portfolio rather than N+1.
     returned_by_asset: dict[uuid.UUID, float] = {}
+    invested_by_asset: dict[uuid.UUID, float] = {}
     if asset_ids:
+        cf_in_types = ["BUY", "DEPOSIT"]
         cf_out_types = ["WITHDRAWAL", "SELL"]
         income_types = ["DIVIDEND", "JCP", "RENDIMENTO", "INTEREST", "RESGATE"]
         from app.models.asset_transaction import AssetTransaction
@@ -345,14 +360,20 @@ async def get_assets(
             )
             .where(
                 AssetTransaction.asset_id.in_(asset_ids),
-                AssetTransaction.type.in_(cf_out_types + income_types),
+                AssetTransaction.type.in_(cf_in_types + cf_out_types + income_types),
             )
             .group_by(AssetTransaction.asset_id, AssetTransaction.type)
         )
         for asset_id, tx_type, value_sum, fees_sum in agg.all():
             v = float(value_sum or 0)
             f = float(fees_sum or 0)
-            if tx_type in cf_out_types:
+            if tx_type in cf_in_types:
+                # Money in — the true invested basis (fees add to cost).
+                # Preferred over purchase_price × units, which shrinks
+                # with partial sells and turned sold principal into
+                # phantom profit on the rent display.
+                invested_by_asset[asset_id] = invested_by_asset.get(asset_id, 0) + v + f
+            elif tx_type in cf_out_types:
                 # Capital being returned — full value, fees ignored (e.g.
                 # broker commission was already deducted from amount).
                 returned_by_asset[asset_id] = returned_by_asset.get(asset_id, 0) + v
@@ -391,20 +412,26 @@ async def get_assets(
         latest = latest_by_asset.get(asset.id)
         count = count_by_asset.get(asset.id, 0)
         total_returned = returned_by_asset.get(asset.id, 0.0)
-        reads.append(_asset_to_read(asset, latest, count, total_returned))
+        invested_txs = invested_by_asset.get(asset.id)
+        reads.append(_asset_to_read(asset, latest, count, total_returned,
+                                    invested_txs))
     return reads
 
 
-async def _get_total_returned_net(
+async def _get_tx_aggregates(
     session: AsyncSession, asset_id: uuid.UUID
-) -> float:
+) -> tuple[float, Optional[float]]:
     """Per-asset version of the bulk aggregate computed in get_assets.
-    Used by single-asset endpoints (get/create/update) so the gain_loss
-    they return matches the list view."""
+    Returns (total_returned_net, invested_txs). Used by single-asset
+    endpoints (get/create/update) so the gain_loss they return matches
+    the list view. invested_txs is None when the asset has no BUY/DEPOSIT
+    rows (caller falls back to purchase_price × units)."""
     from app.models.asset_transaction import AssetTransaction
+    cf_in_types = ["BUY", "DEPOSIT"]
     cf_out_types = ["WITHDRAWAL", "SELL"]
     income_types = ["DIVIDEND", "JCP", "RENDIMENTO", "INTEREST", "RESGATE"]
-    total = 0.0
+    returned = 0.0
+    invested: Optional[float] = None
     rows = await session.execute(
         select(
             AssetTransaction.type,
@@ -413,15 +440,20 @@ async def _get_total_returned_net(
         )
         .where(
             AssetTransaction.asset_id == asset_id,
-            AssetTransaction.type.in_(cf_out_types + income_types),
+            AssetTransaction.type.in_(cf_in_types + cf_out_types + income_types),
         )
         .group_by(AssetTransaction.type)
     )
     for tx_type, value_sum, fees_sum in rows.all():
         v = float(value_sum or 0)
         f = float(fees_sum or 0)
-        total += v if tx_type in cf_out_types else (v - f)
-    return total
+        if tx_type in cf_in_types:
+            invested = (invested or 0.0) + v + f
+        elif tx_type in cf_out_types:
+            returned += v
+        else:
+            returned += v - f
+    return returned, invested
 
 
 async def get_asset(
@@ -436,8 +468,8 @@ async def get_asset(
         return None
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    total_returned = await _get_total_returned_net(session, asset.id)
-    return _asset_to_read(asset, latest, count, total_returned)
+    total_returned, invested_txs = await _get_tx_aggregates(session, asset.id)
+    return _asset_to_read(asset, latest, count, total_returned, invested_txs)
 
 
 async def create_asset(
@@ -647,8 +679,8 @@ async def create_asset(
                         asset.id, exc)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    total_returned = await _get_total_returned_net(session, asset.id)
-    return _asset_to_read(asset, latest, count, total_returned)
+    total_returned, invested_txs = await _get_tx_aggregates(session, asset.id)
+    return _asset_to_read(asset, latest, count, total_returned, invested_txs)
 
 
 async def update_asset(
@@ -790,8 +822,8 @@ async def update_asset(
     invalidate_ts_cache(user_id)
     latest = await _get_latest_value(session, asset.id)
     count = await _get_value_count(session, asset.id)
-    total_returned = await _get_total_returned_net(session, asset.id)
-    return _asset_to_read(asset, latest, count, total_returned)
+    total_returned, invested_txs = await _get_tx_aggregates(session, asset.id)
+    return _asset_to_read(asset, latest, count, total_returned, invested_txs)
 
 
 async def delete_asset(

@@ -143,6 +143,12 @@ class AssetRead(BaseModel):
     rf_rate_pct: Optional[float] = None
     rf_index_offset_pct: Optional[float] = None
     rf_on_curve: bool = False
+    # Money-in basis for the rent display: Σ(BUY+DEPOSIT value+fees) when
+    # the asset has a transaction ledger, else purchase_price × units.
+    # The frontend must divide gain_loss by THIS, not by
+    # purchase_price × units — after a partial sell those diverge and the
+    # naive basis inflates the rent (sold principal reads as profit).
+    invested_total: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 
