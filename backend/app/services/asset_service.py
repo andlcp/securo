@@ -1032,12 +1032,22 @@ async def get_asset_value_trend(
         return None
 
     result = await session.execute(
-        select(AssetValue.date, AssetValue.amount)
+        select(AssetValue.date, AssetValue.amount, AssetValue.market_amount)
         .where(AssetValue.asset_id == asset_id)
         .order_by(AssetValue.date)
     )
     rows = result.all()
-    return [{"date": row[0].isoformat(), "amount": float(row[1])} for row in rows]
+    # `market_amount` só existe em Tesouro marcado na curva (ver
+    # AssetValue.market_amount). Vai como None no resto, e o gráfico
+    # simplesmente não desenha a segunda linha.
+    return [
+        {
+            "date": row[0].isoformat(),
+            "amount": float(row[1]),
+            "market_amount": float(row[2]) if row[2] is not None else None,
+        }
+        for row in rows
+    ]
 
 
 async def get_portfolio_trend(

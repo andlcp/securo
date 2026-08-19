@@ -249,7 +249,17 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
             # daily rate cycle.
             pu_for_stamp: Optional[float] = None
             amount: Optional[Decimal] = None
+            # Valor a mercado do dia, guardado à parte para a segunda linha
+            # do gráfico de evolução. Só faz sentido em título on-curve —
+            # nos demais `amount` já É o valor a mercado e uma segunda
+            # série idêntica seria ruído.
+            market_amount: Optional[Decimal] = None
             if asset.rf_on_curve:
+                _venc_mkt = (asset.maturity_date.isoformat() if asset.maturity_date
+                             else _TESOURO_HARDCODED_VENC.get(asset.name))
+                _pu_mkt = pus.get((tipo, _venc_mkt)) if _venc_mkt else None
+                if _pu_mkt is not None:
+                    market_amount = Decimal(str(round(qty * _pu_mkt, 2)))
                 val = _on_curve_value(
                     asset, today, cdi, ipca,
                     coupons_by_asset.get(asset.id),
@@ -309,6 +319,7 @@ async def _refresh_tesouro_assets() -> dict[str, int]:
             )
             session.add(AssetValue(
                 asset_id=asset.id, amount=amount,
+                market_amount=market_amount,
                 date=today, source="rule"))
             # Bonus: also write the raw last_price / at fields so the UI
             # can show "atualizado em DD/MM/YYYY". For on-curve titles this

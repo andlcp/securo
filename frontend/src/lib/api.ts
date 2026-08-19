@@ -792,7 +792,10 @@ export const assets = {
     const { data } = await api.get(`/assets/${id}/values`)
     return data
   },
-  valueTrend: async (id: string, months = 12): Promise<{ date: string; amount: number }[]> => {
+  // `market_amount` só vem preenchido em Tesouro marcado na curva, onde
+  // `amount` carrega o carrego e o valor a mercado vira a linha tracejada
+  // do gráfico. Null no resto dos ativos.
+  valueTrend: async (id: string, months = 12): Promise<{ date: string; amount: number; market_amount?: number | null }[]> => {
     const { data } = await api.get(`/assets/${id}/value-trend`, { params: { months } })
     return data
   },

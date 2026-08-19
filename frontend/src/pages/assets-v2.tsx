@@ -2476,6 +2476,15 @@ function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purch
     return result
   }, [trend, purchasePrice, purchaseDate])
 
+  // Só desenha a linha "a mercado" quando existe série pra ela — hoje isso
+  // significa Tesouro marcado na curva, único caso em que `amount` (carrego)
+  // e mercado divergem. Nos demais ativos `amount` já É o valor a mercado e
+  // uma segunda linha sobreposta seria ruído.
+  const hasMarketSeries = useMemo(
+    () => trendWithPurchase.some(p => p.market_amount != null),
+    [trendWithPurchase],
+  )
+
   // valuesWithPurchase removed when we hid the Histórico de Valores section.
 
   const addValueMutation = useMutation({
@@ -2798,7 +2807,10 @@ function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purch
                   }}
                 />
                 <RechartsTooltip
-                  formatter={(value: number | undefined) => [mask(formatCurrency(value ?? 0, currency, loc)), 'Valor']}
+                  formatter={(value: number | undefined, key: unknown) => [
+                    mask(formatCurrency(value ?? 0, currency, loc)),
+                    key === 'market_amount' ? 'A mercado' : (hasMarketSeries ? 'Na curva' : 'Valor'),
+                  ]}
                   labelFormatter={(label: unknown) => new Date(String(label) + 'T00:00:00').toLocaleDateString(loc, { day: 'numeric', month: 'long', year: 'numeric' })}
                   contentStyle={{
                     background: 'var(--card)', color: 'var(--foreground)',
@@ -2812,9 +2824,35 @@ function AssetDetail({ name, maturityDate, assetId, currency, locale: loc, purch
                   dot={false}
                   activeDot={{ r: 4, strokeWidth: 2, fill: 'var(--card)', stroke: chartColor }}
                 />
+                {/* Segunda série: valor a mercado dos títulos marcados na
+                    curva. Linha tracejada e sem preenchimento pra deixar
+                    claro que é referência, não o valor que dirige o
+                    patrimônio. Só existe quando o backend devolve
+                    market_amount (ver AssetValue.market_amount). */}
+                {hasMarketSeries && (
+                  <Area type="monotone" dataKey="market_amount" stroke="#94A3B8"
+                    strokeWidth={1.5} strokeDasharray="4 3" fill="none"
+                    dot={false} connectNulls
+                    activeDot={{ r: 3, strokeWidth: 2, fill: 'var(--card)', stroke: '#94A3B8' }}
+                  />
+                )}
               </AreaChart>
             </ResponsiveContainer>
           </div>
+          {hasMarketSeries && (
+            <div className="flex items-center justify-center gap-4 mt-2 text-[11px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-4 h-0.5 rounded" style={{ background: chartColor }} />
+                Na curva
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <svg width="16" height="2" aria-hidden>
+                  <line x1="0" y1="1" x2="16" y2="1" stroke="#94A3B8" strokeWidth="1.5" strokeDasharray="4 3" />
+                </svg>
+                A mercado
+              </span>
+            </div>
+          )}
         </div>
       )}
 
