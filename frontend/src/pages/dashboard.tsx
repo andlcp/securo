@@ -7,6 +7,7 @@ import { ptBR, enUS } from 'date-fns/locale'
 import { dashboard, transactions, budgets, categories as categoriesApi, categoryGroups as categoryGroupsApi, accounts as accountsApi, goals as goalsApi, groups as groupsApi, portfolioTimeseries, investmentBenchmarks } from '@/lib/api'
 import type { PortfolioPoint } from '@/lib/api'
 import { AssetAllocationTable } from '@/components/asset-allocation-table'
+import { PendingCouponsAlert } from '@/components/pending-coupons-alert'
 import { ResultadoTable } from '@/components/resultado-table'
 import { invalidateFinancialQueries } from '@/lib/invalidate-queries'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -623,6 +624,10 @@ export default function DashboardPage() {
           </div>
         </div>
       </div>
+
+      {/* Cupons do Tesouro vencidos e não lançados. Só aparece quando há
+          pendência — fora das datas de cupom não ocupa espaço. */}
+      <PendingCouponsAlert locale={locale} />
 
       {/* Asset allocation targets — "Onde Aportar". Replaces the
           monthly-growth bar chart that used to live here. Global view:

@@ -224,6 +224,26 @@ async def get_asset_icon(
     )
 
 
+@router.get("/pending-coupons")
+async def get_pending_coupons(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+) -> list[dict]:
+    """Cupons semestrais do Tesouro já vencidos e ainda não lançados.
+
+    Estado derivado dos dados (não há tabela de notificações): assim que o
+    INTEREST é registrado na data do cupom, o item some da lista. Ver
+    tesouro_coupon_service para o calendário e o porquê de não calcularmos
+    o valor automaticamente.
+
+    Registrada antes de `/{asset_id}` porque o FastAPI casa as rotas na
+    ordem de declaração — invertido, "pending-coupons" seria lido como um
+    UUID de ativo e devolveria 422.
+    """
+    from app.services import tesouro_coupon_service
+    return await tesouro_coupon_service.pending_coupons(session, user.id)
+
+
 @router.get("/portfolio-trend")
 async def portfolio_trend(
     session: AsyncSession = Depends(get_async_session),

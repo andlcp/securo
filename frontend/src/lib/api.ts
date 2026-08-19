@@ -838,6 +838,12 @@ export const assets = {
     const { data } = await api.get('/assets/custodian-summary')
     return data
   },
+  // Cupons semestrais do Tesouro vencidos e ainda não lançados. Derivado
+  // dos dados no backend — some da lista assim que o INTEREST é criado.
+  pendingCoupons: async (): Promise<PendingCoupon[]> => {
+    const { data } = await api.get('/assets/pending-coupons')
+    return data
+  },
   marketSearch: async (q: string, limit = 15): Promise<MarketSymbolMatch[]> => {
     const { data } = await api.get('/assets/market/search', { params: { q, limit } })
     return data
@@ -938,6 +944,14 @@ export const assetTransactions = {
     const { data } = await api.post('/asset-transactions/sync-dividends')
     return data
   },
+}
+
+export interface PendingCoupon {
+  asset_id: string
+  asset_name: string
+  currency: string
+  coupon_date: string   // YYYY-MM-DD
+  days_late: number
 }
 
 // Asset allocation targets (the "Onde Aportar" widget on the dashboard).
