@@ -1,0 +1,18 @@
+# Imagem do frontend a partir de um dist/ já compilado.
+#
+# O build (tsc + vite sobre ~3.500 módulos) é o passo mais caro do deploy,
+# e o servidor tem 2 vCPUs dividas com outros projetos — chegou a levar
+# mais de 10 minutos. Como o ambiente de desenvolvimento já compila antes
+# de cada push (para checar tipos), compilar de novo lá é trabalho
+# duplicado. Aqui só copiamos os arquivos prontos.
+#
+# O deploy.sh só escolhe este Dockerfile quando frontend/dist/.build-sha
+# bate com o commit em HEAD; qualquer divergência cai no Dockerfile
+# normal, que compila no servidor. Assim nunca servimos bundle velho por
+# esquecimento.
+FROM nginx:alpine
+
+COPY dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80

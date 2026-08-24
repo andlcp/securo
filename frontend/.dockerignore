@@ -1,3 +1,6 @@
 node_modules/
-dist/
 .env
+
+# dist/ NÃO entra aqui: o Dockerfile.prebuilt precisa dele no contexto.
+# No Dockerfile normal ele é sobrescrito pelo `npm run build`, então
+# incluí-lo só custa alguns MB de contexto.

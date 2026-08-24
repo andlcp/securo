@@ -58,7 +58,9 @@ services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      # deploy.sh aponta para Dockerfile.prebuilt quando o dist/ enviado
+      # confere com o commit atual; sem isso, compila no servidor.
+      dockerfile: ${FRONTEND_DOCKERFILE:-Dockerfile}
     ports:
       - "80:80"
     depends_on:
