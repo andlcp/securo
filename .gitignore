@@ -66,3 +66,8 @@ docker-compose.override.yml
 # downloaded ONNX embedding models, transaction attachments). User data
 # — never commit.
 backend/data/
+
+# Ajustes de compose específicos de um servidor (rede do reverse proxy,
+# portas). Mantê-los fora do versionamento evita conflito de merge no
+# docker-compose.server.yml a cada deploy.
+docker-compose.local.yml

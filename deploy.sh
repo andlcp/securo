@@ -29,11 +29,21 @@ else
   echo "==> Frontend: sem dist/ enviado — compilando aqui"
 fi
 
+# Ajustes específicos do servidor (rede do reverse proxy, portas) vivem
+# em docker-compose.local.yml, fora do versionamento. Antes eles moravam
+# editados direto no docker-compose.server.yml, e cada commit que tocasse
+# esse arquivo travava o `git pull` no meio do deploy.
+COMPOSE="-f docker-compose.server.yml"
+if [ -f docker-compose.local.yml ]; then
+  COMPOSE="$COMPOSE -f docker-compose.local.yml"
+  echo "==> Aplicando docker-compose.local.yml"
+fi
+
 echo "==> Compilando imagens..."
-docker compose -f docker-compose.server.yml build
+docker compose $COMPOSE build
 
 echo "==> Reiniciando serviços..."
-docker compose -f docker-compose.server.yml up -d
+docker compose $COMPOSE up -d
 
 echo "==> Limpando imagens antigas..."
 docker image prune -f
