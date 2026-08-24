@@ -19,9 +19,11 @@ REMOTE_DIR="${SECURO_DIR:-/home/andlcp/securo}"
 
 SHA=$(git rev-parse HEAD)
 
-if [ -n "$(git status --porcelain)" ]; then
-  echo "Há alterações não commitadas. O dist seria carimbado com $SHA,"
-  echo "que não inclui essas mudanças. Faça commit e push primeiro."
+# Só arquivos rastreados importam: o vite compila a partir de src/, e
+# rascunhos soltos na raiz não entram no bundle nem no commit.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "Há alterações não commitadas em arquivos rastreados. O dist seria"
+  echo "carimbado com ${SHA:0:7}, que não as inclui. Faça commit e push antes."
   exit 1
 fi
 
