@@ -31,7 +31,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
-import { CheckCircle2, CalendarIcon, Paperclip, Target, ArrowUpDown, HelpCircle, EyeClosed } from 'lucide-react'
+import { CheckCircle2, CalendarIcon, Paperclip, Target, ArrowUpDown, HelpCircle, EyeClosed, TrendingUp } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ICON_MAP } from '@/lib/category-icons'
 import { PageHeader } from '@/components/page-header'
@@ -123,6 +123,34 @@ export default function DashboardPage() {
     queryFn: () => investmentBenchmarks.series(12, true),
     staleTime: 1000 * 60 * 30,
   })
+
+  // Série curta só para a variação do dia no card. Separada da lifetime
+  // porque esta revalida sozinha a cada 5 min — acompanhar o pregão com
+  // os ~2.600 pontos do histórico inteiro seria desperdício. O worker faz
+  // refresh intradiário de cotações, então o número anda ao longo do dia.
+  const { data: portfolioRecent } = useQuery<PortfolioPoint[]>({
+    queryKey: ['dashboard', 'portfolio-recent'],
+    queryFn: () => portfolioTimeseries.series({ months: 1, granularity: 'daily' }),
+    staleTime: 1000 * 60 * 5,
+    refetchInterval: 1000 * 60 * 5,
+    refetchOnWindowFocus: true,
+  })
+
+  // Variação do dia: dois últimos pontos da série. O ganho em dinheiro
+  // desconta o cashflow do dia (senão um aporte de hoje viraria "ganho"),
+  // e o percentual reaproveita o return_month do último ponto, que já é o
+  // Modified Dietz daquele dia — mesma conta que alimenta o TWR.
+  const dayChange = useMemo(() => {
+    if (!portfolioRecent || portfolioRecent.length < 2) return null
+    const last = portfolioRecent[portfolioRecent.length - 1]
+    const prev = portfolioRecent[portfolioRecent.length - 2]
+    const cf = last.cashflow ?? 0
+    return {
+      money: (last.v_end ?? 0) - (prev.v_end ?? 0) - cf,
+      pct: (last.return_month ?? 0) * 100,
+      asOf: last.month_end,
+    }
+  }, [portfolioRecent])
 
   const { data: spending, isLoading: spendingLoading } = useQuery({
     queryKey: ['dashboard', 'spending', selectedMonth],
@@ -566,15 +594,6 @@ export default function DashboardPage() {
                 )}
               </div>
 
-              {/* Assets Value */}
-              {!summaryLoading && summary?.assets_value && Object.values(summary.assets_value).reduce((a, b) => a + b, 0) > 0 && (
-                <div className="min-w-0">
-                  <p className="text-xs font-medium text-muted-foreground mb-0.5">{t('dashboard.assetsValue')}</p>
-                  <p className="text-lg font-bold tabular-nums text-blue-600">
-                    {mask(formatCurrency(summary.assets_value_primary ?? Object.values(summary.assets_value).reduce((a, b) => a + b, 0), primaryCurrency, locale))}
-                  </p>
-                </div>
-              )}
             </div>
 
             {/* Spending projection */}
@@ -619,6 +638,66 @@ export default function DashboardPage() {
                 <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-1.5" />
                 <p className="text-sm font-semibold text-foreground">{t('dashboard.allCategorized')}</p>
                 <p className="text-xs text-muted-foreground mt-0.5">{t('dashboard.allCategorizedDesc')}</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Faixa da carteira. O Securo nasceu como controle de gastos e
+            virou também gerenciador de investimentos; a hairline separa
+            os dois objetivos dentro do mesmo card. Em cima o fluxo do mês
+            (economia, saldo, entradas, saídas), aqui embaixo a carteira.
+            Patrimônio conta só `assets` — dinheiro em conta corrente entra
+            no Saldo Total lá em cima, não aqui. */}
+        <div className="border-t border-border px-5 py-4 bg-muted/30 rounded-b-xl">
+          <div className="flex items-center gap-1.5 mb-3">
+            <TrendingUp className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-xs font-medium text-muted-foreground">{t('dashboard.sectionPortfolio')}</span>
+            {dayChange && (
+              <span className="text-xs text-muted-foreground/70">
+                · {t('dashboard.asOf', { date: formatDate(dayChange.asOf, locale) })}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-end gap-x-8 gap-y-4">
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-muted-foreground mb-0.5">{t('dashboard.assetsValue')}</p>
+              {summaryLoading ? (
+                <Skeleton className="h-9 w-44" />
+              ) : (
+                <p className="text-3xl font-bold tabular-nums leading-tight">
+                  {mask(formatCurrency(summary?.assets_value_primary ?? 0, primaryCurrency, locale))}
+                </p>
+              )}
+            </div>
+
+            {dayChange && (
+              <div className="flex gap-2">
+                {(() => {
+                  const up = dayChange.money >= 0
+                  const tone = up
+                    ? 'bg-emerald-500/10 text-emerald-600'
+                    : 'bg-rose-500/10 text-rose-600'
+                  return (
+                    <>
+                      <div className={`rounded-lg px-3 py-2 ${tone}`}>
+                        <p className="text-[11px] font-medium opacity-80">{t('dashboard.dayChange')}</p>
+                        <p className="text-base font-bold tabular-nums leading-tight">
+                          {up ? '+' : ''}{dayChange.pct.toFixed(2)}%
+                        </p>
+                      </div>
+                      <div className={`rounded-lg px-3 py-2 ${tone}`}>
+                        <p className="text-[11px] font-medium opacity-80">
+                          {up ? t('dashboard.dayGain') : t('dashboard.dayLoss')}
+                        </p>
+                        <p className="text-base font-bold tabular-nums leading-tight">
+                          {up ? '+' : ''}{mask(formatCurrency(dayChange.money, primaryCurrency, locale))}
+                        </p>
+                      </div>
+                    </>
+                  )
+                })()}
               </div>
             )}
           </div>

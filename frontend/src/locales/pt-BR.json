@@ -161,7 +161,12 @@
     "fxRateUsed": "Taxa de câmbio: {{rate}}",
     "refreshRates": "Atualizar taxas de câmbio",
     "ratesRefreshed": "Taxas de câmbio atualizadas",
-    "ratesError": "Erro ao atualizar taxas de câmbio"
+    "ratesError": "Erro ao atualizar taxas de câmbio",
+    "sectionPortfolio": "Minha carteira",
+    "dayChange": "Variação do dia",
+    "dayGain": "Ganho do dia",
+    "dayLoss": "Perda do dia",
+    "asOf": "atualizado em {{date}}"
   },
   "transactions": {
     "title": "Transações",
@@ -858,7 +863,6 @@
     "rfOnCurve": "Marcar na curva (carrego até o vencimento)",
     "rfOnCurveHelp": "Valoriza pela sua taxa contratada, ignorando a oscilação de mercado. Ideal pra quem carrega o título até o vencimento. Requer a taxa contratada preenchida.",
     "onCurveBadge": "na curva",
-    "wallet": "Carteira",
     "newWallet": "Nova Carteira",
     "editWallet": "Editar carteira",
     "deleteWallet": "Excluir carteira",
@@ -1038,7 +1042,7 @@
     "recentTransactions": "Transações recentes",
     "recentTransactionsHint": "Transações divididas neste grupo",
     "viewAllTransactions": "Ver todas",
-    "noTransactions": "Ainda não há transações divididas neste grupo",
+    "noTransactions": "Nenhuma transação encontrada.",
     "splitWays": "dividida entre {{count}}",
     "isSelf": "Sou eu",
     "balances": "Saldos",
@@ -1060,7 +1064,6 @@
     "txActionCreate": "Criar uma nova transação",
     "txActionExisting": "Vincular uma transação existente",
     "searchTransaction": "Buscar transações pela descrição...",
-    "noTransactions": "Nenhuma transação encontrada.",
     "selectedTransaction": "Selecionada",
     "settled": "Acerto registrado",
     "settlements": "Acertos",

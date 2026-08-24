@@ -1959,7 +1959,7 @@ export default function AssetsV2Page() {
                 purchase_price × units while untouched (see useEffect
                 above). On EDIT it shows the asset's live value and, when
                 changed, upserts today's AssetValue — closes the "não tem
-                onde alterar o valor" gap the user hit on the CAIXA asset
+                onde alterar o valor" gap on manually-valued assets
                 (the Adicionar Valor row sits behind this very modal). */}
             {formMethod === 'manual' && (
               <div className="space-y-2">

@@ -161,7 +161,12 @@
     "fxRateUsed": "FX rate: {{rate}}",
     "refreshRates": "Refresh FX rates",
     "ratesRefreshed": "FX rates updated",
-    "ratesError": "Failed to update FX rates"
+    "ratesError": "Failed to update FX rates",
+    "sectionPortfolio": "My portfolio",
+    "dayChange": "Day change",
+    "dayGain": "Day gain",
+    "dayLoss": "Day loss",
+    "asOf": "as of {{date}}"
   },
   "transactions": {
     "title": "Transactions",
@@ -858,7 +863,6 @@
     "rfOnCurve": "Mark on curve (hold to maturity)",
     "rfOnCurveHelp": "Values the title by your contracted rate, ignoring market swings. Best for hold-to-maturity. Requires the contracted rate to be set.",
     "onCurveBadge": "on curve",
-    "wallet": "Wallet",
     "newWallet": "New Wallet",
     "editWallet": "Edit wallet",
     "deleteWallet": "Delete wallet",
@@ -1038,7 +1042,7 @@
     "recentTransactions": "Recent transactions",
     "recentTransactionsHint": "Transactions split through this group",
     "viewAllTransactions": "View all",
-    "noTransactions": "No transactions split through this group yet",
+    "noTransactions": "No transactions found.",
     "splitWays": "split {{count}} ways",
     "isSelf": "This is me",
     "balances": "Balances",
@@ -1060,7 +1064,6 @@
     "txActionCreate": "Create a new transaction",
     "txActionExisting": "Link an existing transaction",
     "searchTransaction": "Search transactions by description...",
-    "noTransactions": "No transactions found.",
     "selectedTransaction": "Selected",
     "settled": "Settlement recorded",
     "settlements": "Settlements",

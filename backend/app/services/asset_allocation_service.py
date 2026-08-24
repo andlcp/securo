@@ -8,8 +8,8 @@ Consolidado" widget the user wants to replicate. The mapping is purely
 derived from existing asset metadata (asset_class + type); nothing has
 to be tagged manually:
 
-    R_EMERGENCIA    — type='other' AND name starts with 'CAIXA'
-                      (uninvested cash placeholder, one per wallet)
+    R_EMERGENCIA    — sem mapeamento automático (caixa mora no módulo
+                      de contas, fora de `assets`)
     ACOES           — RENDA_VARIAVEL_BR AND type='stock'
     FIIS            — asset_class='FIIS'
     OUTROS          — FUNDOS + OUTRO (loans, misc)
@@ -68,16 +68,12 @@ def _bucket_for(asset: Asset) -> Optional[str]:
     you tweak the mapping."""
     ac = asset.asset_class
     t = asset.type
-    # Uninvested cash: one "CAIXA" placeholder asset per wallet, matched
-    # by name. It fills the R. Emergência bucket (the Bastter layout's
-    # manual reserve slot) instead of OUTROS — the user excludes OUTROS
-    # (family loans) from the allocation math, and cash MUST count: with
-    # a 0% target, the widget then pushes the idle cash toward whichever
-    # classes are under target. A dedicated asset_class would ripple
-    # through the taxonomy Literal + frontend badges/filters for what is
-    # a single special-cased row; the name rule is deliberate.
-    if t == "other" and (asset.name or "").strip().upper().startswith("CAIXA"):
-        return "R_EMERGENCIA"
+    # R_EMERGENCIA has no auto-mapping. It used to be filled by "CAIXA"
+    # placeholder assets (one per wallet), but holding cash as an asset
+    # dragged it into the portfolio return — R$ 38 k sitting at 0 % was
+    # diluting every daily and monthly figure. Cash now lives in the
+    # accounts module, outside `assets`, so the bucket stays empty until
+    # we map it to account balances.
     # All ETFs currently in the user's portfolio are American-exposure
     # (IVVB11 tracks SP500 in BRL; QQQM and SCHD are US-listed). They
     # share the STOCKS bucket. Reintroduce a separate ETFS bucket only
