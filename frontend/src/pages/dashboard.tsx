@@ -71,6 +71,15 @@ function formatDate(dateStr: string, locale = 'pt-BR') {
   return new Date(dateStr + 'T00:00:00').toLocaleDateString(locale)
 }
 
+// Cotações trazem timestamp completo (last_price_at). Mostramos data +
+// hora curta porque o refresh intradiário roda de 30 em 30 min — só a
+// data esconderia se o número é de agora ou do fechamento de ontem.
+function formatDateTime(iso: string, locale = 'pt-BR') {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${d.toLocaleDateString(locale)} ${d.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}`
+}
+
 
 export default function DashboardPage() {
   const { t, i18n } = useTranslation()
@@ -653,9 +662,13 @@ export default function DashboardPage() {
           <div className="flex items-center gap-1.5 mb-3">
             <TrendingUp className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="text-xs font-medium text-muted-foreground">{t('dashboard.sectionPortfolio')}</span>
-            {dayChange && (
+            {(summary?.prices_updated_at || dayChange) && (
               <span className="text-xs text-muted-foreground/70">
-                · {t('dashboard.asOf', { date: formatDate(dayChange.asOf, locale) })}
+                · {t('dashboard.asOf', {
+                  date: summary?.prices_updated_at
+                    ? formatDateTime(summary.prices_updated_at, locale)
+                    : formatDate(dayChange!.asOf, locale),
+                })}
               </span>
             )}
           </div>

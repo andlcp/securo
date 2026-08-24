@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel
@@ -23,6 +24,11 @@ class DashboardSummary(BaseModel):
     # waiting to be paid back). Computed from group balance lines so
     # it already accounts for any partial settlements.
     pending_shares_net: float = 0.0
+    # Quando as cotações foram buscadas pela última vez (MAX de
+    # asset.last_price_at). O refresh intradiário roda de 30 em 30 min no
+    # pregão, então o card mostra esta hora — e não a hora em que o
+    # navegador buscou, que daria uma falsa sensação de tempo real.
+    prices_updated_at: Optional[datetime] = None
 
 
 class SpendingByCategory(BaseModel):

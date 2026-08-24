@@ -24,6 +24,7 @@ from app.services.admin_service import get_credit_card_accounting_mode
 from app.services.recurring_transaction_service import get_occurrences_in_range
 from app.services.asset_service import get_asset_values_at
 from app.services.fx_rate_service import convert
+from app.models.asset import Asset
 from app.models.user import User
 
 
@@ -203,6 +204,17 @@ async def get_summary(
     primary_currency = user.primary_currency if user else get_settings().default_currency
 
     # Asset values — use cutoff so past months show historical values
+    # Hora real das cotações: o maior last_price_at entre os ativos
+    # precificados a mercado. É o que o card do painel exibe, para não
+    # sugerir tempo real quando os preços vêm do ciclo de 30 min.
+    prices_updated_at = await session.scalar(
+        select(func.max(Asset.last_price_at)).where(
+            Asset.user_id == user_id,
+            Asset.is_archived == False,    # noqa: E712
+            Asset.valuation_method == "market_price",
+        )
+    )
+
     assets_value, assets_value_primary = await get_asset_values_at(
         session, user_id, as_of_date=cutoff, primary_currency=primary_currency
     )
@@ -343,6 +355,7 @@ async def get_summary(
         assets_value_primary=round(assets_value_primary, 2),
         primary_currency=primary_currency,
         pending_shares_net=round(pending_shares_net, 2),
+        prices_updated_at=prices_updated_at,
     )
 
 

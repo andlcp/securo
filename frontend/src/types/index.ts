@@ -380,6 +380,9 @@ export interface DashboardSummary {
   assets_value: Record<string, number>
   assets_value_primary: number
   primary_currency: string
+  // MAX(last_price_at) dos ativos a mercado — hora real das cotações,
+  // que o card exibe em vez da hora do fetch do navegador.
+  prices_updated_at: string | null
   // Net pending balance from group splits in primary currency.
   // Negative = net liability, positive = net receivable. Already
   // accounts for partial settlements.
