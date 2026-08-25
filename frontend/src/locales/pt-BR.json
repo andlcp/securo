@@ -166,6 +166,9 @@
     "dayChange": "Variação do dia",
     "dayGain": "Ganho do dia",
     "dayLoss": "Perda do dia",
+    "monthChange": "Variação do mês",
+    "monthGain": "Ganho do mês",
+    "monthLoss": "Perda do mês",
     "asOf": "atualizado em {{date}}"
   },
   "transactions": {
