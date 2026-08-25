@@ -55,6 +55,13 @@ async def create_user(email: str, password: str) -> None:
             },
         )
         session.add(user)
+        await session.flush()
+
+        # Without a workspace every later insert trips the NOT NULL on
+        # workspace_id -- a CLI-created user would be unusable.
+        from app.services.workspace_service import create_personal_workspace_for_user
+
+        await create_personal_workspace_for_user(session, user)
         await session.commit()
         print(f"User created successfully: {email}")
 

@@ -31,6 +31,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.services.workspace_service import (  # noqa: E402
+    create_personal_workspace_for_user,
+)
+
 from app.core.auth import UserManager
 from app.core.database import async_session_maker
 from app.models.account import Account
@@ -199,6 +203,13 @@ async def seed(
 
         uid = user.id
 
+        # Bulk inserts below go straight to the DB, bypassing the mapper
+        # events that normally stamp workspace_id -- resolve it once here.
+        # Also covers the "existing user" branch, whose workspace the
+        # migration already created.
+        ws = await create_personal_workspace_for_user(session, user, commit=True)
+        wsid = ws.id
+
         # ── 2. Accounts ──────────────────────────────────────────────────────
         print("Creating accounts …")
         accounts: list[Account] = []
@@ -280,6 +291,7 @@ async def seed(
             tx_rows.append({
                 "id": uuid.uuid4(),
                 "user_id": uid,
+                "workspace_id": wsid,
                 "account_id": acc.id,
                 "category_id": cat.id,
                 "description": rng.choice(PAYEES),
@@ -332,6 +344,7 @@ async def seed(
                 value_rows.append({
                     "id": uuid.uuid4(),
                     "asset_id": asset.id,
+                    "workspace_id": wsid,
                     "amount": v,
                     "date": d,
                     "source": "manual",

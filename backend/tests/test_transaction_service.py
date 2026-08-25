@@ -938,6 +938,12 @@ async def test_update_transaction_rejects_foreign_account(
         is_active=True, is_superuser=False, is_verified=True,
     )
     session.add(other_user)
+    # Flush the user on its own so its Personal workspace exists before the
+    # account is inserted: `accounts.workspace_id` is NOT NULL and gets
+    # stamped from the owner's workspace. Within a single flush the order of
+    # the two INSERTs isn't defined (no relationship() links Account to
+    # User), so the account could land first and find nothing to inherit.
+    await session.flush()
     foreign_account = Account(
         id=uuid.uuid4(), user_id=other_user.id, name="ForeignAcc",
         type="checking", balance=Decimal("0"), currency="BRL",

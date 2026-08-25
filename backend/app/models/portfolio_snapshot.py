@@ -30,6 +30,9 @@ class PortfolioSnapshot(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
     month_end: Mapped[date] = mapped_column(Date, nullable=False)
 
     # Per-asset-class V_end (BRL líquido)

@@ -174,10 +174,24 @@ async def test_search_respects_user_scope(
     client: AsyncClient, auth_headers: dict, session: AsyncSession, test_user: User
 ) -> None:
     # Create an account owned by a different user — should NOT appear in results.
-    other_user_id = uuid.uuid4()
+    # The other user has to be a real row: `accounts.workspace_id` is NOT NULL
+    # and gets inherited from the owner's workspace, so a made-up user_id has
+    # nothing to inherit from. Flushed on its own so the workspace exists
+    # before the account is inserted.
+    other_user = User(
+        id=uuid.uuid4(),
+        email="search-other@example.com",
+        hashed_password="x",
+        is_active=True,
+        is_superuser=False,
+        is_verified=True,
+    )
+    session.add(other_user)
+    await session.flush()
+
     other_account = Account(
         id=uuid.uuid4(),
-        user_id=other_user_id,
+        user_id=other_user.id,
         name="Other User Secret Account",
         type="checking",
         balance=Decimal("0"),

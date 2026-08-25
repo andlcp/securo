@@ -64,10 +64,18 @@ async def create_admin(
         sql_update(User).where(User.id == user.id).values(preferences=prefs)
     )
 
+    # The Personal workspace has to exist before anything else is seeded:
+    # every financial row hangs off it.
+    from app.services.workspace_service import create_personal_workspace_for_user
+
+    await db_session.refresh(user)
+    workspace = await create_personal_workspace_for_user(db_session, user)
+
     # Create default wallet with the chosen currency
     wallet_name = "Carteira" if body.language.startswith("pt") else "Wallet"
     wallet = Account(
         user_id=user.id,
+        workspace_id=workspace.id,
         name=wallet_name,
         type="checking",
         balance=Decimal("0.00"),

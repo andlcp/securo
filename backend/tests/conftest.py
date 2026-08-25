@@ -43,6 +43,8 @@ import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker  # noqa: E402
+from sqlalchemy import event as sqlalchemy_event  # noqa: E402
+from sqlalchemy import insert as sqlalchemy_insert  # noqa: E402
 
 from app.core.database import Base, get_async_session  # noqa: E402
 from app.main import app  # noqa: E402
@@ -62,6 +64,57 @@ from app.models.credit_card_bill import CreditCardBill  # noqa: E402,F401
 from app.models.group import Group, GroupMember  # noqa: E402,F401
 from app.models.transaction_split import TransactionSplit  # noqa: E402,F401
 from app.models.group_settlement import GroupSettlement  # noqa: E402,F401
+from app.models.workspace import Workspace, WorkspaceMember  # noqa: E402,F401
+
+
+# --- Auto-create a Personal workspace for every test user ------------------
+# Financial rows carry a NOT NULL `workspace_id`, filled in by the autostamp
+# listener (app/core/workspace_autostamp.py) from the row's `user_id`. That
+# lookup only works if the user already has a workspace -- in production
+# registration creates one, but tests build `User(...)` by hand in a dozen
+# places.
+#
+# Rather than patch each of those (and every one added later), hook the
+# insert: right after a user row lands, write its workspace + membership
+# straight onto the connection.
+#
+# Core inserts in `after_insert`, not `session.add()` in `before_flush`:
+# SQLAlchemy orders a flush by relationship dependencies, and no
+# relationship() links Account to User, so the accounts INSERT can be
+# emitted *before* the users one. Rows added to the session would inherit
+# that same undefined ordering; writing on the connection lands them
+# immediately, where the autostamp lookup can see them.
+#
+# Test-only on purpose. Production creates workspaces explicitly at the
+# call site and commits the user first, so the ordering never arises.
+@sqlalchemy_event.listens_for(User, "after_insert")
+def _seed_workspace_for_new_users(mapper, connection, target):
+    prefs = target.preferences or {}
+    lang = prefs.get("language")
+    ws_id = uuid.uuid4()
+    connection.execute(
+        sqlalchemy_insert(Workspace).values(
+            id=ws_id,
+            name="Pessoal" if (lang or "").lower().startswith("pt") else "Personal",
+            kind="personal",
+            created_by_user_id=target.id,
+            default_currency=prefs.get("currency_display", "USD"),
+            locale=lang,
+            is_archived=False,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    connection.execute(
+        sqlalchemy_insert(WorkspaceMember).values(
+            id=uuid.uuid4(),
+            workspace_id=ws_id,
+            user_id=target.id,
+            role="owner",
+            joined_at=datetime.now(timezone.utc),
+        )
+    )
+
+
 # Agent models — gated by AGENTS_ENABLED above so tests always cover them.
 from app.agents.models import (  # noqa: E402,F401
     Agent,

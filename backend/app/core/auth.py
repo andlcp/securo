@@ -37,13 +37,21 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         from app.models.account import Account
         from app.services.category_service import create_default_categories
         from app.services.rule_service import create_default_rules
+        from app.services.workspace_service import create_personal_workspace_for_user
 
         session = self.user_db.session
         currency = user.primary_currency
         lang = (user.preferences or {}).get("language", "en")
+
+        # Every new user gets a Personal workspace + owner membership.
+        # All their seeded data (wallet, categories, rules) reparents to
+        # it -- the autostamp listener resolves it from user_id.
+        workspace = await create_personal_workspace_for_user(session, user)
+
         wallet_name = "Carteira" if lang.startswith("pt") else "Wallet"
         wallet = Account(
             user_id=user.id,
+            workspace_id=workspace.id,
             name=wallet_name,
             type="checking",
             balance=Decimal("0.00"),

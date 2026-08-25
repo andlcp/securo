@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import HTTPException, status
 from sqlalchemy import select, func, desc
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.core.workspace_autostamp import resolve_workspace_id
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -986,8 +987,13 @@ async def add_asset_value(
     if not owner_check.scalar_one_or_none():
         return None
 
+    # pg_insert bypasses mapper events, so the workspace autostamp
+    # listener never sees this row -- resolve it by hand.
+    workspace_id = await resolve_workspace_id(session, user_id)
+
     stmt = pg_insert(AssetValue).values(
         asset_id=asset_id,
+        workspace_id=workspace_id,
         amount=data.amount,
         date=data.date,
         source="manual",

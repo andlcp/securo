@@ -22,6 +22,7 @@ from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.core.workspace_autostamp import resolve_workspace_id
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.portfolio_snapshot import PortfolioSnapshot
@@ -54,6 +55,10 @@ async def import_csv(session: AsyncSession, user_id: uuid.UUID,
     text = csv_bytes.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
 
+    # Bulk upsert -- mapper events don't fire, so stamp the workspace
+    # explicitly instead of relying on the autostamp listener.
+    workspace_id = await resolve_workspace_id(session, user_id)
+
     rows_to_upsert: list[dict] = []
     errors: list[str] = []
     line_no = 1
@@ -72,6 +77,7 @@ async def import_csv(session: AsyncSession, user_id: uuid.UUID,
 
         rows_to_upsert.append({
             "user_id": user_id,
+            "workspace_id": workspace_id,
             "month_end": me,
             "v_end_rv": _to_decimal(row.get("v_end_rv")) or Decimal("0"),
             "v_end_rf": _to_decimal(row.get("v_end_rf")) or Decimal("0"),

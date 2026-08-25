@@ -29,6 +29,7 @@ from typing import Optional
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.core.workspace_autostamp import resolve_workspace_id
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.portfolio_daily_snapshot import PortfolioDailySnapshot
@@ -122,9 +123,13 @@ async def write_daily_snapshot_rows(
     """
     if not rows:
         return
+    # Bulk upsert -- mapper events don't fire, so stamp the workspace
+    # explicitly instead of relying on the autostamp listener.
+    workspace_id = await resolve_workspace_id(session, user_id)
     values = [
         {
             "user_id": user_id,
+            "workspace_id": workspace_id,
             "date": date.fromisoformat(r["month_end"]),
             "payload": r,
         }

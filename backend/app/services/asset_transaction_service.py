@@ -14,6 +14,7 @@ from typing import Optional
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.core.workspace_autostamp import resolve_workspace_id
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.asset import Asset
@@ -191,9 +192,13 @@ async def bulk_upsert(session: AsyncSession,
     external_id (no dedupe key)."""
     if not rows:
         return 0
+    # Bulk upsert -- mapper events don't fire, so stamp the
+    # workspace explicitly instead of relying on the autostamp.
+    workspace_id = await resolve_workspace_id(session, user_id)
     payload = [
         {
             "user_id": user_id,
+            "workspace_id": workspace_id,
             "asset_id": r["asset_id"],
             "date": r["date"],
             "type": r["type"],

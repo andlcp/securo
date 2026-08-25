@@ -76,10 +76,15 @@ async def create_user(
     # hook (auth.py) short-circuits when called programmatically with
     # request=None — which is exactly this path — so admin-created users
     # would otherwise land with no defaults and a broken UX.
+    from app.services.workspace_service import create_personal_workspace_for_user
+
     lang = (user.preferences or {}).get("language", "en")
+    workspace = await create_personal_workspace_for_user(session, user)
+
     wallet_name = "Carteira" if lang.startswith("pt") else "Wallet"
     wallet = Account(
         user_id=user.id,
+        workspace_id=workspace.id,
         name=wallet_name,
         type="checking",
         balance=Decimal("0.00"),

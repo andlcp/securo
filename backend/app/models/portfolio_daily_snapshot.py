@@ -2,6 +2,7 @@ import uuid
 from datetime import date as _date, datetime
 
 from sqlalchemy import Date, DateTime, ForeignKey, func
+from sqlalchemy import JSON
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,11 +25,20 @@ class PortfolioDailySnapshot(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True,
     )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
     date: Mapped[_date] = mapped_column(Date, primary_key=True)
     # Same shape as one row of get_timeseries' daily output:
     #   v_end, cashflow, income, return_month, twr_cum,
     #   by_class (asset_class -> v_end), by_group (group_id -> v_end)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # JSONB on Postgres (the real deployment); plain JSON on SQLite, which
+    # the test suite runs on and whose compiler has no JSONB. Without the
+    # variant, Base.metadata.create_all blows up on this column and takes
+    # the entire suite down with it.
+    payload: Mapped[dict] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False
+    )
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
