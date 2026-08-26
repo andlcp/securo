@@ -62,7 +62,11 @@ services:
       # confere com o commit atual; sem isso, compila no servidor.
       dockerfile: ${FRONTEND_DOCKERFILE:-Dockerfile}
     ports:
-      - "80:80"
+      - "80:8080"
+    environment:
+      # Consumido pelo default.conf.template via envsubst; e o alvo do
+      # proxy /api/ dentro da rede do compose.
+      BACKEND_URL: http://backend:8000
     depends_on:
       - backend
     restart: unless-stopped

@@ -13,6 +13,11 @@
 FROM nginx:alpine
 
 COPY dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# O upstream trocou o nginx.conf estatico por um template: o entrypoint do
+# nginx:alpine roda envsubst sobre /etc/nginx/templates/*.template e escreve
+# em conf.d/. E de la que sai ${BACKEND_URL}, definido no compose.
+COPY default.conf.template /etc/nginx/templates/default.conf.template
 
-EXPOSE 80
+# O template escuta em 8080 (nao mais 80). Quem fala com este container e o
+# festo-caddy, por nome, entao o Caddyfile aponta para :8080.
+EXPOSE 8080
