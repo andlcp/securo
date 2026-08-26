@@ -449,7 +449,14 @@ async def _already_imported(
     for tx in result.scalars().all():
         if tx.external_id:
             seen.add(('external', tx.asset_id, tx.external_id))
-        seen.add(('row', tx.asset_id, tx.date, tx.type, tx.qty, tx.price))
+        # A impressao digital tem de falar a mesma lingua dos dois lados. A
+        # linha lida do CSV traz `kind` minusculo ('buy'/'sell'); o nosso
+        # historico guarda `type` maiusculo, e com oito tipos a mais. Sem o
+        # .lower() aqui, 'BUY' nunca casa com 'buy' e a deteccao de
+        # duplicata morre em silencio -- reimportar o mesmo arquivo passaria
+        # a dobrar a posicao. Os tipos que nao existem em ordem de corretora
+        # (DIVIDEND, JCP, ...) simplesmente nunca casam, que e o correto.
+        seen.add(('row', tx.asset_id, tx.date, tx.type.lower(), tx.qty, tx.price))
     return seen
 
 
