@@ -22,7 +22,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Literal, Optional
+from typing import Any, AsyncIterator, Literal, Optional, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ from app.agents.providers.base import (
     LLMNotSupportedError,
     LLMRateLimitError,
     LLMUnavailableError,
+    Role,
     ToolCall,
 )
 from app.agents.providers.registry import build_provider
@@ -324,6 +325,7 @@ class AgentExecutor:
         session: AsyncSession,
         agent: Agent,
         user_id: uuid.UUID,
+        workspace_id: Optional[uuid.UUID] = None,
         conversation_id: uuid.UUID,
         user_message: str,
         channel: str = "web",
@@ -367,7 +369,9 @@ class AgentExecutor:
                 from app.models.user import User
                 user = await session.get(User, user_id)
                 if user is not None:
-                    primer = await context_service.build_context_primer(session, user)
+                    primer = await context_service.build_context_primer(
+                        session, user, workspace_id=agent.workspace_id
+                    )
                     if primer:
                         messages.append(ChatMessage(role="system", content=primer))
             except Exception:  # noqa: BLE001
@@ -390,7 +394,7 @@ class AgentExecutor:
                 tr = m.tool_result or {}
                 content = tr.get("text") or _safe_json(tr.get("data"))
             messages.append(ChatMessage(
-                role=m.role,  # type: ignore[arg-type]
+                role=cast(Role, m.role),
                 content=content,
                 tool_calls=tcs,
                 tool_call_id=tool_call_id,
@@ -398,7 +402,12 @@ class AgentExecutor:
 
         # 3. Discover tools from MCP and filter by per-agent whitelist.
         try:
-            handles = await self.mcp.discover(user_id=user_id, conversation_id=conversation_id, agent_id=agent.id)
+            handles = await self.mcp.discover(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent.id,
+            )
         except Exception:
             logger.exception("MCP discovery failed; running without tools")
             handles = []
@@ -527,7 +536,7 @@ class AgentExecutor:
                 yield ev
 
             results = await asyncio.gather(*[
-                _safe_call_tool(self.mcp, c, user_id=user_id, conversation_id=conversation_id, agent_id=agent.id)
+                _safe_call_tool(self.mcp, c, user_id=user_id, workspace_id=workspace_id, conversation_id=conversation_id, agent_id=agent.id)
                 for c in assembled_calls
             ])
             for c, res in zip(assembled_calls, results):
@@ -597,6 +606,7 @@ async def _safe_call_tool(
     call: ToolCall,
     *,
     user_id: uuid.UUID,
+    workspace_id: Optional[uuid.UUID] = None,
     conversation_id: uuid.UUID,
     agent_id: Optional[uuid.UUID] = None,
 ) -> dict[str, Any]:
@@ -606,6 +616,7 @@ async def _safe_call_tool(
             wire_name=call.name,
             arguments=call.arguments,
             user_id=user_id,
+            workspace_id=workspace_id,
             conversation_id=conversation_id,
             agent_id=agent_id,
         )

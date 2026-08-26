@@ -1,19 +1,26 @@
 import uuid
 from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, cast
 
-from sqlalchemy import case, select, func, update, delete
+from sqlalchemy import CursorResult, case, select, func, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.payee import Payee, PayeeMapping
+from app.models.payee import Payee, PayeeMapping, PayeeTaxId
 from app.models.transaction import Transaction
 from app.models.category import Category
+from app.fiscal.registry import TaxIdKind, normalise_and_validate
 from app.schemas.payee import PayeeCreate, PayeeUpdate
 
 
-async def get_payees(session: AsyncSession, user_id: uuid.UUID) -> list[Payee]:
-    """List all payees for a user with transaction counts."""
+async def get_payees(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    q: Optional[str] = None,
+    type: Optional[str] = None,
+    is_favorite: Optional[bool] = None,
+) -> list[Payee]:
+    """List all payees in a workspace with transaction counts."""
     count_subq = (
         select(
             Transaction.payee_id,
@@ -24,12 +31,25 @@ async def get_payees(session: AsyncSession, user_id: uuid.UUID) -> list[Payee]:
         .subquery()
     )
     tx_count = func.coalesce(count_subq.c.tx_count, 0)
-    result = await session.execute(
+    stmt = (
         select(Payee, tx_count.label("transaction_count"))
         .outerjoin(count_subq, Payee.id == count_subq.c.payee_id)
-        .where(Payee.user_id == user_id)
-        .order_by(Payee.name)
+        .where(Payee.workspace_id == workspace_id)
     )
+
+    if q:
+        from sqlalchemy import or_
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Payee.name.ilike(pattern), Payee.notes.ilike(pattern)))
+
+    if type:
+        stmt = stmt.where(Payee.type == type)
+
+    if is_favorite is not None:
+        stmt = stmt.where(Payee.is_favorite == is_favorite)
+
+    stmt = stmt.order_by(Payee.name)
+    result = await session.execute(stmt)
     payees = []
     for row in result.all():
         payee = row[0]
@@ -38,46 +58,142 @@ async def get_payees(session: AsyncSession, user_id: uuid.UUID) -> list[Payee]:
     return payees
 
 
-async def get_payee(session: AsyncSession, payee_id: uuid.UUID, user_id: uuid.UUID) -> Optional[Payee]:
+async def get_payee(session: AsyncSession, payee_id: uuid.UUID, workspace_id: uuid.UUID) -> Optional[Payee]:
     result = await session.execute(
-        select(Payee).where(Payee.id == payee_id, Payee.user_id == user_id)
+        select(Payee).where(Payee.id == payee_id, Payee.workspace_id == workspace_id)
     )
     return result.scalar_one_or_none()
 
 
-async def get_or_create_payee(session: AsyncSession, user_id: uuid.UUID, name: str) -> Payee:
-    """Find a payee by name (case-insensitive) or create a new one."""
+async def get_or_create_payee(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    name: str,
+    *,
+    workspace_id: Optional[uuid.UUID] = None,
+    source: str = "sync",
+) -> Payee:
+    """Find a payee by name (case-insensitive) or create a new one.
+
+    `user_id` is kept first for backwards compatibility with import/connection
+    sync paths. When `workspace_id` is provided, the lookup scopes by workspace;
+    otherwise the autostamp listener fills it in on insert.
+
+    `source` is stamped only on rows this call creates. An existing payee is
+    returned untouched, so a counterparty somebody entered by hand keeps
+    saying so even after sync sees the same name — the same protection that
+    already keeps sync from overwriting manual edits.
+
+    Defaults to `sync` because that is what this function is for: the bulk
+    path that turns bank descriptors into rows. The CSV importer passes
+    `import` explicitly.
+    """
     name = name.strip()
     if not name:
         raise ValueError("Payee name cannot be empty")
 
-    result = await session.execute(
-        select(Payee).where(Payee.user_id == user_id, func.lower(Payee.name) == name.lower())
-    )
+    if len(name) > 255:
+        name = name[:255]
+
+    lookup = select(Payee).where(func.lower(Payee.name) == name.lower())
+    if workspace_id is not None:
+        lookup = lookup.where(Payee.workspace_id == workspace_id)
+    else:
+        lookup = lookup.where(Payee.user_id == user_id)
+    result = await session.execute(lookup)
     payee = result.scalar_one_or_none()
     if payee:
         return payee
 
-    payee = Payee(user_id=user_id, name=name)
+    payee = Payee(user_id=user_id, name=name, source=source)
+    if workspace_id is not None:
+        payee.workspace_id = workspace_id
     session.add(payee)
     await session.flush()
     return payee
 
 
-async def create_payee(session: AsyncSession, user_id: uuid.UUID, data: PayeeCreate) -> Payee:
+async def _apply_tax_ids(
+    session: AsyncSession,
+    payee: Payee,
+    workspace_id: uuid.UUID,
+    incoming: list,
+) -> None:
+    """Replace this payee's fiscal documents with `incoming`.
+
+    Replace rather than merge: the caller sends the set that should remain,
+    which makes removing a document the same operation as changing one and
+    leaves no way to end up with a stale row nobody meant to keep.
+
+    Validation is by document kind and deliberately not by the workspace's
+    jurisdiction. A Brazilian consultancy billing a Berlin client stores a
+    German VAT number, and it is checked as a VAT number.
+    """
+    normalised: dict[TaxIdKind, str] = {}
+    for item in incoming:
+        kind = TaxIdKind(item.kind)
+        value, error = normalise_and_validate(kind, item.value)
+        # An emptied field means "drop this document", not "store nothing".
+        if error == "empty":
+            continue
+        if error:
+            raise ValueError(f"invalid_tax_id:{kind.value}:{error}")
+        # One document per kind, enforced by a unique constraint. Keeping the
+        # last silently would discard the caller's earlier value: two CNPJs on
+        # one counterparty is a mistake worth reporting, not resolving.
+        if kind in normalised:
+            raise ValueError(f"duplicate_tax_id:{kind.value}")
+        normalised[kind] = value
+
+    # Queried rather than read off `payee.tax_ids`: a freshly flushed payee
+    # would lazy-load the collection, and lazy IO inside an async session is
+    # exactly the MissingGreenlet this codebase must not hand a user.
+    rows = await session.execute(
+        select(PayeeTaxId).where(PayeeTaxId.payee_id == payee.id)
+    )
+    existing = {row.kind: row for row in rows.scalars().all()}
+    for kind_value, row in existing.items():
+        if TaxIdKind(kind_value) not in normalised:
+            await session.delete(row)
+    for kind, value in normalised.items():
+        row = existing.get(kind.value)
+        if row is None:
+            session.add(
+                PayeeTaxId(
+                    payee_id=payee.id,
+                    workspace_id=workspace_id,
+                    kind=kind.value,
+                    value=value,
+                )
+            )
+        elif row.value != value:
+            row.value = value
+    await session.flush()
+
+
+async def create_payee(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: PayeeCreate,
+) -> Payee:
     # Check uniqueness
     existing = await session.execute(
-        select(Payee).where(Payee.user_id == user_id, func.lower(Payee.name) == data.name.strip().lower())
+        select(Payee).where(Payee.workspace_id == workspace_id, func.lower(Payee.name) == data.name.strip().lower())
     )
     if existing.scalar_one_or_none():
         raise ValueError("A payee with this name already exists")
 
-    payee = Payee(user_id=user_id, **data.model_dump())
+    fields = data.model_dump(exclude={"tax_ids"})
+    # Stamped here rather than taken from the request: this is the path a
+    # person went through a form to reach.
+    payee = Payee(user_id=user_id, workspace_id=workspace_id, source="manual", **fields)
     session.add(payee)
     await session.flush()
+    await _apply_tax_ids(session, payee, workspace_id, data.tax_ids)
 
     # Self-mapping for merge tracking
-    mapping = PayeeMapping(id=payee.id, user_id=user_id, target_id=payee.id)
+    mapping = PayeeMapping(id=payee.id, user_id=user_id, workspace_id=workspace_id, target_id=payee.id)
     session.add(mapping)
 
     await session.commit()
@@ -87,19 +203,22 @@ async def create_payee(session: AsyncSession, user_id: uuid.UUID, data: PayeeCre
 
 
 async def update_payee(
-    session: AsyncSession, payee_id: uuid.UUID, user_id: uuid.UUID, data: PayeeUpdate
+    session: AsyncSession, payee_id: uuid.UUID, workspace_id: uuid.UUID, data: PayeeUpdate
 ) -> Optional[Payee]:
-    payee = await get_payee(session, payee_id, user_id)
+    payee = await get_payee(session, payee_id, workspace_id)
     if not payee:
         return None
 
     update_data = data.model_dump(exclude_unset=True)
+    # Documents are handled separately: they live in their own table and are
+    # replaced as a set, not assigned onto the payee row.
+    tax_ids = update_data.pop("tax_ids", None)
 
     # Check name uniqueness if name is being changed
     if "name" in update_data and update_data["name"]:
         existing = await session.execute(
             select(Payee).where(
-                Payee.user_id == user_id,
+                Payee.workspace_id == workspace_id,
                 func.lower(Payee.name) == update_data["name"].strip().lower(),
                 Payee.id != payee_id,
             )
@@ -110,13 +229,16 @@ async def update_payee(
     for key, value in update_data.items():
         setattr(payee, key, value)
 
+    if tax_ids is not None:
+        await _apply_tax_ids(session, payee, workspace_id, data.tax_ids or [])
+
     await session.commit()
     await session.refresh(payee)
     return payee
 
 
-async def delete_payee(session: AsyncSession, payee_id: uuid.UUID, user_id: uuid.UUID) -> bool:
-    payee = await get_payee(session, payee_id, user_id)
+async def delete_payee(session: AsyncSession, payee_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+    payee = await get_payee(session, payee_id, workspace_id)
     if not payee:
         return False
 
@@ -137,15 +259,46 @@ async def delete_payee(session: AsyncSession, payee_id: uuid.UUID, user_id: uuid
     return True
 
 
+async def bulk_delete_payees(session: AsyncSession, workspace_id: uuid.UUID, payee_ids: list[uuid.UUID]) -> int:
+    # Check which payees exist in this workspace first
+    payees_query = await session.execute(
+        select(Payee.id).where(Payee.id.in_(payee_ids), Payee.workspace_id == workspace_id)
+    )
+    valid_ids = [row[0] for row in payees_query.all()]
+
+    if not valid_ids:
+        return 0
+
+    # Null out transaction references
+    await session.execute(
+        update(Transaction)
+        .where(Transaction.payee_id.in_(valid_ids))
+        .values(payee_id=None)
+    )
+
+    # Delete mappings pointing to this payee
+    await session.execute(
+        delete(PayeeMapping).where(PayeeMapping.target_id.in_(valid_ids))
+    )
+
+    # Delete payees
+    result = await session.execute(
+        delete(Payee).where(Payee.id.in_(valid_ids))
+    )
+    
+    await session.commit()
+    return cast(CursorResult, result).rowcount
+
+
 async def merge_payees(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     target_id: uuid.UUID,
     source_ids: list[uuid.UUID],
 ) -> int:
     """Merge source payees into target. Returns number of transactions reassigned."""
     # Validate target
-    target = await get_payee(session, target_id, user_id)
+    target = await get_payee(session, target_id, workspace_id)
     if not target:
         raise ValueError("Target payee not found")
 
@@ -153,7 +306,7 @@ async def merge_payees(
     for source_id in source_ids:
         if source_id == target_id:
             continue
-        source = await get_payee(session, source_id, user_id)
+        source = await get_payee(session, source_id, workspace_id)
         if not source:
             raise ValueError(f"Source payee {source_id} not found")
 
@@ -163,7 +316,7 @@ async def merge_payees(
         .where(Transaction.payee_id.in_(source_ids))
         .values(payee_id=target_id)
     )
-    reassigned = result.rowcount
+    reassigned = cast(CursorResult, result).rowcount
 
     # Update mappings: point source mappings to target
     for source_id in source_ids:
@@ -179,7 +332,7 @@ async def merge_payees(
     for source_id in source_ids:
         if source_id == target_id:
             continue
-        source = await get_payee(session, source_id, user_id)
+        source = await get_payee(session, source_id, workspace_id)
         if source:
             await session.delete(source)
 
@@ -190,18 +343,18 @@ async def merge_payees(
 async def get_payee_summary(
     session: AsyncSession,
     payee_id: uuid.UUID,
-    user_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
 ) -> dict:
     """Return spending analytics for a payee."""
-    payee = await get_payee(session, payee_id, user_id)
+    payee = await get_payee(session, payee_id, workspace_id)
     if not payee:
         raise ValueError("Payee not found")
 
     base = select(Transaction).where(
         Transaction.payee_id == payee_id,
-        Transaction.user_id == user_id,
+        Transaction.workspace_id == workspace_id,
     )
     if start_date:
         base = base.where(Transaction.date >= start_date)
@@ -223,12 +376,12 @@ async def get_payee_summary(
                     else_=Decimal("0"),
                 )
             ), Decimal("0")).label("total_received"),
-            func.count(Transaction.id).label("count"),
+            func.count(Transaction.id).label("tx_count"),
             func.max(Transaction.date).label("last_date"),
         )
         .where(
             Transaction.payee_id == payee_id,
-            Transaction.user_id == user_id,
+            Transaction.workspace_id == workspace_id,
         )
     )
     row = totals.one()
@@ -238,7 +391,7 @@ async def get_payee_summary(
         select(Transaction.category_id, func.count(Transaction.id).label("cnt"))
         .where(
             Transaction.payee_id == payee_id,
-            Transaction.user_id == user_id,
+            Transaction.workspace_id == workspace_id,
             Transaction.category_id.isnot(None),
         )
         .group_by(Transaction.category_id)
@@ -253,12 +406,12 @@ async def get_payee_summary(
         )
         most_common_category = cat.scalar_one_or_none()
 
-    payee.transaction_count = row.count
+    payee.transaction_count = row.tx_count
     return {
         "payee": payee,
         "total_spent": row.total_spent,
         "total_received": row.total_received,
-        "transaction_count": row.count,
+        "transaction_count": row.tx_count,
         "most_common_category": most_common_category,
         "last_transaction_date": row.last_date,
     }

@@ -1,12 +1,15 @@
 import { lazy, Suspense } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from '@/components/ui/sonner'
 import { ThemeProvider } from '@/components/theme-provider'
 import { AuthProvider } from '@/contexts/auth-context'
+import { WorkspaceProvider } from '@/contexts/workspace-context'
+import { CollectionFilterProvider } from '@/contexts/collection-filter-context'
 import { ProtectedRoute } from '@/components/protected-route'
 import { AdminRoute } from '@/components/admin-route'
 import { AgentsRoute } from '@/components/agents-route'
+import { ModuleRoute } from '@/components/module-route'
 import { AppLayout } from '@/components/app-layout'
 
 const SetupPage = lazy(() => import('@/pages/setup'))
@@ -19,6 +22,7 @@ const AccountDetailPage = lazy(() => import('@/pages/account-detail'))
 const ImportPage = lazy(() => import('@/pages/import'))
 const RulesPage = lazy(() => import('@/pages/rules'))
 const CategoriesPage = lazy(() => import('@/pages/categories'))
+const CollectionsPage = lazy(() => import('@/pages/collections'))
 const BudgetsPage = lazy(() => import('@/pages/budgets'))
 const RecurringPage = lazy(() => import('@/pages/recurring'))
 const GoalsPage = lazy(() => import('@/pages/goals'))
@@ -34,6 +38,10 @@ const AdminSettingsPage = lazy(() => import('@/pages/admin/settings'))
 const AgentsListPage = lazy(() => import('@/pages/agents-list'))
 const AgentDetailPage = lazy(() => import('@/pages/agent-detail'))
 const AgentConnectionsPage = lazy(() => import('@/pages/agent-connections'))
+const InvoicesPage = lazy(() => import('@/pages/invoices'))
+const WorkspaceSettingsPage = lazy(() => import('@/pages/workspace-settings'))
+const OAuthCallbackPage = lazy(() => import('@/pages/oauth-callback'))
+const OIDCCallbackPage = lazy(() => import('@/pages/oidc-callback'))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -58,36 +66,47 @@ function App() {
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <AuthProvider>
+            <WorkspaceProvider>
             <Suspense fallback={<LoadingFallback />}>
               <Routes>
                 <Route path="/setup" element={<SetupPage />} />
                 <Route path="/login" element={<LoginPage />} />
+                <Route path="/auth/oidc/callback" element={<OIDCCallbackPage />} />
                 <Route path="/register" element={<RegisterPage />} />
                 <Route
                   element={
                     <ProtectedRoute>
-                      <AppLayout />
+                      <CollectionFilterProvider>
+                        <AppLayout />
+                      </CollectionFilterProvider>
                     </ProtectedRoute>
                   }
                 >
                   <Route path="/" element={<DashboardPage />} />
-                  <Route path="/transactions" element={<TransactionsPage />} />
-                  <Route path="/accounts" element={<AccountsPage />} />
-                  <Route path="/accounts/:id" element={<AccountDetailPage />} />
-                  <Route path="/import" element={<ImportPage />} />
-                  <Route path="/rules" element={<RulesPage />} />
-                  <Route path="/categories" element={<CategoriesPage />} />
-                  <Route path="/budgets" element={<BudgetsPage />} />
-                  <Route path="/goals" element={<GoalsPage />} />
-                  <Route path="/recurring" element={<RecurringPage />} />
-                  <Route path="/assets" element={<AssetsPage />} />
-                  <Route path="/assets-v2" element={<AssetsV2Page />} />
-                  <Route path="/reports" element={<ReportsPage />} />
-                  <Route path="/investments" element={<InvestmentsPage />} />
-                  <Route path="/events" element={<EventsPage />} />
-                  <Route path="/payees" element={<PayeesPage />} />
-                  <Route path="/groups" element={<GroupsPage />} />
-                  <Route path="/groups/:id" element={<GroupDetailPage />} />
+                  <Route path="/transactions" element={<ModuleRoute module="transactions"><TransactionsPage /></ModuleRoute>} />
+                  <Route path="/accounts" element={<ModuleRoute module="accounts"><AccountsPage /></ModuleRoute>} />
+                  <Route path="/accounts/:id" element={<ModuleRoute module="accounts"><AccountDetailPage /></ModuleRoute>} />
+                  <Route path="/oauth/callback" element={<OAuthCallbackPage />} />
+                  <Route path="/enable-banking" element={<OAuthCallbackPage />} />
+                  <Route path="/import" element={<ModuleRoute module="import"><ImportPage /></ModuleRoute>} />
+                  <Route path="/rules" element={<ModuleRoute module="rules"><RulesPage /></ModuleRoute>} />
+                  <Route path="/categories" element={<ModuleRoute module="categories"><CategoriesPage /></ModuleRoute>} />
+                  <Route path="/collections" element={<CollectionsPage />} />
+                  <Route path="/budgets" element={<ModuleRoute module="budgets"><BudgetsPage /></ModuleRoute>} />
+                  <Route path="/goals" element={<ModuleRoute module="goals"><GoalsPage /></ModuleRoute>} />
+                  <Route path="/recurring" element={<ModuleRoute module="recurring"><RecurringPage /></ModuleRoute>} />
+                  <Route path="/assets" element={<ModuleRoute module="assets"><AssetsPage /></ModuleRoute>} />
+                  <Route path="/assets-v2" element={<ModuleRoute module="assets"><AssetsV2Page /></ModuleRoute>} />
+                  <Route path="/investments" element={<ModuleRoute module="assets"><InvestmentsPage /></ModuleRoute>} />
+                  <Route path="/events" element={<ModuleRoute module="assets"><EventsPage /></ModuleRoute>} />
+                  {/* Kept so links minted before the importers were merged keep working. */}
+                  <Route path="/assets/import" element={<Navigate to="/import?tab=investments" replace />} />
+                  <Route path="/reports" element={<ModuleRoute module="reports"><ReportsPage /></ModuleRoute>} />
+                  <Route path="/payees" element={<ModuleRoute module="payees"><PayeesPage /></ModuleRoute>} />
+                  <Route path="/groups" element={<ModuleRoute module="split_groups"><GroupsPage /></ModuleRoute>} />
+                  <Route path="/groups/:id" element={<ModuleRoute module="split_groups"><GroupDetailPage /></ModuleRoute>} />
+                  <Route path="/invoices" element={<ModuleRoute module="invoices"><InvoicesPage /></ModuleRoute>} />
+                  <Route path="/workspace/settings" element={<WorkspaceSettingsPage />} />
                   <Route path="/admin" element={<AdminRoute><AdminSettingsPage /></AdminRoute>} />
                   <Route path="/agents" element={<AgentsRoute><AgentsListPage /></AgentsRoute>} />
                   <Route path="/agents/connections" element={<AgentsRoute><AgentConnectionsPage /></AgentsRoute>} />
@@ -96,6 +115,7 @@ function App() {
               </Routes>
             </Suspense>
             <Toaster />
+            </WorkspaceProvider>
           </AuthProvider>
         </BrowserRouter>
       </QueryClientProvider>

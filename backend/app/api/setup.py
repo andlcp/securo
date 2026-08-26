@@ -6,6 +6,7 @@ from sqlalchemy import select, func, update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_jwt_strategy, get_user_manager, UserManager
+from app.core.auth_policy import require_local_auth_enabled
 from app.core.database import get_async_session
 from app.models.account import Account
 from app.models.user import User
@@ -32,7 +33,7 @@ async def get_setup_status(session: AsyncSession = Depends(get_async_session)):
     return SetupStatus(has_users=count > 0)
 
 
-@router.post("/create-admin")
+@router.post("/create-admin", dependencies=[Depends(require_local_auth_enabled)])
 async def create_admin(
     body: CreateAdminRequest,
     session: AsyncSession = Depends(get_async_session),
@@ -64,8 +65,9 @@ async def create_admin(
         sql_update(User).where(User.id == user.id).values(preferences=prefs)
     )
 
-    # The Personal workspace has to exist before anything else is seeded:
-    # every financial row hangs off it.
+    # Personal workspace gets auto-created here too (setup endpoint runs
+    # programmatically, so the registration hook's `request is None` early
+    # exit fires; we have to set up the workspace ourselves).
     from app.services.workspace_service import create_personal_workspace_for_user
 
     await db_session.refresh(user)
@@ -88,8 +90,8 @@ async def create_admin(
     from app.services.category_service import create_default_categories
     from app.services.rule_service import create_default_rules
 
-    await create_default_categories(db_session, user.id, body.language)
-    await create_default_rules(db_session, user.id, body.language)
+    await create_default_categories(db_session, user.id, body.language, workspace_id=workspace.id)
+    await create_default_rules(db_session, user.id, body.language, workspace_id=workspace.id)
 
     # Refresh user to get updated preferences for token generation
     await db_session.refresh(user)

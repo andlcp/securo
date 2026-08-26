@@ -41,6 +41,8 @@ pytestmark = pytest.mark.asyncio
 
 async def _make_user(session: AsyncSession, email: str, is_superuser: bool = False) -> User:
     import bcrypt as _bcrypt
+    from app.services.workspace_service import create_personal_workspace_for_user
+
     hashed = _bcrypt.hashpw(b"password123", _bcrypt.gensalt()).decode()
     user = User(
         id=uuid.uuid4(),
@@ -52,6 +54,11 @@ async def _make_user(session: AsyncSession, email: str, is_superuser: bool = Fal
         preferences={"language": "en", "currency_display": "USD"},
     )
     session.add(user)
+    await session.commit()
+    # Every user needs a workspace so the autostamp listener can resolve
+    # workspace_id when downstream rows (accounts, connections, etc.) are
+    # inserted without it — the cascade test relies on this.
+    await create_personal_workspace_for_user(session, user)
     await session.commit()
     await session.refresh(user)
     return user
@@ -205,6 +212,8 @@ async def test_update_user_email(session: AsyncSession, clean_db):
     target = await _make_user(session, "target_upd@test.com")
     data = AdminUserUpdate(email="newemail@test.com")
     result = await update_user(session, target.id, data, admin.id)
+
+    assert result is not None
     assert result.email == "newemail@test.com"
 
 
@@ -223,6 +232,7 @@ async def test_update_user_password(session: AsyncSession, clean_db):
     old_hash = target.hashed_password
     data = AdminUserUpdate(password="newpassword123")
     result = await update_user(session, target.id, data, admin.id)
+
     assert result is not None
     # Password should have changed
     assert result.hashed_password != old_hash
@@ -234,6 +244,9 @@ async def test_update_user_preferences(session: AsyncSession, clean_db):
     new_prefs = {"language": "pt-BR", "currency_display": "BRL"}
     data = AdminUserUpdate(preferences=new_prefs)
     result = await update_user(session, target.id, data, admin.id)
+
+    assert result is not None
+    assert result.preferences is not None
     assert result.preferences["language"] == "pt-BR"
 
 
@@ -263,6 +276,8 @@ async def test_update_user_is_active_and_superuser(session: AsyncSession, clean_
     target = await _make_user(session, "target_flags@test.com")
     data = AdminUserUpdate(is_active=False, is_superuser=True)
     result = await update_user(session, target.id, data, admin.id)
+
+    assert result is not None
     assert result.is_active is False
     assert result.is_superuser is True
 

@@ -9,7 +9,7 @@ from app.models.group import GroupMember
 from app.services import transaction_service
 from mcp_server.auth import CallContext
 from mcp_server.registry import tool
-from mcp_server.tools._helpers import num, parse_date, parse_uuid, parse_uuid_list
+from mcp_server.tools._helpers import num, parse_date, parse_uuid, parse_uuid_list, resolve_workspace_id
 
 
 @tool(
@@ -64,6 +64,7 @@ from mcp_server.tools._helpers import num, parse_date, parse_uuid, parse_uuid_li
                 "description": "Maximum absolute amount (primary-currency view).",
             },
             "tx_type": {"type": "string", "enum": ["debit", "credit"], "description": "debit = expense, credit = income"},
+            "status": {"type": "string", "enum": ["posted", "pending"], "description": "Filter by posting status: posted = settled, pending = not yet settled."},
             "uncategorized": {"type": "boolean", "default": False, "description": "Only transactions without a category"},
             "exclude_transfers": {"type": "boolean", "default": False, "description": "Exclude transfers between user's own accounts"},
             "tags": {"type": "array", "items": {"type": "string"}, "description": "Match any of these tags"},
@@ -108,6 +109,7 @@ async def list_transactions(
     min_amount: float | None = None,
     max_amount: float | None = None,
     tx_type: str | None = None,
+    status: str | None = None,
     uncategorized: bool = False,
     exclude_transfers: bool = False,
     tags: list[str] | None = None,
@@ -120,8 +122,10 @@ async def list_transactions(
     # Hard cap regardless of what the LLM asks — the schema says 50 but
     # not every provider enforces additionalProperties / maximum.
     limit = max(1, min(int(limit), 50))
+    ws_id = await resolve_workspace_id(session, ctx)
     txs, total, _ = await transaction_service.get_transactions(
         session,
+        ws_id,
         ctx.user_id,
         account_ids=parse_uuid_list(account_ids),
         account_types=account_types or None,
@@ -135,6 +139,7 @@ async def list_transactions(
         min_amount=float(min_amount) if min_amount is not None else None,
         max_amount=float(max_amount) if max_amount is not None else None,
         txn_type=tx_type,
+        status=status,
         uncategorized=uncategorized,
         exclude_transfers=exclude_transfers,
         tags=tags or None,
@@ -199,11 +204,11 @@ async def list_transactions(
             "type": t.type,
             "status": getattr(t, "status", None),
             "category_id": str(t.category_id) if t.category_id else None,
-            "category_name": t.category.name if getattr(t, "category", None) else None,
+            "category_name": t.category.name if t.category else None,
             "account_id": str(t.account_id) if t.account_id else None,
             "account_name": t.account.name if getattr(t, "account", None) else None,
             "payee_id": str(t.payee_id) if getattr(t, "payee_id", None) else None,
-            "payee_name": t.payee_entity.name if getattr(t, "payee_entity", None) else None,
+            "payee_name": t.payee_entity.name if t.payee_entity else None,
             "tags": getattr(t, "tags", None),
             "is_transfer": bool(getattr(t, "transfer_pair_id", None)),
             "notes": getattr(t, "notes", None),

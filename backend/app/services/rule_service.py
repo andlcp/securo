@@ -1,21 +1,112 @@
 # backend/app/services/rule_service.py
 import uuid
-from typing import Optional
+from typing import Any, Optional, cast
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.rule import Rule
 from app.models.category import Category
+from app.models.payee import Payee
 from app.models.transaction import Transaction
-from app.schemas.rule import RuleCreate, RuleUpdate
-from app.services.rule_engine import evaluate_conditions, apply_rule_actions
+from app.schemas.rule import RuleCreate, RuleExportPayload, RuleImportResponse, RuleUpdate
+from app.services.category_service import get_hidden_category_ids
+from app.services.rule_engine import (
+    apply_rule_actions,
+    compile_rule_regex,
+    evaluate_conditions,
+)
 from app.services.category_service import DEFAULT_CATEGORIES_I18N
 
 
 class DuplicateRuleError(Exception):
     """Raised when a rule with the same name already exists for a user."""
     pass
+
+
+_ALLOWED_CONDITION_FIELDS = {
+    "description", "payee", "notes", "amount", "type", "account_id", "payee_id", "date",
+}
+_ALLOWED_CONDITION_OPS = {
+    "contains", "not_contains", "equals", "not_equals", "starts_with",
+    "ends_with", "regex", "gt", "gte", "lt", "lte",
+}
+_ALLOWED_ACTION_OPS = {
+    "set_category", "set_payee", "set_description", "append_notes", "ignore",
+}
+
+
+def _rule_item_value(item, key: str):
+    return item.get(key) if isinstance(item, dict) else getattr(item, key, None)
+
+
+def _flatten_conditions(conditions: list) -> list:
+    """Return every leaf condition, unwrapping one level of AND/OR groups.
+
+    A rule's condition list mixes leaves with groups that hold their own leaves
+    (see `rule_engine.evaluate_conditions`). Field/operator checks apply to the
+    leaves either way, and the schema caps nesting at one level.
+    """
+    leaves = []
+    for node in conditions or []:
+        nested = _rule_item_value(node, "conditions")
+        if isinstance(nested, list):
+            leaves.extend(nested)
+        else:
+            leaves.append(node)
+    return leaves
+
+
+async def _validate_rule_definition(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    conditions: list,
+    actions: list,
+) -> None:
+    for condition in _flatten_conditions(conditions):
+        field = _rule_item_value(condition, "field")
+        op = _rule_item_value(condition, "op")
+        if field not in _ALLOWED_CONDITION_FIELDS or op not in _ALLOWED_CONDITION_OPS:
+            raise ValueError("Invalid rule condition")
+        if op == "regex":
+            compile_rule_regex(str(_rule_item_value(condition, "value") or ""))
+
+    for action in actions or []:
+        op = _rule_item_value(action, "op")
+        value = _rule_item_value(action, "value")
+        if op not in _ALLOWED_ACTION_OPS:
+            raise ValueError("Invalid rule action")
+        if op == "set_category":
+            try:
+                category_id = uuid.UUID(str(value))
+            except (TypeError, ValueError):
+                raise ValueError("Category not found")
+            exists_result = await session.execute(
+                select(Category.id).where(
+                    Category.id == category_id,
+                    Category.workspace_id == workspace_id,
+                )
+            )
+            if exists_result.scalar_one_or_none() is None:
+                raise ValueError("Category not found")
+        elif op == "set_payee":
+            try:
+                payee_id = uuid.UUID(str(value))
+            except (TypeError, ValueError):
+                raise ValueError("Payee not found")
+            exists_result = await session.execute(
+                select(Payee.id).where(
+                    Payee.id == payee_id,
+                    Payee.workspace_id == workspace_id,
+                )
+            )
+            if exists_result.scalar_one_or_none() is None:
+                raise ValueError("Payee not found")
+        elif op == "set_description":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("Description cannot be blank")
+            if len(value.strip()) > 500:
+                raise ValueError("Description cannot exceed 500 characters")
 
 
 # ─── Universal rules (work for any language/country) ───
@@ -58,7 +149,7 @@ UNIVERSAL_RULES = [
 ]
 
 # ─── Country-specific rule packs (optional, not auto-applied) ───
-RULE_PACKS = {
+RULE_PACKS: dict[str, dict[str, Any]] = {
     "BR": {
         "name": "Brazil",
         "flag": "\U0001F1E7\U0001F1F7",
@@ -521,14 +612,27 @@ async def _get_existing_rule_names(session: AsyncSession, user_id: uuid.UUID) ->
     return {row[0] for row in result.all()}
 
 
-async def create_default_rules(session: AsyncSession, user_id: uuid.UUID, lang: str = "pt-BR") -> list[Rule]:
+async def create_default_rules(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    lang: str = "pt-BR",
+    workspace_id: Optional[uuid.UUID] = None,
+) -> list[Rule]:
     """Create universal default categorization rules for a new user.
 
     `lang` is accepted for backwards compatibility but no longer affects
     category resolution — categories are matched by internal key across all
     language variants.
     """
-    result = await session.execute(select(Category).where(Category.user_id == user_id))
+    # Scope category resolution to the target workspace so rules in a
+    # newly-created workspace point at THAT workspace's categories
+    # rather than the user's first workspace.
+    cat_query = select(Category)
+    if workspace_id is not None:
+        cat_query = cat_query.where(Category.workspace_id == workspace_id)
+    else:
+        cat_query = cat_query.where(Category.user_id == user_id)
+    result = await session.execute(cat_query)
     categories = {cat.name: str(cat.id) for cat in result.scalars().all()}
     key_to_id = _resolve_categories_by_internal_key(categories)
 
@@ -538,6 +642,7 @@ async def create_default_rules(session: AsyncSession, user_id: uuid.UUID, lang: 
     for rule_data in resolved:
         rule = Rule(
             user_id=user_id,
+            workspace_id=workspace_id,
             name=rule_data["name"],
             conditions_op=rule_data["conditions_op"],
             conditions=rule_data["conditions"],
@@ -580,6 +685,7 @@ def _required_internal_keys(pack: dict) -> set[str]:
 
 async def _ensure_categories_for_keys(
     session: AsyncSession,
+    workspace_id: Optional[uuid.UUID],
     user_id: uuid.UUID,
     internal_keys: set[str],
     lang: str,
@@ -605,7 +711,11 @@ async def _ensure_categories_for_keys(
     existing_cats = list(
         (
             await session.execute(
-                select(Category).where(Category.user_id == user_id)
+                select(Category).where(
+                    Category.workspace_id == workspace_id
+                    if workspace_id is not None
+                    else Category.user_id == user_id
+                )
             )
         ).scalars().all()
     )
@@ -623,7 +733,11 @@ async def _ensure_categories_for_keys(
     existing_groups = list(
         (
             await session.execute(
-                select(CategoryGroup).where(CategoryGroup.user_id == user_id)
+                select(CategoryGroup).where(
+                    CategoryGroup.workspace_id == workspace_id
+                    if workspace_id is not None
+                    else CategoryGroup.user_id == user_id
+                )
             )
         ).scalars().all()
     )
@@ -644,6 +758,7 @@ async def _ensure_categories_for_keys(
             continue
         group = CategoryGroup(
             user_id=user_id,
+            workspace_id=workspace_id,
             name=gdata.get(lang, gdata["en"]),
             icon=gdata["icon"],
             color=gdata["color"],
@@ -659,6 +774,7 @@ async def _ensure_categories_for_keys(
         target_group = groups_by_key.get(CATEGORY_TO_GROUP.get(key))
         cat = Category(
             user_id=user_id,
+            workspace_id=workspace_id,
             name=data.get(lang, data["en"]),
             icon=data["icon"],
             color=data["color"],
@@ -673,8 +789,9 @@ async def _ensure_categories_for_keys(
 
 async def install_rule_pack(
     session: AsyncSession,
-    user_id: uuid.UUID,
-    pack_code: str,
+    workspace_id_or_user_id: uuid.UUID,
+    user_id_or_pack_code: uuid.UUID | str,
+    pack_code: Optional[str] = None,
     lang: str = "pt-BR",
     create_missing_categories: bool = False,
 ) -> RulePackInstallResult:
@@ -686,6 +803,16 @@ async def install_rule_pack(
     "install pack, fill in what's needed". `lang` controls the names of
     any newly-created categories.
     """
+    if pack_code is None:
+        workspace_id = None
+        user_id = workspace_id_or_user_id
+        pack_code = str(user_id_or_pack_code)
+    else:
+        workspace_id = workspace_id_or_user_id
+        # Narrowed by the branch: `pack_code` being set means the caller used
+        # the workspace-scoped signature, so this argument is the user id.
+        user_id = cast(uuid.UUID, user_id_or_pack_code)
+
     pack = RULE_PACKS.get(pack_code)
     if not pack:
         return RulePackInstallResult([], 0)
@@ -693,16 +820,26 @@ async def install_rule_pack(
     categories_created = 0
     if create_missing_categories:
         categories_created = await _ensure_categories_for_keys(
-            session, user_id, _required_internal_keys(pack), lang
+            session, workspace_id, user_id, _required_internal_keys(pack), lang
         )
 
-    result = await session.execute(select(Category).where(Category.user_id == user_id))
+    result = await session.execute(
+        select(Category).where(
+            Category.workspace_id == workspace_id
+            if workspace_id is not None
+            else Category.user_id == user_id
+        )
+    )
     categories = {cat.name: str(cat.id) for cat in result.scalars().all()}
     key_to_id = _resolve_categories_by_internal_key(categories)
 
     resolved, unresolved = _build_rules_from_templates(pack["rules"], key_to_id)
 
-    existing_names = await _get_existing_rule_names(session, user_id)
+    existing_names = (
+        await _get_existing_rule_names_for_workspace(session, workspace_id)
+        if workspace_id is not None
+        else await _get_existing_rule_names(session, user_id)
+    )
 
     rules: list[Rule] = []
     for rule_data in resolved:
@@ -710,6 +847,7 @@ async def install_rule_pack(
             continue
         rule = Rule(
             user_id=user_id,
+            workspace_id=workspace_id,
             name=rule_data["name"],
             conditions_op=rule_data["conditions_op"],
             conditions=rule_data["conditions"],
@@ -724,9 +862,15 @@ async def install_rule_pack(
     return RulePackInstallResult(rules, unresolved, categories_created)
 
 
-async def get_installed_packs(session: AsyncSession, user_id: uuid.UUID) -> dict[str, bool]:
+async def get_installed_packs(
+    session: AsyncSession, workspace_id: uuid.UUID, user_id: Optional[uuid.UUID] = None
+) -> dict[str, bool]:
     """Check which rule packs are fully installed for a user."""
-    existing_names = await _get_existing_rule_names(session, user_id)
+    existing_names = (
+        await _get_existing_rule_names_for_workspace(session, workspace_id)
+        if user_id is not None
+        else await _get_existing_rule_names(session, workspace_id)
+    )
     result = {}
     for code, pack in RULE_PACKS.items():
         pack_names = {r["name"] for r in pack["rules"]}
@@ -734,29 +878,154 @@ async def get_installed_packs(session: AsyncSession, user_id: uuid.UUID) -> dict
     return result
 
 
-async def get_rules(session: AsyncSession, user_id: uuid.UUID) -> list[Rule]:
+async def get_rules(session: AsyncSession, workspace_id: uuid.UUID) -> list[Rule]:
     result = await session.execute(
         select(Rule)
-        .where(Rule.user_id == user_id)
+        .where(Rule.workspace_id == workspace_id)
         .order_by(Rule.priority, Rule.id)
     )
     return list(result.scalars().all())
 
 
-async def get_rule(session: AsyncSession, rule_id: uuid.UUID, user_id: uuid.UUID) -> Optional[Rule]:
+
+
+async def export_rules(session: AsyncSession, workspace_id: uuid.UUID) -> RuleExportPayload:
+    """Return a portable JSON export of rules for a workspace.
+
+    Category actions are serialized by category name rather than UUID so the
+    file can be imported into another instance/workspace that has equivalent
+    category names but different database IDs.
+    """
+    rules = await get_rules(session, workspace_id)
+    category_result = await session.execute(
+        select(Category).where(Category.workspace_id == workspace_id)
+    )
+    category_names = {str(cat.id): cat.name for cat in category_result.scalars().all()}
+
+    exported_rules = []
+    for rule in rules:
+        actions = []
+        for action in rule.actions or []:
+            if action.get("op") == "set_category":
+                category_name = category_names.get(str(action.get("value")))
+                if not category_name:
+                    continue
+                actions.append({**action, "value": category_name})
+            else:
+                actions.append(action)
+        exported_rules.append({
+            "name": rule.name,
+            "conditions_op": rule.conditions_op,
+            "conditions": rule.conditions or [],
+            "actions": actions,
+            "priority": rule.priority,
+            "is_active": rule.is_active,
+        })
+    return RuleExportPayload(rules=exported_rules)
+
+
+async def import_rules(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    payload: RuleExportPayload,
+    overwrite: bool = False,
+) -> RuleImportResponse:
+    """Import a portable rules payload into a workspace.
+
+    Existing rules are only replaced when the caller explicitly passes
+    `overwrite=True`. Rules whose `set_category` target cannot be matched by
+    category name are skipped.
+    """
+    existing = await get_rules(session, workspace_id)
+    if existing and not overwrite:
+        raise DuplicateRuleError("Import would overwrite existing rules")
+
+    category_result = await session.execute(
+        select(Category).where(Category.workspace_id == workspace_id)
+    )
+    categories_by_name = {cat.name: str(cat.id) for cat in category_result.scalars().all()}
+
+    imported = 0
+    skipped = 0
+    rules_to_create: list[Rule] = []
+    seen_names: set[str] = set()
+
+    for incoming in payload.rules:
+        if incoming.name in seen_names:
+            skipped += 1
+            continue
+        seen_names.add(incoming.name)
+        resolved_actions = []
+        missing_required_reference = False
+        for action in incoming.actions:
+            action_data = action.model_dump()
+            if action_data["op"] == "set_category":
+                category_id = categories_by_name.get(str(action_data["value"]))
+                if not category_id:
+                    missing_required_reference = True
+                    break
+                action_data["value"] = category_id
+            resolved_actions.append(action_data)
+        if missing_required_reference:
+            skipped += 1
+            continue
+        try:
+            await _validate_rule_definition(
+                session,
+                workspace_id,
+                [condition.model_dump() for condition in incoming.conditions],
+                resolved_actions,
+            )
+        except ValueError:
+            skipped += 1
+            continue
+        rules_to_create.append(Rule(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            name=incoming.name,
+            conditions_op=incoming.conditions_op,
+            conditions=[condition.model_dump() for condition in incoming.conditions],
+            actions=resolved_actions,
+            priority=incoming.priority,
+            is_active=incoming.is_active,
+        ))
+
+    overwritten = 0
+    if overwrite and existing and rules_to_create:
+        overwritten = len(existing)
+        await session.execute(delete(Rule).where(Rule.workspace_id == workspace_id))
+
+    for rule in rules_to_create:
+        session.add(rule)
+        imported += 1
+
+    await session.commit()
+    return RuleImportResponse(imported=imported, skipped=skipped, overwritten=overwritten)
+
+
+async def get_rule(session: AsyncSession, rule_id: uuid.UUID, workspace_id: uuid.UUID) -> Optional[Rule]:
     result = await session.execute(
-        select(Rule).where(Rule.id == rule_id, Rule.user_id == user_id)
+        select(Rule).where(Rule.id == rule_id, Rule.workspace_id == workspace_id)
     )
     return result.scalar_one_or_none()
 
 
-async def create_rule(session: AsyncSession, user_id: uuid.UUID, data: RuleCreate) -> Rule:
-    existing_names = await _get_existing_rule_names(session, user_id)
+async def create_rule(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: RuleCreate,
+) -> Rule:
+    existing_names = await _get_existing_rule_names_for_workspace(session, workspace_id)
     if data.name in existing_names:
         raise DuplicateRuleError(f"A rule named '{data.name}' already exists")
 
+    await _validate_rule_definition(session, workspace_id, data.conditions, data.actions)
+
     rule = Rule(
         user_id=user_id,
+        workspace_id=workspace_id,
         name=data.name,
         conditions_op=data.conditions_op,
         conditions=[c.model_dump() for c in data.conditions],
@@ -771,23 +1040,33 @@ async def create_rule(session: AsyncSession, user_id: uuid.UUID, data: RuleCreat
 
 
 async def update_rule(
-    session: AsyncSession, rule_id: uuid.UUID, user_id: uuid.UUID, data: RuleUpdate
+    session: AsyncSession, rule_id: uuid.UUID, workspace_id: uuid.UUID, data: RuleUpdate
 ) -> Optional[Rule]:
-    rule = await get_rule(session, rule_id, user_id)
+    rule = await get_rule(session, rule_id, workspace_id)
     if not rule:
         return None
 
-    update_data = data.model_dump(exclude_unset=True)
+    update_data = data.model_dump(
+        exclude_unset=True,
+        exclude={"apply_to_existing", "overwrite_existing_categories"},
+    )
 
     if "name" in update_data and update_data["name"] != rule.name:
-        existing_names = await _get_existing_rule_names(session, user_id)
+        existing_names = await _get_existing_rule_names_for_workspace(session, workspace_id)
         if update_data["name"] in existing_names:
             raise DuplicateRuleError(f"A rule named '{update_data['name']}' already exists")
 
-    if "conditions" in update_data and update_data["conditions"] is not None:
+    if data.conditions is not None:
         update_data["conditions"] = [c.model_dump() for c in data.conditions]
-    if "actions" in update_data and update_data["actions"] is not None:
+    if data.actions is not None:
         update_data["actions"] = [a.model_dump() for a in data.actions]
+
+    await _validate_rule_definition(
+        session,
+        workspace_id,
+        update_data.get("conditions", rule.conditions or []),
+        update_data.get("actions", rule.actions or []),
+    )
 
     for key, value in update_data.items():
         setattr(rule, key, value)
@@ -797,8 +1076,8 @@ async def update_rule(
     return rule
 
 
-async def delete_rule(session: AsyncSession, rule_id: uuid.UUID, user_id: uuid.UUID) -> bool:
-    rule = await get_rule(session, rule_id, user_id)
+async def delete_rule(session: AsyncSession, rule_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+    rule = await get_rule(session, rule_id, workspace_id)
     if not rule:
         return False
     await session.delete(rule)
@@ -806,42 +1085,191 @@ async def delete_rule(session: AsyncSession, rule_id: uuid.UUID, user_id: uuid.U
     return True
 
 
+async def _get_existing_rule_names_for_workspace(
+    session: AsyncSession, workspace_id: uuid.UUID
+) -> set[str]:
+    """Get the set of existing rule names in a workspace."""
+    result = await session.execute(
+        select(Rule.name).where(Rule.workspace_id == workspace_id)
+    )
+    return {row[0] for row in result.all()}
+
+
+def _rule_preview(transaction: Transaction) -> Transaction:
+    """Build a detached transaction-shaped object for side-effect-free rule evaluation."""
+    return Transaction(
+        user_id=transaction.user_id,
+        workspace_id=transaction.workspace_id,
+        account_id=transaction.account_id,
+        category_id=transaction.category_id,
+        description=transaction.description,
+        original_description=transaction.original_description,
+        description_is_rule_managed=bool(transaction.description_is_rule_managed),
+        amount=transaction.amount,
+        currency=transaction.currency,
+        date=transaction.date,
+        type=transaction.type,
+        source=transaction.source,
+        status=transaction.status,
+        payee=transaction.payee,
+        payee_id=transaction.payee_id,
+        notes=transaction.notes,
+        is_ignored=transaction.is_ignored,
+    )
+
+
+def _has_manual_description(transaction: Transaction) -> bool:
+    """True when the displayed description is the user's own text.
+
+    An imported row whose description drifted from its raw provenance without a
+    rule having done it was edited by hand. Rules may still run every other
+    matching action on it, but they must not replace that text.
+    """
+    return (
+        not transaction.description_is_rule_managed
+        and transaction.original_description is not None
+        and transaction.description != transaction.original_description
+    )
+
+
+async def preview_rules_for_transaction(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    transaction: Transaction,
+    skip_category_rules: bool = False,
+) -> Transaction:
+    """Apply active rules to a detached preview and return it without persistence."""
+    preview = _rule_preview(transaction)
+    await apply_rules_to_transaction(
+        session,
+        user_id,
+        preview,
+        skip_category_rules=skip_category_rules,
+    )
+    return preview
+
+
 async def apply_rules_to_transaction(
     session: AsyncSession, user_id: uuid.UUID, transaction: Transaction,
     skip_category_rules: bool = False,
 ) -> None:
-    """Apply all active rules to a transaction, modifying it in-place. Commits nothing."""
+    """Apply all active rules to a transaction, modifying it in-place. Commits nothing.
+
+    `user_id` is kept for backwards-compatibility with sync/import callers that
+    haven't been migrated to pass workspace_id directly; rules are scoped by
+    workspace via the transaction's own workspace_id when available, falling
+    back to the legacy user filter so historical rows still match.
+    """
+    rule_filter = Rule.user_id == user_id
+    if getattr(transaction, "workspace_id", None) is not None:
+        rule_filter = Rule.workspace_id == transaction.workspace_id
     result = await session.execute(
         select(Rule)
-        .where(Rule.user_id == user_id, Rule.is_active == True)
+        .where(rule_filter, Rule.is_active == True)
         .order_by(Rule.priority, Rule.id)
     )
     rules = result.scalars().all()
 
     category_set = transaction.category_id is not None or skip_category_rules
+    hidden_categories = (
+        await get_hidden_category_ids(session, transaction.workspace_id)
+        if getattr(transaction, "workspace_id", None) is not None
+        else set()
+    )
 
     for rule in rules:
         conditions = rule.conditions or []
         actions = rule.actions or []
         if evaluate_conditions(rule.conditions_op, conditions, transaction):
-            category_set = apply_rule_actions(actions, transaction, category_set)
+            category_set = apply_rule_actions(
+                actions,
+                transaction,
+                category_set,
+                hidden_category_ids=hidden_categories,
+            )
 
 
-async def apply_all_rules(session: AsyncSession, user_id: uuid.UUID) -> int:
-    """Re-apply all active rules to all user transactions. Returns count of affected transactions."""
-    from sqlalchemy import or_
-    from app.models.account import Account
-    from app.models.bank_connection import BankConnection
+async def apply_single_rule(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    rule: Rule,
+    overwrite_existing_categories: bool = False,
+) -> int:
+    """Apply one rule to existing workspace transactions and count modifications.
+
+    Used after rule creation or editing so it can affect history without the
+    destructive reset performed by `apply_all_rules`. Existing categories are
+    protected unless the caller opts into replacement; other actions still
+    apply. Conditions first inspect the current transaction state so rules can
+    depend on earlier normalization. If that does not match, the preserved
+    imported description is tried as a fallback so edited normalization rules
+    can still find transactions they previously changed. A description the user
+    typed themselves is left alone, exactly as `apply_all_rules` leaves it.
+    """
+    if not rule.is_active:
+        return 0
 
     result = await session.execute(
-        select(Transaction)
-        .outerjoin(Account)
-        .outerjoin(BankConnection)
-        .where(
-            or_(
-                Transaction.user_id == user_id,
-                BankConnection.user_id == user_id,
-            ),
+        select(Transaction).where(
+            Transaction.workspace_id == workspace_id,
+            Transaction.source != "opening_balance",
+        )
+    )
+    transactions = result.scalars().all()
+    conditions = rule.conditions or []
+    actions = rule.actions or []
+
+    hidden_categories = await get_hidden_category_ids(session, workspace_id)
+    count = 0
+    for tx in transactions:
+        matches = evaluate_conditions(rule.conditions_op, conditions, tx)
+        if not matches and tx.original_description is not None:
+            original_target = _rule_preview(tx)
+            original_target.description = tx.original_description
+            matches = evaluate_conditions(
+                rule.conditions_op, conditions, original_target
+            )
+        if not matches:
+            continue
+
+        before = (
+            tx.category_id,
+            tx.payee_id,
+            tx.description,
+            tx.original_description,
+            tx.description_is_rule_managed,
+            tx.notes,
+            tx.is_ignored,
+        )
+        apply_rule_actions(
+            actions,
+            tx,
+            category_already_set=tx.category_id is not None
+            and not overwrite_existing_categories,
+            skip_description=_has_manual_description(tx),
+            hidden_category_ids=hidden_categories,
+        )
+        after = (
+            tx.category_id,
+            tx.payee_id,
+            tx.description,
+            tx.original_description,
+            tx.description_is_rule_managed,
+            tx.notes,
+            tx.is_ignored,
+        )
+        if before != after:
+            count += 1
+
+    await session.commit()
+    return count
+
+
+async def apply_all_rules(session: AsyncSession, workspace_id: uuid.UUID) -> int:
+    """Reset rule-managed fields and reapply active rules in priority order."""
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.workspace_id == workspace_id,
             Transaction.source != "opening_balance",
         )
     )
@@ -849,28 +1277,56 @@ async def apply_all_rules(session: AsyncSession, user_id: uuid.UUID) -> int:
 
     rules_result = await session.execute(
         select(Rule)
-        .where(Rule.user_id == user_id, Rule.is_active == True)
+        .where(Rule.workspace_id == workspace_id, Rule.is_active == True)
         .order_by(Rule.priority, Rule.id)
     )
     rules = rules_result.scalars().all()
 
+    hidden_categories = await get_hidden_category_ids(session, workspace_id)
     count = 0
     for tx in transactions:
+        preserve_manual_description = _has_manual_description(tx)
+        before = (
+            tx.category_id,
+            tx.payee_id,
+            tx.description,
+            tx.original_description,
+            tx.description_is_rule_managed,
+            tx.notes,
+            tx.is_ignored,
+        )
+        if tx.description_is_rule_managed:
+            if tx.original_description is not None:
+                tx.description = tx.original_description
+            tx.description_is_rule_managed = False
         matched = False
         category_set = False
-
         for rule in rules:
             conditions = rule.conditions or []
             actions = rule.actions or []
             if evaluate_conditions(rule.conditions_op, conditions, tx):
                 if not matched:
-                    # First match: reset so rules are applied from scratch
                     tx.category_id = None
                     tx.notes = None
                     matched = True
-                category_set = apply_rule_actions(actions, tx, category_set)
+                category_set = apply_rule_actions(
+                    actions,
+                    tx,
+                    category_set,
+                    skip_description=preserve_manual_description,
+                    hidden_category_ids=hidden_categories,
+                )
 
-        if matched:
+        after = (
+            tx.category_id,
+            tx.payee_id,
+            tx.description,
+            tx.original_description,
+            tx.description_is_rule_managed,
+            tx.notes,
+            tx.is_ignored,
+        )
+        if matched or before != after:
             count += 1
 
     await session.commit()

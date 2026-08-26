@@ -47,6 +47,14 @@ class AccountRead(AccountBase):
     connection_id: Optional[uuid.UUID] = None
     external_id: Optional[str] = None
     display_name: Optional[str] = None
+    # Last 4 chars of the bank's identifier, when the provider exposes one.
+    # Read-only: absent from AccountUpdate because sync owns it.
+    masked_number: Optional[str] = None
+    # Denormalized from the linked BankConnection so every surface that shows
+    # an account (transactions list, accounts page, dashboard) can render the
+    # bank identity without a separate join. Null for manual accounts.
+    institution_name: Optional[str] = None
+    institution_logo_url: Optional[str] = None
     current_balance: float = 0.0
     previous_balance: Optional[float] = None
     balance_primary: Optional[float] = None
@@ -86,8 +94,14 @@ class CreditCardBillRead(BaseModel):
 class AccountSummary(BaseModel):
     account_id: uuid.UUID
     current_balance: float
+    opening_balance: float
     monthly_income: float
     monthly_expenses: float
+    projected_income: float = 0.0
+    projected_expenses: float = 0.0
     current_balance_primary: Optional[float] = None
+    opening_balance_primary: Optional[float] = None
     monthly_income_primary: Optional[float] = None
     monthly_expenses_primary: Optional[float] = None
+    projected_income_primary: Optional[float] = None
+    projected_expenses_primary: Optional[float] = None

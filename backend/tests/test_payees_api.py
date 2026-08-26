@@ -78,6 +78,51 @@ async def test_list_payees(client: AsyncClient, auth_headers):
     assert names == {"Alpha", "Beta"}
 
 
+@pytest.mark.asyncio
+async def test_list_payees_filters(client: AsyncClient, auth_headers):
+    mcd = await _create_payee(client, auth_headers, "McDonalds", type="company", notes="Burgers")
+    # Toggle favorite via PATCH since PayeeCreate doesn't take is_favorite
+    patch_resp = await client.patch(f"/api/payees/{mcd['id']}", headers=auth_headers, json={"is_favorite": True})
+    assert patch_resp.status_code == 200
+
+    await _create_payee(client, auth_headers, "John Doe", type="person", notes="Friend")
+    await _create_payee(client, auth_headers, "Acme Corp", type="company", notes="Supplies")
+
+    # Test search query on name
+    resp = await client.get("/api/payees?q=Don", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "McDonalds"
+
+    # Test search query on notes
+    resp = await client.get("/api/payees?q=Friend", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "John Doe"
+
+    # Test type filter
+    resp = await client.get("/api/payees?type=person", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "John Doe"
+
+    # Test favorites filter
+    resp = await client.get("/api/payees?is_favorite=true", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "McDonalds"
+
+    # Test search + favorites filter
+    resp = await client.get("/api/payees?q=corp&is_favorite=true", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 0
+
+
 # ---------------------------------------------------------------------------
 # Create
 # ---------------------------------------------------------------------------
@@ -87,12 +132,13 @@ async def test_list_payees(client: AsyncClient, auth_headers):
 async def test_create_payee(client: AsyncClient, auth_headers):
     resp = await client.post(
         "/api/payees", headers=auth_headers,
-        json={"name": "Starbucks", "type": "merchant", "notes": "Coffee"},
+        json={"name": "Starbucks", "type": "company", "notes": "Coffee"},
     )
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "Starbucks"
-    assert data["type"] == "merchant"
+    assert data["type"] == "company"
+    assert data["source"] == "manual"
     assert data["notes"] == "Coffee"
     assert data["is_favorite"] is False
     assert data["transaction_count"] == 0
@@ -146,7 +192,7 @@ async def test_update_payee(client: AsyncClient, auth_headers):
     data = resp.json()
     assert data["name"] == "NewName"
     assert data["is_favorite"] is True
-    assert data["type"] == "merchant"  # unchanged
+    assert data["type"] is None  # unchanged, and never stated
 
 
 @pytest.mark.asyncio
@@ -182,6 +228,42 @@ async def test_delete_payee_not_found(client: AsyncClient, auth_headers):
         f"/api/payees/{uuid.uuid4()}", headers=auth_headers,
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Bulk Delete
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_payees(client: AsyncClient, auth_headers):
+    created1 = await _create_payee(client, auth_headers, "BulkDelete1")
+    created2 = await _create_payee(client, auth_headers, "BulkDelete2")
+    created3 = await _create_payee(client, auth_headers, "BulkDelete3")
+
+    resp = await client.post(
+        "/api/payees/bulk-delete", headers=auth_headers,
+        json={"ids": [created1['id'], created2['id']]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 2
+
+    # Confirm deleted
+    assert (await client.get(f"/api/payees/{created1['id']}", headers=auth_headers)).status_code == 404
+    assert (await client.get(f"/api/payees/{created2['id']}", headers=auth_headers)).status_code == 404
+    
+    # Confirm not deleted
+    assert (await client.get(f"/api/payees/{created3['id']}", headers=auth_headers)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_payees_empty(client: AsyncClient, auth_headers):
+    resp = await client.post(
+        "/api/payees/bulk-delete", headers=auth_headers,
+        json={"ids": []},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 0
 
 
 # ---------------------------------------------------------------------------

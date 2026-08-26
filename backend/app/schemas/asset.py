@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime
+from datetime import date as _date, datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
@@ -26,15 +26,15 @@ class AssetCreate(BaseModel):
     currency: str = "USD"
     units: Optional[Decimal] = None
     valuation_method: str = "manual"
-    purchase_date: Optional[date] = None
+    purchase_date: Optional[_date] = None
     purchase_price: Optional[Decimal] = None
-    sell_date: Optional[date] = None
+    sell_date: Optional[_date] = None
     sell_price: Optional[Decimal] = None
     current_value: Optional[Decimal] = None  # convenience: creates initial AssetValue
     growth_type: Optional[str] = None
     growth_rate: Optional[Decimal] = None
     growth_frequency: Optional[str] = None
-    growth_start_date: Optional[date] = None
+    growth_start_date: Optional[_date] = None
     is_archived: bool = False
     position: int = 0
     group_id: Optional[uuid.UUID] = None
@@ -46,7 +46,7 @@ class AssetCreate(BaseModel):
     # FIIS, CRIPTO, OUTRO. If omitted the backend tries to infer from
     # ticker/name; the frontend Add Asset form sends it explicitly.
     asset_class: Optional[AssetClassLiteral] = None
-    maturity_date: Optional[date] = None
+    maturity_date: Optional[_date] = None
     custodian: Optional[str] = None
     # Renda-Fixa metadata for accurate MtM via the refresh_cdb_assets task.
     # See backend/app/models/asset.py:Asset for semantics.
@@ -65,6 +65,10 @@ class AssetCreate(BaseModel):
     # free; bulk-import scripts that build their own transaction history
     # set this to False to avoid double-counting.
     seed_purchase_transaction: bool = True
+    # Aceito por compatibilidade com o formulário do upstream, que manda o
+    # preço unitário neste nome. Aqui quem dirige a compra semeada é
+    # `purchase_price`, que já significa preço por unidade.
+    unit_price: Optional[Decimal] = None
 
 
 class AssetUpdate(BaseModel):
@@ -73,14 +77,14 @@ class AssetUpdate(BaseModel):
     currency: Optional[str] = None
     units: Optional[Decimal] = None
     valuation_method: Optional[str] = None
-    purchase_date: Optional[date] = None
+    purchase_date: Optional[_date] = None
     purchase_price: Optional[Decimal] = None
-    sell_date: Optional[date] = None
+    sell_date: Optional[_date] = None
     sell_price: Optional[Decimal] = None
     growth_type: Optional[str] = None
     growth_rate: Optional[Decimal] = None
     growth_frequency: Optional[str] = None
-    growth_start_date: Optional[date] = None
+    growth_start_date: Optional[_date] = None
     is_archived: Optional[bool] = None
     position: Optional[int] = None
     # Use a sentinel to differentiate "don't change group" (field omitted)
@@ -90,7 +94,7 @@ class AssetUpdate(BaseModel):
     ticker: Optional[str] = None
     ticker_exchange: Optional[str] = None
     asset_class: Optional[AssetClassLiteral] = None
-    maturity_date: Optional[date] = None
+    maturity_date: Optional[_date] = None
     custodian: Optional[str] = None
     rf_indexer: Optional[Literal["PRE", "CDI", "IPCA"]] = None
     rf_rate_pct: Optional[Decimal] = None
@@ -112,14 +116,14 @@ class AssetRead(BaseModel):
     currency: str
     units: Optional[float] = None
     valuation_method: str
-    purchase_date: Optional[date] = None
+    purchase_date: Optional[_date] = None
     purchase_price: Optional[float] = None
-    sell_date: Optional[date] = None
+    sell_date: Optional[_date] = None
     sell_price: Optional[float] = None
     growth_type: Optional[str] = None
     growth_rate: Optional[float] = None
     growth_frequency: Optional[str] = None
-    growth_start_date: Optional[date] = None
+    growth_start_date: Optional[_date] = None
     is_archived: bool
     position: int
     current_value: Optional[float] = None
@@ -130,7 +134,7 @@ class AssetRead(BaseModel):
     source: str = "manual"
     connection_id: Optional[uuid.UUID] = None
     isin: Optional[str] = None
-    maturity_date: Optional[date] = None
+    maturity_date: Optional[_date] = None
     group_id: Optional[uuid.UUID] = None
     ticker: Optional[str] = None
     ticker_exchange: Optional[str] = None
@@ -152,6 +156,14 @@ class AssetRead(BaseModel):
     # deriving a % from gain/invested — for positions with partial sells
     # the two diverge (see _tw_capital in asset_service).
     rent_pct: Optional[float] = None
+    # Ledger-derived fields (issue #235). average_price = weighted-average cost
+    # per unit (preço médio); total_invested = cost basis of the held units;
+    # realized_gain = cumulative gain/loss from sells; transaction_count lets
+    # the UI know whether a holding is ledger-backed.
+    average_price: Optional[float] = None
+    total_invested: Optional[float] = None
+    realized_gain: Optional[float] = None
+    transaction_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -165,7 +177,7 @@ ASSET_TX_TYPES = {
 
 
 class AssetTransactionCreate(BaseModel):
-    date: date
+    date: _date
     type: str  # one of ASSET_TX_TYPES
     qty: Optional[Decimal] = None
     price: Optional[Decimal] = None
@@ -179,7 +191,7 @@ class AssetTransactionCreate(BaseModel):
 class AssetTransactionRead(BaseModel):
     id: uuid.UUID
     asset_id: uuid.UUID
-    date: date
+    date: _date
     type: str
     qty: Optional[float] = None
     price: Optional[float] = None
@@ -217,14 +229,14 @@ class MarketSymbolMatch(BaseModel):
 
 class AssetValueCreate(BaseModel):
     amount: Decimal
-    date: date
+    date: _date
 
 
 class AssetValueRead(BaseModel):
     id: uuid.UUID
     asset_id: uuid.UUID
     amount: float
-    date: date
+    date: _date
     source: str
 
     model_config = ConfigDict(from_attributes=True)

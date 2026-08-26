@@ -1,8 +1,9 @@
 import { createElement, useState } from 'react'
-import { getAccountName } from '@/lib/account-utils'
+import { getAccountName, sortAccountsByDisplayName } from '@/lib/account-utils'
 import { useTranslation } from 'react-i18next'
+import { useDisplayLocale } from '@/hooks/use-display-locale'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { goals as goalsApi, accounts as accountsApi, assets as assetsApi, currencies as currenciesApi } from '@/lib/api'
+import { goals as goalsApi, accounts as accountsApi, assets as assetsApi, assetGroups as assetGroupsApi, currencies as currenciesApi } from '@/lib/api'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { DatePickerInput } from '@/components/ui/date-picker-input'
@@ -20,9 +21,9 @@ import {
   PopoverTrigger,
   PopoverContent,
 } from '@/components/ui/popover'
-import type { Goal } from '@/types'
+import type { Account, Asset, AssetGroup, Goal } from '@/types'
 import {
-  Pencil, Trash2, Plus, Pause, Play, CheckCircle2, Archive, Target,
+  Pencil, Trash2, Plus, Pause, Play, CheckCircle2, Archive, ArchiveRestore, Target,
   ChevronDown,
 } from 'lucide-react'
 import { ICON_MAP } from '@/lib/category-icons'
@@ -30,10 +31,8 @@ import { IconPicker } from '@/components/icon-picker'
 import { PageHeader } from '@/components/page-header'
 import { usePrivacyMode } from '@/hooks/use-privacy-mode'
 import { useAuth } from '@/contexts/auth-context'
-
-function formatCurrency(value: number, currency = 'USD', locale = 'en-US') {
-  return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(value)
-}
+import { useWorkspace } from '@/contexts/workspace-context'
+import { formatCurrency } from '@/lib/format'
 
 function getGoalIcon(iconKey: string | null) {
   return (iconKey && ICON_MAP[iconKey]) || Target
@@ -43,6 +42,41 @@ const PRESET_COLORS = [
   '#3B82F6', '#10B981', '#F59E0B', '#EF4444',
   '#8B5CF6', '#EC4899', '#06B6D4', '#F97316',
 ]
+
+const SELECT_CLASS = 'w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary'
+
+function LinkedResourceSelect<T extends { id: string }>({
+  name,
+  label,
+  placeholder,
+  defaultValue,
+  items,
+  renderOption,
+  hint,
+}: {
+  name: string
+  label: string
+  placeholder: string
+  defaultValue: string | null | undefined
+  items: T[] | undefined
+  renderOption: (item: T) => React.ReactNode
+  hint?: string
+}) {
+  return (
+    <div className="space-y-2">
+      <Label>{label}</Label>
+      <select name={name} defaultValue={defaultValue ?? ''} className={SELECT_CLASS} required>
+        <option value="">{placeholder}</option>
+        {items?.map((item) => (
+          <option key={item.id} value={item.id}>
+            {renderOption(item)}
+          </option>
+        ))}
+      </select>
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    </div>
+  )
+}
 
 function SectionCard({ children }: { children: React.ReactNode }) {
   return (
@@ -101,16 +135,18 @@ function daysUntil(dateStr: string): number {
 }
 
 export default function GoalsPage() {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const { mask } = usePrivacyMode()
   const { user } = useAuth()
+  const { canWrite } = useWorkspace()
   const userCurrency = user?.preferences?.currency_display ?? 'USD'
-  const locale = i18n.language === 'en' ? 'en-US' : i18n.language
+  const locale = useDisplayLocale()
   const queryClient = useQueryClient()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<Goal | null>(null)
   const [trackingType, setTrackingType] = useState('manual')
   const [statusFilter, setStatusFilter] = useState<string>('active')
+  const [deletingGoal, setDeletingGoal] = useState<Goal | null>(null)
   const [selectedIcon, setSelectedIcon] = useState('target')
   const [selectedColor, setSelectedColor] = useState('#3B82F6')
   const [targetDate, setTargetDate] = useState('')
@@ -128,6 +164,11 @@ export default function GoalsPage() {
   const { data: assetsList } = useQuery({
     queryKey: ['assets'],
     queryFn: () => assetsApi.list(),
+  })
+
+  const { data: walletsList } = useQuery({
+    queryKey: ['asset-groups'],
+    queryFn: assetGroupsApi.list,
   })
 
   const { data: supportedCurrencies } = useQuery({
@@ -161,8 +202,10 @@ export default function GoalsPage() {
     mutationFn: (id: string) => goalsApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['goals'] })
+      setDeletingGoal(null)
       toast.success(t('goals.deleted'))
     },
+    onError: () => toast.error(t('common.error')),
   })
 
   const statusMutation = useMutation({
@@ -219,9 +262,11 @@ export default function GoalsPage() {
         <SectionHeader
           title={t('goals.title')}
           action={
-            <Button size="sm" className="gap-1.5 h-8" onClick={openCreateDialog}>
-              <Plus size={13} /> {t('goals.add')}
-            </Button>
+            canWrite ? (
+              <Button size="sm" className="gap-1.5 h-8" onClick={openCreateDialog}>
+                <Plus size={13} /> {t('goals.add')}
+              </Button>
+            ) : undefined
           }
         />
         {goalsList && goalsList.length > 0 ? (
@@ -297,61 +342,76 @@ export default function GoalsPage() {
                         {goal.asset_name && (
                           <span>{goal.asset_name}</span>
                         )}
+                        {goal.asset_group_name && (
+                          <span>{goal.asset_group_name}</span>
+                        )}
                       </div>
                     </div>
 
                     {/* Actions */}
-                    <div className="flex items-center gap-1 shrink-0">
-                      {goal.status === 'active' && (
+                    {canWrite && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        {goal.status === 'active' && (
+                          <button
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-500/10 transition-colors"
+                            onClick={() => statusMutation.mutate({ id: goal.id, status: 'paused' })}
+                            title={t('goals.pause')}
+                          >
+                            <Pause size={13} />
+                          </button>
+                        )}
+                        {goal.status === 'paused' && (
+                          <button
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors"
+                            onClick={() => statusMutation.mutate({ id: goal.id, status: 'active' })}
+                            title={t('goals.resume')}
+                          >
+                            <Play size={13} />
+                          </button>
+                        )}
+                        {(goal.status === 'active' || goal.status === 'paused') && (
+                          <button
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors"
+                            onClick={() => statusMutation.mutate({ id: goal.id, status: 'completed' })}
+                            title={t('goals.complete')}
+                          >
+                            <CheckCircle2 size={13} />
+                          </button>
+                        )}
+                        {goal.status !== 'archived' && (
+                          <button
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-muted-foreground/80 hover:bg-muted transition-colors"
+                            onClick={() => statusMutation.mutate({ id: goal.id, status: 'archived' })}
+                            title={t('goals.archive')}
+                          >
+                            <Archive size={13} />
+                          </button>
+                        )}
+                        {(goal.status === 'completed' || goal.status === 'archived') && (
+                          <button
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors"
+                            onClick={() => statusMutation.mutate({ id: goal.id, status: 'active' })}
+                            title={t('goals.reactivate')}
+                          >
+                            <ArchiveRestore size={13} />
+                          </button>
+                        )}
                         <button
-                          className="p-1.5 rounded-md text-muted-foreground hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-500/10 transition-colors"
-                          onClick={() => statusMutation.mutate({ id: goal.id, status: 'paused' })}
-                          title={t('goals.pause')}
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/5 transition-colors"
+                          onClick={() => openEditDialog(goal)}
+                          title={t('common.edit')}
                         >
-                          <Pause size={13} />
+                          <Pencil size={13} />
                         </button>
-                      )}
-                      {goal.status === 'paused' && (
                         <button
-                          className="p-1.5 rounded-md text-muted-foreground hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors"
-                          onClick={() => statusMutation.mutate({ id: goal.id, status: 'active' })}
-                          title={t('goals.resume')}
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors"
+                          onClick={() => setDeletingGoal(goal)}
+                          title={t('common.delete')}
                         >
-                          <Play size={13} />
+                          <Trash2 size={13} />
                         </button>
-                      )}
-                      {(goal.status === 'active' || goal.status === 'paused') && (
-                        <button
-                          className="p-1.5 rounded-md text-muted-foreground hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors"
-                          onClick={() => statusMutation.mutate({ id: goal.id, status: 'completed' })}
-                          title={t('goals.complete')}
-                        >
-                          <CheckCircle2 size={13} />
-                        </button>
-                      )}
-                      {goal.status !== 'archived' && (
-                        <button
-                          className="p-1.5 rounded-md text-muted-foreground hover:text-muted-foreground/80 hover:bg-muted transition-colors"
-                          onClick={() => statusMutation.mutate({ id: goal.id, status: 'archived' })}
-                          title={t('goals.archive')}
-                        >
-                          <Archive size={13} />
-                        </button>
-                      )}
-                      <button
-                        className="p-1.5 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/5 transition-colors"
-                        onClick={() => openEditDialog(goal)}
-                      >
-                        <Pencil size={13} />
-                      </button>
-                      <button
-                        className="p-1.5 rounded-md text-muted-foreground hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-colors"
-                        onClick={() => deleteMutation.mutate(goal.id)}
-                        disabled={deleteMutation.isPending}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )
@@ -393,6 +453,9 @@ export default function GoalsPage() {
               if (tt === 'asset') {
                 payload.asset_id = (formData.get('asset_id') as string) || null
               }
+              if (tt === 'asset_group') {
+                payload.asset_group_id = (formData.get('asset_group_id') as string) || null
+              }
 
               if (editing) {
                 updateMutation.mutate({ id: editing.id, ...payload } as Partial<Goal> & { id: string })
@@ -423,7 +486,7 @@ export default function GoalsPage() {
                 <select
                   name="currency"
                   defaultValue={editing?.currency ?? userCurrency}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                  className={SELECT_CLASS}
                 >
                   {supportedCurrencies?.map((c: { code: string; name: string; flag: string }) => (
                     <option key={c.code} value={c.code}>
@@ -449,11 +512,12 @@ export default function GoalsPage() {
                 name="tracking_type"
                 value={trackingType}
                 onChange={(e) => setTrackingType(e.target.value)}
-                className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                className={SELECT_CLASS}
               >
                 <option value="manual">{t('goals.trackingManual')}</option>
                 <option value="account">{t('goals.trackingAccount')}</option>
                 <option value="asset">{t('goals.trackingAsset')}</option>
+                <option value="asset_group">{t('goals.trackingWallet')}</option>
                 <option value="net_worth">{t('goals.trackingNetWorth')}</option>
               </select>
             </div>
@@ -471,41 +535,37 @@ export default function GoalsPage() {
             )}
 
             {trackingType === 'account' && (
-              <div className="space-y-2">
-                <Label>{t('goals.account')}</Label>
-                <select
-                  name="account_id"
-                  defaultValue={editing?.account_id ?? ''}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-                  required
-                >
-                  <option value="">{t('goals.selectAccount')}</option>
-                  {accountsList?.map((acc) => (
-                    <option key={acc.id} value={acc.id}>
-                      {getAccountName(acc)} ({acc.currency})
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <LinkedResourceSelect<Account>
+                name="account_id"
+                label={t('goals.account')}
+                placeholder={t('goals.selectAccount')}
+                defaultValue={editing?.account_id}
+                items={sortAccountsByDisplayName(accountsList ?? [])}
+                renderOption={(acc) => `${getAccountName(acc)} (${acc.currency})`}
+              />
             )}
 
             {trackingType === 'asset' && (
-              <div className="space-y-2">
-                <Label>{t('goals.asset')}</Label>
-                <select
-                  name="asset_id"
-                  defaultValue={editing?.asset_id ?? ''}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-card text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-                  required
-                >
-                  <option value="">{t('goals.selectAsset')}</option>
-                  {assetsList?.map((asset: { id: string; name: string; currency: string }) => (
-                    <option key={asset.id} value={asset.id}>
-                      {asset.name} ({asset.currency})
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <LinkedResourceSelect<Asset>
+                name="asset_id"
+                label={t('goals.asset')}
+                placeholder={t('goals.selectAsset')}
+                defaultValue={editing?.asset_id}
+                items={assetsList}
+                renderOption={(asset) => `${asset.name} (${asset.currency})`}
+              />
+            )}
+
+            {trackingType === 'asset_group' && (
+              <LinkedResourceSelect<AssetGroup>
+                name="asset_group_id"
+                label={t('goals.wallet')}
+                placeholder={t('goals.selectWallet')}
+                defaultValue={editing?.asset_group_id}
+                items={walletsList}
+                renderOption={(wallet) => wallet.name}
+                hint={t('goals.walletHint')}
+              />
             )}
 
             {/* Icon & Color */}
@@ -534,6 +594,8 @@ export default function GoalsPage() {
                       <button
                         key={c}
                         type="button"
+                        aria-label={c}
+                        title={c}
                         onClick={() => setSelectedColor(c)}
                         className={`w-7 h-7 rounded-full transition-all ${
                           selectedColor === c ? 'ring-2 ring-offset-1 ring-primary scale-110' : 'hover:scale-110'
@@ -563,6 +625,30 @@ export default function GoalsPage() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirm delete dialog */}
+      <Dialog open={!!deletingGoal} onOpenChange={() => setDeletingGoal(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('goals.confirmDeleteTitle')}</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            {t('goals.confirmDeleteDesc', { name: deletingGoal?.name })}
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeletingGoal(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deletingGoal && deleteMutation.mutate(deletingGoal.id)}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? t('common.loading') : t('common.delete')}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

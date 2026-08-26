@@ -2,9 +2,9 @@ import re
 import uuid
 from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, cast
 
-from sqlalchemy import select, func, or_, update
+from sqlalchemy import CursorResult, delete, select, func, or_, not_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,12 +15,58 @@ from app.models.bank_connection import BankConnection
 from app.models.category import Category
 from app.models.group import Group, GroupMember
 from app.models.payee import Payee
-from app.schemas.transaction import TransactionCreate, TransactionUpdate, TransferCreate
+from app.schemas.transaction import (
+    InstallmentSeriesCreate,
+    TransactionCreate,
+    TransactionUpdate,
+    TransferCreate,
+)
 from app.schemas.transaction_split import TransactionSplitInput, TransactionSplitsInput
 from app.services import split_service
 from app.services.credit_card_service import apply_effective_date
 from app.services.rule_service import apply_rules_to_transaction
 from app.services.fx_rate_service import stamp_primary_amount, convert as fx_convert
+from app.services._query_filters import (
+    counts_as_pnl,
+    counts_as_user_pnl,
+    is_not_ignored,
+    reporting_date_col,
+)
+from app.services.recurring_transaction_service import _advance_date
+
+
+async def _ensure_category_in_workspace(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    category_id: Optional[uuid.UUID],
+) -> None:
+    if category_id is None:
+        return
+    result = await session.execute(
+        select(Category.id).where(
+            Category.id == category_id,
+            Category.workspace_id == workspace_id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise ValueError("Category not found")
+
+
+async def _ensure_payee_in_workspace(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    payee_id: Optional[uuid.UUID],
+) -> None:
+    if payee_id is None:
+        return
+    result = await session.execute(
+        select(Payee.id).where(
+            Payee.id == payee_id,
+            Payee.workspace_id == workspace_id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise ValueError("Payee not found")
 
 
 def _apply_fx_override(transaction, amount, amount_primary=None, fx_rate_used=None):
@@ -51,6 +97,7 @@ def _apply_fx_override(transaction, amount, amount_primary=None, fx_rate_used=No
 
 async def get_transactions(
     session: AsyncSession,
+    workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     account_id: Optional[uuid.UUID] = None,
     category_id: Optional[uuid.UUID] = None,
@@ -79,17 +126,25 @@ async def get_transactions(
     min_amount: Optional[float] = None,
     max_amount: Optional[float] = None,
     account_types: Optional[list[str]] = None,
+    status: Optional[str] = None,
     include_summary: bool = False,
+    user_pnl_only: bool = False,
+    exclude_ignored: bool = False,
 ) -> tuple[list[Transaction], int, Optional[dict]]:
+    """List transactions for a workspace.
+
+    `workspace_id` scopes the tenant (which transactions are visible). `user_id`
+    is the *viewer* — used for Splitwise projection (linked-member visibility,
+    is-shared tagging) which is identity-based, not tenancy-based.
+    """
     # In "accrual" mode, bucket/order by effective_date so list filters
     # line up with the cash-flow view used by the dashboard and reports.
     # When the user has set a manual cycle override (effective_bill_date)
     # we honor it FIRST regardless of accounting mode — that's the whole
-    # point of the override (issue #92, LucasFidelis suggestion).
-    date_col = func.coalesce(
-        Transaction.effective_bill_date,
-        Transaction.effective_date if accounting_mode == "accrual" else Transaction.date,
-    )
+    # point of the override (issue #92, LucasFidelis suggestion). Shared
+    # with the dashboard/report/budget aggregations so a transaction lands
+    # in the same month everywhere (issue #232).
+    date_col = reporting_date_col(accounting_mode or "cash")
 
     # Group-scope visibility: when the caller filters by a group they
     # have access to (owner or linked member), bypass the user-owns-it
@@ -99,9 +154,9 @@ async def get_transactions(
     if group_id is not None:
         from app.services.group_service import get_group_visible
 
-        accessible = await get_group_visible(session, group_id, user_id)
+        accessible = await get_group_visible(session, group_id, workspace_id, user_id)
         if accessible is None:
-            return [], 0
+            return [], 0, None
         use_group_scope = True
 
     # CC bill-view date column: when the caller asks "what's in this bill?"
@@ -147,27 +202,39 @@ async def get_transactions(
         )
         base_query = base_query.where(Transaction.id.in_(tx_ids_subq))
     else:
-        # Default scope: own transactions PLUS transactions shared
-        # with the user via group splits. Shared rows surface in the
-        # viewer's ledger so their `Concert Tickets · share $90` shows
-        # up alongside their own expenses; account-balance integrity
-        # is preserved because the transaction's account_id still
-        # belongs to the original owner.
+        # Default scope: transactions in this workspace PLUS cross-workspace
+        # shares the viewer participates in. The union surfaces the
+        # viewer's "Concert Tickets · share $90" from another workspace
+        # alongside their own expenses; account-balance integrity is
+        # preserved because the parent tx's account still belongs to the
+        # original owner. The shared-id subquery EXCLUDES rows already
+        # in this workspace — otherwise self-membership in an
+        # in-workspace group double-surfaces the owner's own
+        # transactions when they switch to another workspace.
         from app.models.group import GroupMember
         from app.models.transaction_split import TransactionSplit
 
+        # Exclude is_self memberships — those represent the viewer's
+        # OWN self-member in groups they created, not invitations from
+        # someone else's workspace. Without this exclusion, the owner's
+        # own transactions get double-projected when they switch into
+        # a different workspace.
         viewer_member_ids = select(GroupMember.id).where(
-            GroupMember.linked_user_id == user_id
+            GroupMember.linked_user_id == user_id,
+            GroupMember.is_self.is_(False),
         )
         shared_tx_ids = (
             select(TransactionSplit.transaction_id)
-            .where(TransactionSplit.group_member_id.in_(viewer_member_ids))
+            .join(Transaction, Transaction.id == TransactionSplit.transaction_id)
+            .where(
+                TransactionSplit.group_member_id.in_(viewer_member_ids),
+                Transaction.workspace_id != workspace_id,
+            )
             .distinct()
         )
         base_query = base_query.where(
             or_(
-                Transaction.user_id == user_id,
-                BankConnection.user_id == user_id,
+                Transaction.workspace_id == workspace_id,
                 Transaction.id.in_(shared_tx_ids),
             )
         )
@@ -195,8 +262,17 @@ async def get_transactions(
         )
     if exclude_transfers:
         base_query = base_query.where(Transaction.transfer_pair_id.is_(None))
+    if user_pnl_only:
+        base_query = base_query.where(Account.is_closed == False, counts_as_user_pnl())
+    if exclude_ignored:
+        # Only drops rows; the summary below keeps computing over the same
+        # filtered set, so the totals a hidden list shows stay the totals of
+        # what it is showing.
+        base_query = base_query.where(is_not_ignored())
     if txn_type:
         base_query = base_query.where(Transaction.type == txn_type)
+    if status:
+        base_query = base_query.where(Transaction.status == status)
     if currency:
         # Native-currency filter — match the column verbatim. Lets agents
         # answer "do I have any EUR transactions?" without text-searching
@@ -343,14 +419,12 @@ async def get_transactions(
     # rows). Computed before pagination so it covers the whole result set.
     summary: Optional[dict] = None
     if include_summary:
-        ignored_category_ids = select(Category.id).where(Category.is_ignored == True)
-        pnl_subq = base_query.where(
-        Transaction.is_ignored == False,
-        or_(
-            Transaction.category_id.is_(None),
-            Transaction.category_id.not_in(ignored_category_ids),
-        ),
-    ).subquery()
+        # Income / expense / net use the shared `counts_as_pnl()` definition
+        # (issue #242) so the footer matches the dashboard & reports: paired
+        # transfers, `treat_as_transfer` categories (transfers, investments,
+        # custom) and ignored items are kept OUT of income/expense.
+        pnl_filter = counts_as_pnl()
+        pnl_subq = base_query.where(pnl_filter).subquery()
         amount_norm = func.coalesce(
             pnl_subq.c.amount_primary, pnl_subq.c.amount
         )
@@ -367,17 +441,32 @@ async def get_transactions(
                 income = Decimal(str(row_total or 0))
             elif row_type == "debit":
                 expense = Decimal(str(row_total or 0))
+
+        # Excluded: the absolute total of everything filtered out of P/L for
+        # the same rows — the complement of `counts_as_pnl()`. Surfaces
+        # transfer-like movement (e.g. how much was moved/invested) without
+        # distorting income/expense/net.
+        excl_subq = base_query.where(not_(pnl_filter)).subquery()
+        excl_amount_norm = func.coalesce(
+            excl_subq.c.amount_primary, excl_subq.c.amount
+        )
+        excluded_total = await session.scalar(
+            select(func.coalesce(func.sum(func.abs(excl_amount_norm)), 0))
+        )
+        excluded = Decimal(str(excluded_total or 0))
+
         summary = {
             "income": income,
             "expense": expense,
             "net": income - expense,
+            "excluded": excluded,
         }
 
     # Apply ordering (and pagination unless skipped). Bill-view callers
     # order by purchase date so the in-cycle list matches the bank's own
     # statement ordering regardless of accounting mode.
     default_order_col = bill_view_date_col if in_bill_view else date_col
-    sort_columns: dict[str, object] = {
+    sort_columns = {
         # `date` is the cycle/accrual-aware column the UI lists use so its
         # ordering matches the cash-flow & dashboard views.
         "date": default_order_col,
@@ -422,12 +511,10 @@ async def get_transactions(
             .where(TransactionAttachment.transaction_id.in_(tx_ids))
             .group_by(TransactionAttachment.transaction_id)
         )
-        counts = dict(count_rows.all())
+        counts = {row[0]: row[1] for row in count_rows.all()}
         for tx in transactions:
             tx.attachment_count = counts.get(tx.id, 0)
             tx.payee_name = tx.payee_entity.name if tx.payee_entity else None
-            if not tx.is_ignored and tx.category and tx.category.is_ignored:
-                tx.is_ignored = True
         # Tag shared rows with the viewer's share + the source group.
         # Owned rows stay as-is. We pre-compute the viewer's linked
         # member ids → group ids once, then look up each transaction's
@@ -463,7 +550,8 @@ async def _tag_shared_view(
 
     member_rows = await session.execute(
         select(GroupMember.id, GroupMember.group_id).where(
-            GroupMember.linked_user_id == user_id
+            GroupMember.linked_user_id == user_id,
+            GroupMember.is_self.is_(False),
         )
     )
     member_to_group = {row.id: row.group_id for row in member_rows}
@@ -564,18 +652,16 @@ async def _tag_shared_view(
 
 
 async def get_transaction(
-    session: AsyncSession, transaction_id: uuid.UUID, user_id: uuid.UUID
+    session: AsyncSession,
+    transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
 ) -> Optional[Transaction]:
+    """Fetch a single transaction by id, scoped to the workspace."""
     result = await session.execute(
         select(Transaction)
-        .outerjoin(Account)
-        .outerjoin(BankConnection)
         .where(
             Transaction.id == transaction_id,
-            or_(
-                Transaction.user_id == user_id,
-                BankConnection.user_id == user_id,
-            ),
+            Transaction.workspace_id == workspace_id,
         )
         .options(
             selectinload(Transaction.category),
@@ -596,17 +682,20 @@ async def get_transaction(
 
 
 async def create_transaction(
-    session: AsyncSession, user_id: uuid.UUID, data: TransactionCreate
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: TransactionCreate,
 ) -> Transaction:
-    # Verify account belongs to user
+    # Verify account belongs to the workspace
     account_result = await session.execute(
         select(Account)
         .outerjoin(BankConnection)
         .where(
             Account.id == data.account_id,
             or_(
-                Account.user_id == user_id,
-                BankConnection.user_id == user_id,
+                Account.workspace_id == workspace_id,
+                BankConnection.workspace_id == workspace_id,
             ),
         )
     )
@@ -614,11 +703,15 @@ async def create_transaction(
     if not account:
         raise ValueError("Account not found")
 
+    await _ensure_category_in_workspace(session, workspace_id, data.category_id)
+    await _ensure_payee_in_workspace(session, workspace_id, data.payee_id)
+
     # Resolve currency: explicit value > account currency
     currency = data.currency or account.currency
 
     transaction = Transaction(
         user_id=user_id,
+        workspace_id=workspace_id,
         account_id=data.account_id,
         category_id=data.category_id,  # use provided category if given
         payee_id=data.payee_id,
@@ -628,8 +721,19 @@ async def create_transaction(
         date=data.date,
         type=data.type,
         source="manual",
+        # Manually-entered transactions default to "posted" (settled),
+        # matching the model default. Callers may still create them as
+        # "pending" (not yet settled) via TransactionCreate.status.
+        status=data.status or "posted",
         notes=data.notes,
+        effective_bill_date=data.effective_bill_date,
+        installment_number=data.installment_number,
+        total_installments=data.total_installments,
+        installment_total_amount=data.installment_total_amount,
+        installment_purchase_date=data.installment_purchase_date,
     )
+    if data.effective_bill_date is not None:
+        await _resync_bill_link_from_override(session, transaction, account)
     apply_effective_date(transaction, account)
     session.add(transaction)
     await session.flush()  # get ID without committing
@@ -652,19 +756,127 @@ async def create_transaction(
     return transaction
 
 
+async def create_installment_series(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: InstallmentSeriesCreate,
+) -> list[Transaction]:
+    """Create a manual installment series.
+
+    Repeats ``data.base`` ``data.installments`` times: every parcel stores
+    the base amount, date advanced by the given frequency (monthly/quarterly/
+    weekly/yearly, matching recurring transactions), and the shared
+    installment fingerprint (account, installment_purchase_date,
+    total_installments, installment_total_amount = amount * installments)
+    plus its 1-based installment_number, so the existing sync dedup matches
+    bank-synced installments against these rows. The first parcel uses the
+    requested status ("posted" by default); subsequent ones are created
+    "pending". Month-end clamping is handled by the shared recurrence helper.
+    """
+    base = data.base
+    n = data.installments
+
+    # Verify account belongs to the workspace (mirrors create_transaction)
+    account_result = await session.execute(
+        select(Account)
+        .outerjoin(BankConnection)
+        .where(
+            Account.id == base.account_id,
+            or_(
+                Account.workspace_id == workspace_id,
+                BankConnection.workspace_id == workspace_id,
+            ),
+        )
+    )
+    account = account_result.scalar_one_or_none()
+    if not account:
+        raise ValueError("Account not found")
+
+    await _ensure_category_in_workspace(session, workspace_id, base.category_id)
+    await _ensure_payee_in_workspace(session, workspace_id, base.payee_id)
+
+    total = base.amount * n
+    currency = base.currency or account.currency
+    purchase_date = base.date
+    intended_day = base.date.day
+    series_id = uuid.uuid4()
+
+    created: list[Transaction] = []
+    installment_date = base.date
+    for i in range(1, n + 1):
+        if i > 1:
+            installment_date = _advance_date(
+                installment_date, data.frequency, intended_day=intended_day
+            )
+
+        tx = Transaction(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            account_id=base.account_id,
+            category_id=base.category_id,
+            payee_id=base.payee_id,
+            description=base.description,
+            amount=base.amount,
+            currency=currency,
+            date=installment_date,
+            type=base.type,
+            source="manual",
+            status=data.first_installment_status if i == 1 else "pending",
+            notes=base.notes,
+            effective_bill_date=base.effective_bill_date,
+            installment_number=i,
+            total_installments=n,
+            installment_total_amount=total,
+            installment_purchase_date=purchase_date,
+            installment_series_id=series_id,
+        )
+        if base.effective_bill_date is not None:
+            await _resync_bill_link_from_override(session, tx, account)
+        apply_effective_date(tx, account)
+        session.add(tx)
+        await session.flush()  # get ID without committing
+        created.append(tx)
+
+    # Rules, FX stamping and splits run after every row has an ID so each
+    # parcel is finalized exactly like a single manual transaction.
+    for tx in created:
+        if not base.category_id:
+            await apply_rules_to_transaction(session, user_id, tx)
+        if base.fx_rate_used is not None:
+            _apply_fx_override(tx, tx.amount, None, base.fx_rate_used)
+        elif base.amount_primary is not None:
+            _apply_fx_override(tx, tx.amount, base.amount_primary, None)
+        else:
+            await stamp_primary_amount(session, user_id, tx)
+        if base.splits is not None:
+            await split_service.replace_splits(session, tx, base.splits, user_id)
+
+    await session.commit()
+    for tx in created:
+        await session.refresh(tx, ["category", "splits"])
+    return created
+
+
 async def create_transfer(
-    session: AsyncSession, user_id: uuid.UUID, data: TransferCreate
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: TransferCreate,
 ) -> tuple[Transaction, Transaction]:
     if data.from_account_id == data.to_account_id:
         raise ValueError("Cannot transfer to the same account")
 
-    # Verify both accounts belong to user
+    # Verify both accounts belong to the workspace
     from_result = await session.execute(
         select(Account)
         .outerjoin(BankConnection)
         .where(
             Account.id == data.from_account_id,
-            or_(Account.user_id == user_id, BankConnection.user_id == user_id),
+            or_(
+                Account.workspace_id == workspace_id,
+                BankConnection.workspace_id == workspace_id,
+            ),
         )
     )
     from_account = from_result.scalar_one_or_none()
@@ -676,49 +888,72 @@ async def create_transfer(
         .outerjoin(BankConnection)
         .where(
             Account.id == data.to_account_id,
-            or_(Account.user_id == user_id, BankConnection.user_id == user_id),
+            or_(
+                Account.workspace_id == workspace_id,
+                BankConnection.workspace_id == workspace_id,
+            ),
         )
     )
     to_account = to_result.scalar_one_or_none()
     if not to_account:
         raise ValueError("Destination account not found")
 
+    is_cross_currency = from_account.currency != to_account.currency
+    if (
+        not is_cross_currency
+        and data.destination_amount is not None
+    ):
+        raise ValueError(
+            "Destination amount must be absent for same-currency transfers."
+        )
+
     transfer_pair_id = uuid.uuid4()
-    from decimal import Decimal
+    from decimal import Decimal, ROUND_HALF_UP
+
+    def _to_cents(value) -> Decimal:
+        """Round to the 2 decimals both amount columns store.
+
+        Without this the response would echo back a precision the database
+        never kept, and `amount_primary`/`fx_rate_used` would be derived from
+        an amount that isn't the one on the row.
+        """
+        return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    debit_amount = _to_cents(data.amount)
+    amount_is_explicit = data.destination_amount is not None
 
     # Debit transaction (from account)
     debit_tx = Transaction(
         user_id=user_id,
+        workspace_id=workspace_id,
         account_id=data.from_account_id,
         description=data.description,
-        amount=data.amount,
+        amount=debit_amount,
         currency=from_account.currency,
         date=data.date,
         type="debit",
         source="transfer",
         notes=data.notes,
         transfer_pair_id=transfer_pair_id,
+        transfer_amount_explicit=amount_is_explicit,
     )
     apply_effective_date(debit_tx, from_account)
     session.add(debit_tx)
 
     # Credit transaction (to account) — convert if cross-currency
-    if from_account.currency != to_account.currency:
-        if data.fx_rate is not None:
-            from decimal import ROUND_HALF_UP
-            credit_amount = (Decimal(str(data.amount)) * Decimal(str(data.fx_rate))).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
+    if is_cross_currency:
+        if data.destination_amount is not None:
+            credit_amount = _to_cents(data.destination_amount)
         else:
-            converted_amount, _ = await fx_convert(
-                session, Decimal(str(data.amount)), from_account.currency, to_account.currency, data.date
+            credit_amount, _ = await fx_convert(
+                session, debit_amount, from_account.currency, to_account.currency, data.date
             )
-            credit_amount = converted_amount
     else:
-        credit_amount = data.amount
+        credit_amount = debit_amount
 
     credit_tx = Transaction(
         user_id=user_id,
+        workspace_id=workspace_id,
         account_id=data.to_account_id,
         description=data.description,
         amount=credit_amount,
@@ -728,6 +963,7 @@ async def create_transfer(
         source="transfer",
         notes=data.notes,
         transfer_pair_id=transfer_pair_id,
+        transfer_amount_explicit=amount_is_explicit,
     )
     apply_effective_date(credit_tx, to_account)
     session.add(credit_tx)
@@ -751,7 +987,7 @@ async def create_transfer(
 
 async def get_transfer_candidates(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     transaction_id: uuid.UUID,
     limit: int = 10,
     window_days: int = 30,
@@ -765,7 +1001,7 @@ async def get_transfer_candidates(
     from datetime import timedelta
     from decimal import Decimal
 
-    anchor = await get_transaction(session, transaction_id, user_id)
+    anchor = await get_transaction(session, transaction_id, workspace_id)
     if not anchor:
         return []
     if anchor.transfer_pair_id is not None:
@@ -777,13 +1013,8 @@ async def get_transfer_candidates(
 
     result = await session.execute(
         select(Transaction)
-        .outerjoin(Account)
-        .outerjoin(BankConnection)
         .where(
-            or_(
-                Transaction.user_id == user_id,
-                BankConnection.user_id == user_id,
-            ),
+            Transaction.workspace_id == workspace_id,
             Transaction.id != anchor.id,
             Transaction.account_id != anchor.account_id,
             Transaction.type == opposing_type,
@@ -833,7 +1064,7 @@ async def get_transfer_candidates(
             .where(TransactionAttachment.transaction_id.in_(tx_ids))
             .group_by(TransactionAttachment.transaction_id)
         )
-        counts = dict(count_rows.all())
+        counts = {row[0]: row[1] for row in count_rows.all()}
         for tx in candidates:
             tx.attachment_count = counts.get(tx.id, 0)
             tx.payee_name = tx.payee_entity.name if tx.payee_entity else None
@@ -841,14 +1072,51 @@ async def get_transfer_candidates(
     return candidates
 
 
+async def get_transfer_pair(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+) -> Optional[Transaction]:
+    """Return the counterpart leg of a linked transfer, or None.
+
+    Both legs share the same ``transfer_pair_id``, so the counterpart is the
+    other row carrying that id — not a foreign key on the anchor itself.
+    """
+    anchor = await get_transaction(session, transaction_id, workspace_id)
+    if not anchor or anchor.transfer_pair_id is None:
+        return None
+
+    result = await session.execute(
+        select(Transaction)
+        .where(
+            Transaction.workspace_id == workspace_id,
+            Transaction.transfer_pair_id == anchor.transfer_pair_id,
+            Transaction.id != anchor.id,
+        )
+        .options(
+            selectinload(Transaction.category),
+            selectinload(Transaction.account),
+            selectinload(Transaction.payee_entity),
+            selectinload(Transaction.splits),
+        )
+        .limit(1)
+    )
+    pair = result.scalars().first()
+    if pair:
+        pair.payee_name = pair.payee_entity.name if pair.payee_entity else None
+    return pair
+
+
 async def link_existing_as_transfer(
-    session: AsyncSession, user_id: uuid.UUID, transaction_ids: list[uuid.UUID]
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    transaction_ids: list[uuid.UUID],
 ) -> tuple[Transaction, Transaction]:
     """Link two existing transactions as a transfer pair.
 
     Permissive by design: amounts don't have to match. Validation enforces
-    ownership, opposing types, different accounts, and that neither side is
-    already part of an existing transfer.
+    workspace ownership, opposing types, different accounts, and that
+    neither side is already part of an existing transfer.
     """
     if len(transaction_ids) != 2:
         raise ValueError("Exactly two transactions are required")
@@ -857,14 +1125,9 @@ async def link_existing_as_transfer(
 
     result = await session.execute(
         select(Transaction)
-        .outerjoin(Account)
-        .outerjoin(BankConnection)
         .where(
             Transaction.id.in_(transaction_ids),
-            or_(
-                Transaction.user_id == user_id,
-                BankConnection.user_id == user_id,
-            ),
+            Transaction.workspace_id == workspace_id,
         )
     )
     txns = list(result.scalars().all())
@@ -885,7 +1148,6 @@ async def link_existing_as_transfer(
     transfer_pair_id = uuid.uuid4()
     for tx in txns:
         tx.transfer_pair_id = transfer_pair_id
-        tx.category_id = None  # transfers are excluded from category reports
 
     await session.commit()
     for tx in txns:
@@ -898,6 +1160,7 @@ async def link_existing_as_transfer(
 
 async def create_transfer_counterpart(
     session: AsyncSession,
+    workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     transaction_id: uuid.UUID,
     to_account_id: uuid.UUID,
@@ -912,7 +1175,7 @@ async def create_transfer_counterpart(
     """
     from decimal import Decimal
 
-    anchor = await get_transaction(session, transaction_id, user_id)
+    anchor = await get_transaction(session, transaction_id, workspace_id)
     if not anchor:
         raise ValueError("Transaction not found")
     if anchor.transfer_pair_id is not None:
@@ -925,7 +1188,10 @@ async def create_transfer_counterpart(
         .outerjoin(BankConnection)
         .where(
             Account.id == to_account_id,
-            or_(Account.user_id == user_id, BankConnection.user_id == user_id),
+            or_(
+                Account.workspace_id == workspace_id,
+                BankConnection.workspace_id == workspace_id,
+            ),
         )
     )
     to_account = to_result.scalar_one_or_none()
@@ -946,6 +1212,7 @@ async def create_transfer_counterpart(
 
     counterpart_tx = Transaction(
         user_id=user_id,
+        workspace_id=workspace_id,
         account_id=to_account_id,
         description=anchor.description,
         amount=counterpart_amount,
@@ -959,9 +1226,8 @@ async def create_transfer_counterpart(
     apply_effective_date(counterpart_tx, to_account)
     session.add(counterpart_tx)
 
-    # Link the anchor into the pair; transfers are excluded from category reports.
+    # Link the anchor into the pair; reports exclude transfer_pair_id.
     anchor.transfer_pair_id = transfer_pair_id
-    anchor.category_id = None
 
     await session.flush()
     await stamp_primary_amount(session, user_id, counterpart_tx)
@@ -1028,25 +1294,215 @@ async def _resync_bill_link_from_override(
         transaction.bill_id = None
 
 
+def _is_installment(tx: Transaction) -> bool:
+    """Whether a row carries a manual/synced installment fingerprint."""
+    return (
+        tx.installment_number is not None
+        and tx.total_installments is not None
+        and tx.installment_purchase_date is not None
+    )
+
+
+async def _get_series_transactions(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    tx: Transaction,
+    apply_to: str,
+) -> list[Transaction]:
+    """Return the sibling installments of ``tx``'s series, ordered by number.
+
+    Manual series identity is the stable ``installment_series_id`` assigned
+    when the series is created. Legacy/provider-synced rows without that ID
+    retain the historical fingerprint fallback used by sync deduplication.
+    For "future" only rows with installment_number >= the anchor's are
+    returned.
+    """
+    if tx.installment_series_id is not None:
+        conditions = [
+            Transaction.workspace_id == workspace_id,
+            Transaction.installment_series_id == tx.installment_series_id,
+        ]
+    else:
+        conditions = [
+            Transaction.workspace_id == workspace_id,
+            Transaction.account_id == tx.account_id,
+            Transaction.installment_purchase_date == tx.installment_purchase_date,
+            Transaction.total_installments == tx.total_installments,
+        ]
+    if apply_to == "future":
+        conditions.append(Transaction.installment_number >= tx.installment_number)
+    result = await session.execute(
+        select(Transaction).where(*conditions).order_by(Transaction.installment_number)
+    )
+    return list(result.scalars().all())
+
+
+async def _resync_installment_series_total(
+    session: AsyncSession, workspace_id: uuid.UUID, tx: Transaction
+) -> None:
+    """Keep ``installment_total_amount`` equal to the sum of the parcels.
+
+    Editing a parcel's amount (with any scope) changes what the series is
+    worth, and the stored total is what the transaction list renders in its
+    installment tooltip. Only series carrying a series id are recomputed:
+    for provider-synced rows the total is the bank's own figure and must
+    stay as reported.
+    """
+    if tx.installment_series_id is None:
+        return
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.workspace_id == workspace_id,
+            Transaction.installment_series_id == tx.installment_series_id,
+        )
+    )
+    siblings = list(result.scalars().all())
+    if not siblings:
+        return
+    total = sum((row.amount for row in siblings), Decimal("0"))
+    for row in siblings:
+        row.installment_total_amount = total
+
+
+async def _apply_update_to_row(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    tx: Transaction,
+    update_data: dict,
+    apply_to_transfer_pair: bool,
+    splits_payload: Optional[TransactionSplitsInput],
+) -> None:
+    """Apply a parsed TransactionUpdate payload to a single row.
+
+    Shared by single-row edits and installment-series scoped edits so both
+    paths behave identically (FX restamp, bill re-link, transfer cascade,
+    splits replacement).
+    """
+    has_fx_override = "amount_primary" in update_data or "fx_rate_used" in update_data
+    override_amount_primary = update_data.get("amount_primary")
+    override_fx_rate = update_data.get("fx_rate_used")
+    heals_fx_on_post = (
+        tx.status == "pending"
+        and update_data.get("status") == "posted"
+        and (
+            tx.amount_primary is None
+            or tx.fx_rate_used is None
+            or tx.fx_rate_used == 1
+        )
+    )
+
+    description_changed = (
+        "description" in update_data
+        and update_data["description"] != tx.description
+    )
+    if description_changed:
+        tx.description_is_rule_managed = False
+
+    fx_keys = {"amount_primary", "fx_rate_used"}
+    for key, value in update_data.items():
+        if key in fx_keys:
+            continue
+        setattr(tx, key, value)
+
+    restamp_fields = {"amount", "currency", "date"}
+    needs_restamp = bool(restamp_fields & update_data.keys())
+
+    if has_fx_override:
+        if override_amount_primary is None and override_fx_rate is None:
+            tx.amount_primary = None
+            tx.fx_rate_used = None
+            await stamp_primary_amount(session, user_id, tx)
+        else:
+            _apply_fx_override(
+                tx,
+                tx.amount,
+                override_amount_primary,
+                override_fx_rate,
+            )
+    elif needs_restamp or heals_fx_on_post:
+        await stamp_primary_amount(session, user_id, tx)
+
+    # Refresh effective_date when the purchase date, account, or the manual
+    # bill-cycle override changed. Also re-link bill_id when the override
+    # changed so the tx moves into the right cycle (issue #92 manual override).
+    if "date" in update_data or "account_id" in update_data or "effective_bill_date" in update_data:
+        account_for_tx = await session.get(Account, tx.account_id)
+        if "effective_bill_date" in update_data:
+            await _resync_bill_link_from_override(session, tx, account_for_tx)
+        apply_effective_date(tx, account_for_tx)
+
+    # Cascade changes to paired transfer transaction
+    cascade_fields = {"amount", "date", "description", "notes"}
+    should_cascade_category = apply_to_transfer_pair and "category_id" in update_data
+    if tx.transfer_pair_id and ((cascade_fields & update_data.keys()) or should_cascade_category):
+        paired = await session.execute(
+            select(Transaction).where(
+                Transaction.transfer_pair_id == tx.transfer_pair_id,
+                Transaction.id != tx.id,
+            )
+        )
+        paired_tx = paired.scalar_one_or_none()
+        if paired_tx:
+            if should_cascade_category:
+                paired_tx.category_id = tx.category_id
+            # When the user typed both amounts, neither is a conversion of the
+            # other: correcting one leg leaves the amount that actually landed
+            # on the other account untouched. Re-converting here would throw
+            # away the number the user entered (issue #529).
+            keeps_own_amount = tx.transfer_amount_explicit or paired_tx.transfer_amount_explicit
+            for key in cascade_fields & update_data.keys():
+                if key == "description" and not description_changed:
+                    continue
+                if key == "amount" and paired_tx.currency != tx.currency:
+                    if keeps_own_amount:
+                        continue
+                    converted, _ = await fx_convert(
+                        session, Decimal(str(tx.amount)),
+                        tx.currency, paired_tx.currency, tx.date,
+                    )
+                    paired_tx.amount = converted
+                elif key != "amount":
+                    if (
+                        key == "description"
+                        and update_data[key] != paired_tx.description
+                    ):
+                        paired_tx.description_is_rule_managed = False
+                    setattr(paired_tx, key, update_data[key])
+                else:
+                    paired_tx.amount = update_data[key]
+            await stamp_primary_amount(session, user_id, paired_tx)
+            if "date" in update_data:
+                paired_account = await session.get(Account, paired_tx.account_id)
+                apply_effective_date(paired_tx, paired_account)
+
+    if splits_payload is not None:
+        await split_service.replace_splits(session, tx, splits_payload, user_id)
+
+
 async def update_transaction(
-    session: AsyncSession, transaction_id: uuid.UUID, user_id: uuid.UUID, data: TransactionUpdate
+    session: AsyncSession,
+    transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: TransactionUpdate,
 ) -> Optional[Transaction]:
-    transaction = await get_transaction(session, transaction_id, user_id)
+    transaction = await get_transaction(session, transaction_id, workspace_id)
     if not transaction:
         return None
 
     update_data = data.model_dump(exclude_unset=True)
     apply_to_transfer_pair = update_data.pop("apply_to_transfer_pair", False)
+    apply_to = update_data.pop("apply_to", "this")
 
     # Splits are processed separately after column updates land so the
     # service can validate against the new amount.
     splits_payload = data.splits if "splits" in update_data else None
     update_data.pop("splits", None)
 
-    # Verify the new account belongs to the user before touching the row.
-    # When changing the account on one side of a transfer pair, refuse to
-    # collide with the paired transaction's account (a transfer must have two
-    # distinct accounts).
+    # Verify the new account belongs to the workspace before touching the
+    # row. When changing the account on one side of a transfer pair,
+    # refuse to collide with the paired transaction's account (a transfer
+    # must have two distinct accounts).
     new_account_id = update_data.get("account_id")
     if new_account_id is not None and new_account_id != transaction.account_id:
         account_result = await session.execute(
@@ -1055,8 +1511,8 @@ async def update_transaction(
             .where(
                 Account.id == new_account_id,
                 or_(
-                    Account.user_id == user_id,
-                    BankConnection.user_id == user_id,
+                    Account.workspace_id == workspace_id,
+                    BankConnection.workspace_id == workspace_id,
                 ),
             )
         )
@@ -1074,91 +1530,95 @@ async def update_transaction(
             if paired_tx and paired_tx.account_id == new_account_id:
                 raise ValueError("Cannot move transfer to the same account as its paired transaction")
 
-    # Pop FX override fields before generic setattr loop
-    override_amount_primary = update_data.pop("amount_primary", None)
-    override_fx_rate = update_data.pop("fx_rate_used", None)
-    has_fx_override = override_amount_primary is not None or override_fx_rate is not None
+    if "category_id" in update_data:
+        await _ensure_category_in_workspace(session, workspace_id, update_data["category_id"])
+    if "payee_id" in update_data:
+        await _ensure_payee_in_workspace(session, workspace_id, update_data["payee_id"])
 
-    restamp_fields = {"amount", "currency", "date"}
-    needs_restamp = bool(restamp_fields & update_data.keys())
+    # Series scope. "future"/"all" expand the edit to sibling installments;
+    # ignored entirely for rows without an installment fingerprint.
+    #
+    # Scoped edits only repeat the fields that make sense across a series:
+    # description, amount, currency (+FX override), category, type, payee,
+    # account, and notes. Everything else — date, status, ignore flag,
+    # bill-cycle override, splits — stays untouched on sibling installments
+    # so editing one parcel's bookkeeping never bleeds into the rest.
+    # Account moves ride along so the whole series lands on the new
+    # account together (the fingerprint stays coherent across the rows).
+    installment_scoped_fields = frozenset(
+        {
+            "description",
+            "amount",
+            "currency",
+            "amount_primary",
+            "fx_rate_used",
+            "category_id",
+            "type",
+            "payee_id",
+            "account_id",
+            "notes",
+        }
+    )
+    rows = [transaction]
+    scoped_update = None
+    if apply_to != "this" and _is_installment(transaction):
+        rows = await _get_series_transactions(session, workspace_id, transaction, apply_to)
+        scoped_update = {
+            k: v for k, v in update_data.items() if k in installment_scoped_fields
+        }
 
-    for key, value in update_data.items():
-        setattr(transaction, key, value)
-
-    if has_fx_override:
-        _apply_fx_override(
-            transaction,
-            transaction.amount,
-            override_amount_primary,
-            override_fx_rate,
+    for row in rows:
+        # The edited transaction itself reflects the full form payload; the
+        # sibling installments only receive the whitelisted fields (and keep
+        # their own date, status, bill-cycle, and split bookkeeping).
+        is_anchor = row.id == transaction.id
+        if is_anchor:
+            row_update = update_data
+            row_splits = splits_payload
+        else:
+            # Non-anchor rows only exist in the scoped branch above, where
+            # scoped_update is always built.
+            assert scoped_update is not None
+            row_update = scoped_update
+            row_splits = None
+        await _apply_update_to_row(
+            session,
+            user_id,
+            row,
+            row_update,
+            apply_to_transfer_pair,
+            row_splits,
         )
-    elif needs_restamp:
-        await stamp_primary_amount(session, user_id, transaction)
 
-    # Refresh effective_date when the purchase date, account, or the manual
-    # bill-cycle override changed. Also re-link bill_id when the override
-    # changed so the tx moves into the right cycle (issue #92 manual override).
-    if "date" in update_data or "account_id" in update_data or "effective_bill_date" in update_data:
-        account_for_tx = await session.get(Account, transaction.account_id)
-        if "effective_bill_date" in update_data:
-            await _resync_bill_link_from_override(session, transaction, account_for_tx)
-        apply_effective_date(transaction, account_for_tx)
-
-    # Cascade changes to paired transfer transaction
-    cascade_fields = {"amount", "date", "description", "notes"}
-    should_cascade_category = apply_to_transfer_pair and "category_id" in update_data
-    if transaction.transfer_pair_id and ((cascade_fields & update_data.keys()) or should_cascade_category):
-        paired = await session.execute(
-            select(Transaction).where(
-                Transaction.transfer_pair_id == transaction.transfer_pair_id,
-                Transaction.id != transaction.id,
-            )
-        )
-        paired_tx = paired.scalar_one_or_none()
-        if paired_tx:
-            if should_cascade_category:
-                paired_tx.category_id = transaction.category_id
-            for key in cascade_fields & update_data.keys():
-                if key == "amount" and paired_tx.currency != transaction.currency:
-                    from decimal import Decimal
-                    converted, _ = await fx_convert(
-                        session, Decimal(str(transaction.amount)),
-                        transaction.currency, paired_tx.currency, transaction.date,
-                    )
-                    paired_tx.amount = converted
-                elif key != "amount":
-                    setattr(paired_tx, key, update_data[key])
-                else:
-                    paired_tx.amount = update_data[key]
-            await stamp_primary_amount(session, user_id, paired_tx)
-            if "date" in update_data:
-                paired_account = await session.get(Account, paired_tx.account_id)
-                apply_effective_date(paired_tx, paired_account)
-
-    if splits_payload is not None:
-        await split_service.replace_splits(session, transaction, splits_payload, user_id)
+    # A changed parcel amount makes the stored series total stale, whatever
+    # the scope was: "this" reprices one parcel, "future"/"all" reprice
+    # several. Recompute from the rows themselves so the two always agree.
+    if "amount" in update_data and _is_installment(transaction):
+        await session.flush()
+        await _resync_installment_series_total(session, workspace_id, transaction)
 
     await session.commit()
-    await session.refresh(transaction, ["splits"])
+    await session.refresh(transaction, ["category", "payee_entity", "splits"])
     return transaction
 
 
 async def bulk_update_category(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     transaction_ids: list[uuid.UUID],
     category_id: Optional[uuid.UUID] = None,
 ) -> int:
+    await _ensure_category_in_workspace(session, workspace_id, category_id)
     result = await session.execute(
         update(Transaction)
         .where(
             Transaction.id.in_(transaction_ids),
-            Transaction.user_id == user_id,
+            Transaction.workspace_id == workspace_id,
         )
         .values(category_id=category_id)
     )
     await session.commit()
-    return result.rowcount
+    return cast(CursorResult, result).rowcount
 
 
 _TAG_CHAR_CLASS = r"[\wÀ-ž-]"
@@ -1177,7 +1637,7 @@ def _parse_hashtags(notes: Optional[str]) -> list[str]:
 
 async def bulk_add_tags(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     transaction_ids: list[uuid.UUID],
     tags: list[str],
 ) -> int:
@@ -1193,7 +1653,7 @@ async def bulk_add_tags(
     result = await session.execute(
         select(Transaction).where(
             Transaction.id.in_(transaction_ids),
-            Transaction.user_id == user_id,
+            Transaction.workspace_id == workspace_id,
         )
     )
     touched = 0
@@ -1212,7 +1672,7 @@ async def bulk_add_tags(
 
 async def bulk_remove_tags(
     session: AsyncSession,
-    user_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     transaction_ids: list[uuid.UUID],
     tags: list[str],
 ) -> int:
@@ -1226,7 +1686,7 @@ async def bulk_remove_tags(
     result = await session.execute(
         select(Transaction).where(
             Transaction.id.in_(transaction_ids),
-            Transaction.user_id == user_id,
+            Transaction.workspace_id == workspace_id,
         )
     )
     touched = 0
@@ -1254,6 +1714,7 @@ async def bulk_remove_tags(
 
 async def bulk_add_to_group(
     session: AsyncSession,
+    workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     transaction_ids: list[uuid.UUID],
     group_id: uuid.UUID,
@@ -1287,6 +1748,7 @@ async def bulk_add_to_group(
     group_result = await session.execute(
         select(Group).where(
             Group.id == group_id,
+            Group.workspace_id == workspace_id,
             or_(Group.user_id == user_id, Group.id.in_(linked_group_ids)),
         )
     )
@@ -1323,7 +1785,7 @@ async def bulk_add_to_group(
         select(Transaction)
         .where(
             Transaction.id.in_(transaction_ids),
-            Transaction.user_id == user_id,
+            Transaction.workspace_id == workspace_id,
         )
         .options(selectinload(Transaction.splits))
     )
@@ -1346,13 +1808,15 @@ async def bulk_add_to_group(
 
 
 async def toggle_ignore_transaction(
-    session: AsyncSession, transaction_id: uuid.UUID, user_id: uuid.UUID
+    session: AsyncSession,
+    transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
 ) -> Optional[Transaction]:
     """Flip the is_ignored flag on a transaction. Acts immediately (no
     other field is touched) so the edit dialog can offer ignore as a
     one-click action alongside delete, instead of bundling it into the
     form's Salvar flow."""
-    transaction = await get_transaction(session, transaction_id, user_id)
+    transaction = await get_transaction(session, transaction_id, workspace_id)
     if not transaction:
         return None
     transaction.is_ignored = not transaction.is_ignored
@@ -1361,35 +1825,114 @@ async def toggle_ignore_transaction(
     return transaction
 
 
+async def unlink_recurring_transaction(
+    session: AsyncSession,
+    transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+) -> Optional[Transaction]:
+    """Clear a transaction's link to a recurring bill (issue #116).
+
+    The escape hatch for a wrong auto-link: only the FK is cleared, the
+    transaction row is otherwise untouched, and the bill is left as-is (its
+    next_occurrence already moved on). Returns the transaction, or None if not
+    found / not currently linked."""
+    transaction = await get_transaction(session, transaction_id, workspace_id)
+    if not transaction or transaction.recurring_transaction_id is None:
+        return None
+    transaction.recurring_transaction_id = None
+    await session.commit()
+    await session.refresh(transaction)
+    return transaction
+
+
 async def delete_transaction(
-    session: AsyncSession, transaction_id: uuid.UUID, user_id: uuid.UUID
+    session: AsyncSession,
+    transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    apply_to: str = "this",
 ) -> bool:
-    transaction = await get_transaction(session, transaction_id, user_id)
+    """Delete a transaction. For rows in an installment series, ``apply_to``
+    may be "future" (this row + all later installments) or "all" (every row
+    in the series); otherwise only the single row is removed. Paired transfer
+    legs are cascade-deleted as before. Returns False when not found."""
+    transaction = await get_transaction(session, transaction_id, workspace_id)
     if not transaction:
         return False
+
+    # Expand to sibling installments when the caller asked for a scoped
+    # delete and the row is part of a series.
+    rows: list[Transaction] = [transaction]
+    if apply_to != "this" and _is_installment(transaction):
+        rows = await _get_series_transactions(session, workspace_id, transaction, apply_to)
 
     # Clean up attachment files from storage before ORM cascade deletes DB records
     from app.services.attachment_service import cleanup_attachment_files
 
-    tx_ids_to_cleanup = [transaction_id]
-
-    # Cascade delete paired transfer transaction
-    paired_tx = None
-    if transaction.transfer_pair_id:
-        paired_result = await session.execute(
-            select(Transaction).where(
-                Transaction.transfer_pair_id == transaction.transfer_pair_id,
-                Transaction.id != transaction.id,
+    tx_ids_to_cleanup: list[uuid.UUID] = []
+    paired_txs: list[Transaction] = []
+    for row in rows:
+        tx_ids_to_cleanup.append(row.id)
+        if row.transfer_pair_id:
+            paired_result = await session.execute(
+                select(Transaction).where(
+                    Transaction.transfer_pair_id == row.transfer_pair_id,
+                    Transaction.id != row.id,
+                )
             )
-        )
-        paired_tx = paired_result.scalar_one_or_none()
-        if paired_tx:
-            tx_ids_to_cleanup.append(paired_tx.id)
+            paired_tx = paired_result.scalar_one_or_none()
+            if paired_tx and paired_tx.id not in tx_ids_to_cleanup:
+                tx_ids_to_cleanup.append(paired_tx.id)
+                paired_txs.append(paired_tx)
 
     await cleanup_attachment_files(session, tx_ids_to_cleanup)
 
-    if paired_tx:
+    for paired_tx in paired_txs:
         await session.delete(paired_tx)
-    await session.delete(transaction)
+    for row in rows:
+        await session.delete(row)
     await session.commit()
     return True
+
+
+async def bulk_delete_transactions(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    transaction_ids: list[uuid.UUID],
+) -> int:
+    from app.services.attachment_service import cleanup_attachment_files
+
+    result = await session.execute(
+        select(Transaction.id, Transaction.transfer_pair_id)
+        .where(
+            Transaction.id.in_(transaction_ids),
+            Transaction.workspace_id == workspace_id,
+        )
+    )
+    transactions = result.all()
+    if not transactions:
+        return 0
+
+    valid_ids = [row[0] for row in transactions]
+    transfer_pair_ids = {row[1] for row in transactions if row[1]}
+
+    paired_ids = []
+    if transfer_pair_ids:
+        paired_result = await session.execute(
+            select(Transaction.id)
+            .where(
+                Transaction.transfer_pair_id.in_(transfer_pair_ids),
+                Transaction.id.notin_(valid_ids),
+                Transaction.workspace_id == workspace_id,
+            )
+        )
+        paired_ids = [row[0] for row in paired_result.all()]
+
+    # Storage files must go before the rows: the DB cascade removes the
+    # attachment records, and after that their storage keys are unreachable.
+    await cleanup_attachment_files(session, valid_ids + paired_ids)
+
+    await session.execute(
+        delete(Transaction).where(Transaction.id.in_(valid_ids + paired_ids))
+    )
+    await session.commit()
+    return len(valid_ids)

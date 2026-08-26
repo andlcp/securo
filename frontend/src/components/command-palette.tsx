@@ -3,6 +3,9 @@ import { Command } from 'cmdk'
 import { Dialog as DialogPrimitive } from 'radix-ui'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
+import { useDisplayLocale } from '@/hooks/use-display-locale'
+import { useWorkspace } from '@/contexts/workspace-context'
+import type { ModuleId } from '@/lib/modules'
 import { useQuery } from '@tanstack/react-query'
 import {
   Search,
@@ -32,7 +35,7 @@ import {
 } from 'lucide-react'
 
 import { search as searchApi, type SearchHit, type SearchHitType } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, normalizeText } from '@/lib/utils'
 
 // ---------------------------------------------------------------------------
 // Static actions & navigation registry
@@ -45,21 +48,25 @@ type StaticItem = {
   path?: string
   onSelect?: (nav: (to: string) => void) => void
   keywords?: string[]
+  /** Gate this destination on the workspace showing that module.
+   *  Omitted for surfaces outside the module concept (the dashboard). */
+  module?: ModuleId
 }
 
 const NAV_ITEMS: StaticItem[] = [
   { id: 'nav-dashboard', labelKey: 'nav.dashboard', icon: LayoutDashboard, path: '/', keywords: ['home', 'inicio', 'início'] },
-  { id: 'nav-transactions', labelKey: 'nav.transactions', icon: ArrowLeftRight, path: '/transactions', keywords: ['tx', 'transacoes', 'transações'] },
-  { id: 'nav-accounts', labelKey: 'nav.accounts', icon: Building2, path: '/accounts', keywords: ['contas'] },
-  { id: 'nav-import', labelKey: 'nav.import', icon: Upload, path: '/import', keywords: ['csv', 'ofx', 'importar'] },
-  { id: 'nav-reports', labelKey: 'nav.reports', icon: BarChart3, path: '/reports', keywords: ['relatorios', 'relatórios', 'charts'] },
-  { id: 'nav-assets', labelKey: 'nav.assets', icon: Landmark, path: '/assets', keywords: ['patrimonio', 'patrimônio'] },
-  { id: 'nav-budgets', labelKey: 'nav.budgets', icon: PiggyBank, path: '/budgets', keywords: ['orcamentos', 'orçamentos'] },
-  { id: 'nav-goals', labelKey: 'nav.goals', icon: Target, path: '/goals', keywords: ['metas'] },
-  { id: 'nav-recurring', labelKey: 'nav.recurring', icon: Repeat, path: '/recurring', keywords: ['recorrentes'] },
-  { id: 'nav-categories', labelKey: 'nav.categories', icon: Tag, path: '/categories', keywords: ['categorias'] },
-  { id: 'nav-payees', labelKey: 'nav.payees', icon: Users, path: '/payees', keywords: ['beneficiarios', 'beneficiários'] },
-  { id: 'nav-rules', labelKey: 'nav.rules', icon: SlidersHorizontal, path: '/rules', keywords: ['regras'] },
+  { id: 'nav-transactions', labelKey: 'nav.transactions', icon: ArrowLeftRight, path: '/transactions', keywords: ['tx', 'transacoes', 'transações'], module: 'transactions' },
+  { id: 'nav-invoices', labelKey: 'nav.invoices', icon: Receipt, path: '/invoices', keywords: ['cobrancas', 'cobranças', 'faturas', 'clientes', 'recebimentos'], module: 'invoices' },
+  { id: 'nav-accounts', labelKey: 'nav.accounts', icon: Building2, path: '/accounts', keywords: ['contas'], module: 'accounts' },
+  { id: 'nav-import', labelKey: 'nav.import', icon: Upload, path: '/import', keywords: ['csv', 'ofx', 'importar'], module: 'import' },
+  { id: 'nav-reports', labelKey: 'nav.reports', icon: BarChart3, path: '/reports', keywords: ['relatorios', 'relatórios', 'charts'], module: 'reports' },
+  { id: 'nav-assets', labelKey: 'nav.assets', icon: Landmark, path: '/assets', keywords: ['patrimonio', 'patrimônio'], module: 'assets' },
+  { id: 'nav-budgets', labelKey: 'nav.budgets', icon: PiggyBank, path: '/budgets', keywords: ['orcamentos', 'orçamentos'], module: 'budgets' },
+  { id: 'nav-goals', labelKey: 'nav.goals', icon: Target, path: '/goals', keywords: ['metas'], module: 'goals' },
+  { id: 'nav-recurring', labelKey: 'nav.recurring', icon: Repeat, path: '/recurring', keywords: ['recorrentes'], module: 'recurring' },
+  { id: 'nav-categories', labelKey: 'nav.categories', icon: Tag, path: '/categories', keywords: ['categorias'], module: 'categories' },
+  { id: 'nav-payees', labelKey: 'nav.payees', icon: Users, path: '/payees', keywords: ['beneficiarios', 'beneficiários'], module: 'payees' },
+  { id: 'nav-rules', labelKey: 'nav.rules', icon: SlidersHorizontal, path: '/rules', keywords: ['regras'], module: 'rules' },
 ]
 
 const QUICK_ACTIONS: StaticItem[] = [
@@ -236,11 +243,6 @@ function formatHitDate(iso: string | null, locale: string): string | null {
   }
 }
 
-// Accent- and case-insensitive substring match so that typing "regras"
-// matches "Regras", "orcamento" matches "Orçamentos", etc.
-function normalizeText(s: string): string {
-  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-}
 
 function matchesQuery(query: string, haystacks: Array<string | undefined>): boolean {
   const q = normalizeText(query.trim())
@@ -258,13 +260,14 @@ export interface CommandPaletteProps {
 }
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const navigate = useNavigate()
+  const { hasModule } = useWorkspace()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
   const recents = useSyncExternalStore(subscribeRecents, getRecentSnapshot, getRecentSnapshot)
   const inputRef = useRef<HTMLInputElement>(null)
-  const locale = i18n.language === 'en' ? 'en-US' : i18n.language
+  const locale = useDisplayLocale()
 
   // Focus the input whenever the palette opens. The cmdk Command is re-keyed
   // on `open` so results and selection reset automatically. We reset our own
@@ -315,11 +318,14 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   // Client-side filtered nav + quick actions so typing "regras" or "nova"
   // narrows the in-app items alongside the backend entity search.
   const filteredNavItems = useMemo(() => {
-    if (debounced.trim().length === 0) return NAV_ITEMS
-    return NAV_ITEMS.filter((n) =>
+    // Same question the sidebar asks, so the palette can't offer a
+    // destination the workspace doesn't show.
+    const available = NAV_ITEMS.filter((n) => !n.module || hasModule(n.module))
+    if (debounced.trim().length === 0) return available
+    return available.filter((n) =>
       matchesQuery(debounced, [t(n.labelKey), n.path, ...(n.keywords ?? [])])
     )
-  }, [debounced, t])
+  }, [debounced, t, hasModule])
 
   const filteredQuickActions = useMemo(() => {
     if (debounced.trim().length === 0) return QUICK_ACTIONS

@@ -22,9 +22,60 @@ export interface AdminUserList {
   total: number
 }
 
+export interface Passkey {
+  id: string
+  name: string
+  transports: string[] | null
+  aaguid: string | null
+  device_type: string | null
+  backed_up: boolean | null
+  created_at: string
+  last_used_at: string | null
+}
+
+export interface PasskeyOptionsResponse {
+  challenge_id: string
+  options: Record<string, unknown>
+}
+
 export interface AppSetting {
   key: string
   value: string
+}
+
+export type WorkspaceRole = 'owner' | 'editor' | 'viewer' | 'manager'
+
+export type WorkspaceKind = 'personal' | 'business'
+
+export interface Workspace {
+  id: string
+  name: string
+  // Widened on purpose: a workspace stored before the current kind list
+  // still has to render. Writes are narrowed to WorkspaceKind.
+  kind: string
+  is_archived: boolean
+  default_currency: string
+  locale: string | null
+  /** Where the workspace files. Selects the fiscal document pack; never the
+   *  interface language. */
+  tax_jurisdiction: string | null
+  icon: string | null
+  color: string | null
+  created_at: string
+  created_by_user_id: string | null
+  managed_by_user_id: string | null
+  role: WorkspaceRole | null
+  /** Modules this workspace shows. Resolved server-side; see lib/modules.ts. */
+  enabled_modules: string[]
+}
+
+export interface WorkspaceMember {
+  id: string
+  user_id: string
+  email: string
+  display_name: string | null
+  role: WorkspaceRole
+  joined_at: string
 }
 
 export interface UserPreferences {
@@ -44,8 +95,14 @@ export interface Category {
   icon: string
   color: string
   is_system: boolean
+  is_hidden: boolean
   treat_as_transfer: boolean
   is_ignored: boolean
+}
+
+/** Active rules that assign a category, used when retiring one. */
+export interface CategoryRuleUsage {
+  rules: { id: string; name: string }[]
 }
 
 export interface CategoryGroup {
@@ -56,6 +113,7 @@ export interface CategoryGroup {
   color: string
   position: number
   is_system: boolean
+  is_hidden: boolean
   categories: Category[]
 }
 
@@ -65,6 +123,7 @@ export interface BankConnection {
   provider: string
   institution_name: string
   display_name: string | null
+  logo_url: string | null
   external_id: string
   status: string
   settings: ConnectionSettings | null
@@ -75,6 +134,7 @@ export interface BankConnection {
 export interface ConnectionSettings {
   payee_source?: 'auto' | 'merchant' | 'payment_data' | 'description' | 'none'
   import_pending?: boolean
+  sync_assets?: boolean
 }
 
 export interface Account {
@@ -84,6 +144,13 @@ export interface Account {
   external_id: string | null
   name: string
   display_name: string | null
+  // Last 4 chars of the bank's identifier for the account, when the provider
+  // exposes one. Tells apart accounts a bank reports under an identical name.
+  masked_number: string | null
+  // Denormalized bank identity from the linked connection (null for manual
+  // accounts). Used to render the institution logo next to the account.
+  institution_name: string | null
+  institution_logo_url: string | null
   type: string
   balance: number
   current_balance: number
@@ -113,14 +180,33 @@ export interface CreditCardBill {
   minimum_payment: number | null
 }
 
+export interface Collection {
+  id: string
+  user_id: string
+  name: string
+  icon: string
+  color: string
+  position: number
+  account_ids: string[]
+  account_count: number
+  wallet_ids: string[]
+  wallet_count: number
+}
+
 export interface AccountSummary {
   account_id: string
   current_balance: number
+  opening_balance: number
   monthly_income: number
   monthly_expenses: number
   current_balance_primary: number | null
+  opening_balance_primary: number | null
   monthly_income_primary: number | null
   monthly_expenses_primary: number | null
+  projected_income?: number
+  projected_expenses?: number
+  projected_income_primary?: number | null
+  projected_expenses_primary?: number | null
 }
 
 export interface Transaction {
@@ -131,6 +217,7 @@ export interface Transaction {
   category: Category | null
   external_id: string | null
   description: string
+  original_description: string | null
   amount: number
   currency: string
   date: string
@@ -150,12 +237,15 @@ export interface Transaction {
   total_installments: number | null
   installment_total_amount: number | null
   installment_purchase_date: string | null
+  installment_series_id: string | null
   bill_id: string | null
   // Manual override for which credit-card bill cycle this tx belongs to
   // (issue #92). Empty / null = use auto bucketing (Pluggy bill_id when
   // available, cycle math otherwise). Setting it forces the tx into the
   // bill whose due_date matches.
   effective_bill_date: string | null
+  // The recurring bill this transaction fulfills, if any (issue #116).
+  recurring_transaction_id?: string | null
   splits: TransactionSplit[]
   // Shared-transaction view fields. Set per-request when the viewer
   // is a linked split member but not the owner. Render `viewer_share`
@@ -169,6 +259,38 @@ export interface Transaction {
   parent_owner_name?: string | null
   // Flag to exclude this transaction from reports and dashboard aggregations
   is_ignored: boolean
+  virtual?: boolean
+}
+
+// Scope for installment-series edits/deletes: "this" (default) only touches
+// the target row, "future" touches it plus later installments, "all" touches
+// the whole series. Ignored server-side for non-installment transactions.
+export type TransactionApplyScope = 'this' | 'future' | 'all'
+
+// Payload for POST /api/transactions/installments. `base` is
+// the amount repeated as-is; the backend fans it out into `installments`
+// equal parcels sharing the installment fingerprint and stores
+// installment_total_amount = base.amount * installments.
+export interface InstallmentSeriesInput {
+  base: {
+    account_id: string
+    category_id?: string | null
+    payee_id?: string | null
+    description: string
+    amount: number
+    date: string
+    type: 'debit' | 'credit'
+    currency?: string
+    notes?: string | null
+    status?: 'posted' | 'pending'
+    amount_primary?: number | null
+    fx_rate_used?: number | null
+    effective_bill_date?: string | null
+    splits?: TransactionSplitsInput | null
+  }
+  installments: number
+  first_installment_status?: 'posted' | 'pending'
+  frequency?: 'monthly' | 'quarterly' | 'weekly' | 'yearly'
 }
 
 export type ShareType = 'equal' | 'exact' | 'percent'
@@ -194,6 +316,14 @@ export interface TransactionSplitInput {
 export interface TransactionSplitsInput {
   share_type: ShareType
   splits: TransactionSplitInput[]
+}
+
+// Payload the transaction dialog sends on save. `splits` is the normalized
+// TransactionSplitsInput the split section produces, not the
+// TransactionSplit[] rows the API returns, so the edit payload type reflects
+// the form's actual shape.
+export type TransactionEditPayload = Omit<Partial<Transaction>, 'splits'> & {
+  splits?: TransactionSplitsInput | null
 }
 
 export type GroupKind = 'social' | 'cost_center' | 'project' | 'client' | 'other'
@@ -254,15 +384,40 @@ export interface GroupBalances {
   lines: GroupBalanceLine[]
 }
 
+/** A fiscal document belonging to a payee. `kind` mirrors the backend's
+ *  closed TaxIdKind; the value arrives normalised. */
+export interface PayeeTaxId {
+  kind: string
+  value: string
+}
+
 export interface Payee {
   id: string
   user_id: string
   name: string
-  type: 'merchant' | 'person' | 'company'
+  /** Legal nature, or null when unknown — the normal state for a row sync created. */
+  type: 'person' | 'company' | null
+  /** Where the row came from. Server-set at creation and never editable. */
+  source: 'manual' | 'sync' | 'import'
   is_favorite: boolean
   notes: string | null
+  email: string | null
+  phone: string | null
+  address: string | null
+  website: string | null
+  tax_ids: PayeeTaxId[]
   created_at: string
   transaction_count: number
+}
+
+/** One document kind as the active workspace's jurisdiction describes it.
+ *  `offered` marks the ones its pack asks for; the rest stay selectable,
+ *  because a counterparty's country is not the workspace's. */
+export interface TaxIdKindOption {
+  kind: string
+  label_key: string
+  mask: string | null
+  offered: boolean
 }
 
 export interface PayeeSummary {
@@ -280,6 +435,20 @@ export interface RuleCondition {
   value: string | number
 }
 
+/** A nested group of conditions joined by its own operator.
+ *
+ * Groups let a rule mix AND and OR — `type is debit AND (contains UBER OR
+ * contains 99POP)`. They hold leaf conditions only, capping rule depth at the
+ * two levels the engine evaluates and the editor exposes.
+ */
+export interface RuleConditionGroup {
+  op: 'and' | 'or'
+  conditions: RuleCondition[]
+}
+
+/** An entry of a rule's condition list: a leaf condition or one group. */
+export type RuleConditionNode = RuleCondition | RuleConditionGroup
+
 export interface RuleAction {
   op: string
   value: string
@@ -290,17 +459,42 @@ export interface Rule {
   user_id: string
   name: string
   conditions_op: 'and' | 'or'
-  conditions: RuleCondition[]
+  conditions: RuleConditionNode[]
+  actions: RuleAction[]
+  priority: number
+  is_active: boolean
+  apply_to_existing?: boolean
+  overwrite_existing_categories?: boolean
+}
+
+export interface RuleExportItem {
+  name: string
+  conditions_op: 'and' | 'or'
+  conditions: RuleConditionNode[]
   actions: RuleAction[]
   priority: number
   is_active: boolean
 }
 
+export interface RuleExportPayload {
+  format: 'securo-categorization-rules'
+  version: number
+  rules: RuleExportItem[]
+}
+
+export interface RuleImportResponse {
+  imported: number
+  skipped: number
+  overwritten: number
+}
+
 export interface ImportLog {
   id: string
   user_id: string
-  account_id: string
+  /** Null for an order import, which lands on holdings rather than an account. */
+  account_id: string | null
   account_name: string | null
+  entity: 'transactions' | 'asset_orders'
   filename: string
   format: string
   transaction_count: number
@@ -324,6 +518,7 @@ export interface ImportPreviewTransaction {
   excluded?: boolean
   category_id?: string | null
   force_uncategorized?: boolean
+  notes?: string | null
 }
 
 export interface ImportReviewTransaction extends ImportPreviewTransaction {
@@ -341,11 +536,13 @@ export interface RecurringTransaction {
   amount: number
   currency: string
   type: 'debit' | 'credit'
-  frequency: 'monthly' | 'weekly' | 'yearly'
+  frequency: 'monthly' | 'quarterly' | 'weekly' | 'yearly'
+  weekend_adjustment: 'none' | 'previous_friday' | 'next_monday'
   day_of_month: number | null
   start_date: string
   end_date: string | null
   is_active: boolean
+  auto_generate: boolean
   next_occurrence: string
   amount_primary: number | null
   fx_rate_used: number | null
@@ -353,6 +550,7 @@ export interface RecurringTransaction {
 
 export interface ProjectedTransaction {
   recurring_id: string
+  account_id: string | null
   description: string
   amount: number
   amount_primary: number | null
@@ -363,17 +561,74 @@ export interface ProjectedTransaction {
   category_name: string | null
   category_icon: string | null
   category_color: string | null
+}
+
+export interface TransactionCalendarItem {
+  kind: 'actual' | 'projected'
+  id: string | null
+  recurring_id: string | null
+  date: string
+  description: string
+  amount: number
+  amount_primary: number | null
+  currency: string
+  type: 'debit' | 'credit'
+  account_id: string | null
+  account_name: string | null
+  category_id: string | null
+  category_name: string | null
+  category_icon: string | null
+  category_color: string | null
+  status: string | null
+  source: string | null
+  transfer_pair_id: string | null
+  is_transfer: boolean
   is_ignored: boolean
+}
+
+export interface TransactionCalendarDay {
+  date: string
+  in_month: boolean
+  ending_balance: number
+  // Combined totals kept for backwards compatibility.
+  income: number
+  expense: number
+  transfer_net: number
+  actual_income: number
+  actual_expense: number
+  actual_transfer_net: number
+  projected_income: number
+  projected_expense: number
+  projected_transfer_net: number
+  actual_count: number
+  projected_count: number
+  has_income: boolean
+  has_expense: boolean
+  has_transfer: boolean
+  items: TransactionCalendarItem[]
+}
+
+export interface TransactionCalendarResponse {
+  month: string
+  currency: string
+  account_ids: string[] | null
+  days: TransactionCalendarDay[]
 }
 
 export interface DashboardSummary {
   total_balance: Record<string, number>
   total_balance_primary: number
+  projected_balance: Record<string, number>
+  projected_balance_primary: number
   balance_date: string
   monthly_income: number
   monthly_expenses: number
   monthly_income_primary: number
   monthly_expenses_primary: number
+  projected_income?: number
+  projected_expenses?: number
+  projected_income_primary?: number
+  projected_expenses_primary?: number
   accounts_count: number
   pending_categorization: number
   pending_categorization_amount: number
@@ -432,7 +687,9 @@ export interface BudgetVsActual {
   group_name: string | null
   budget_amount: number | null
   actual_amount: number
+  projected_amount: number
   prev_month_amount: number
+  projected_prev_month_amount: number
   percentage_used: number | null
   is_recurring: boolean
 }
@@ -478,6 +735,13 @@ export interface Asset {
   rf_on_curve: boolean
   invested_total: number | null
   rent_pct: number | null
+  // Ledger-derived (issue #235): weighted-average cost per unit (preço médio),
+  // cost basis of held units, cumulative realized gain, and whether the holding
+  // is driven by the transactions ledger.
+  average_price: number | null
+  total_invested: number | null
+  realized_gain: number | null
+  transaction_count: number
 }
 
 /** Explicit asset-class taxonomy used for grouping/filtering. */
@@ -509,6 +773,54 @@ export const ASSET_CLASS_OPTIONS: { value: AssetClass; label: string }[] = [
   { value: 'CRIPTO', label: ASSET_CLASS_LABELS.CRIPTO },
   { value: 'OUTRO', label: ASSET_CLASS_LABELS.OUTRO },
 ]
+
+/** One order read from a broker CSV, before it reaches a holding. */
+export interface AssetOrderImport {
+  row: number
+  ticker: string
+  date: string
+  kind: 'buy' | 'sell'
+  quantity: number
+  price: number
+  fee: number
+  currency: string | null
+  name: string | null
+  notes: string | null
+  external_id: string | null
+}
+
+export interface AssetImportRowError {
+  row: number
+  reason: string
+  ticker: string | null
+  detail: string | null
+}
+
+export interface AssetImportWarning {
+  ticker: string
+  reason: string
+  wallet: string | null
+}
+
+export interface AssetImportPreview {
+  orders: AssetOrderImport[]
+  errors: AssetImportRowError[]
+  warnings: AssetImportWarning[]
+  csv_columns: string[]
+  parse_error: string | null
+  holdings_created: number
+  holdings_matched: number
+  skipped: number
+}
+
+export interface AssetImportResult {
+  imported: number
+  skipped: number
+  holdings_created: number
+  holdings_matched: number
+  errors: AssetImportRowError[]
+  warnings: AssetImportWarning[]
+}
 
 export interface AssetTransaction {
   id: string
@@ -573,9 +885,10 @@ export interface Goal {
   target_amount_primary: number | null
   current_amount_primary: number | null
   target_date: string | null
-  tracking_type: 'manual' | 'account' | 'asset' | 'net_worth'
+  tracking_type: 'manual' | 'account' | 'asset' | 'asset_group' | 'net_worth'
   account_id: string | null
   asset_id: string | null
+  asset_group_id: string | null
   status: 'active' | 'completed' | 'paused' | 'archived'
   icon: string | null
   color: string | null
@@ -588,6 +901,7 @@ export interface Goal {
   on_track: 'ahead' | 'on_track' | 'behind' | 'overdue' | 'achieved' | null
   account_name: string | null
   asset_name: string | null
+  asset_group_name: string | null
 }
 
 export interface GoalSummary {
@@ -618,6 +932,9 @@ export interface TransactionsSummary {
   income: number
   expense: number
   net: number
+  // Absolute total of everything excluded from income/expense for the same
+  // rows — transfers, treat_as_transfer categories and ignored items (#242).
+  excluded: number
   currency: string
 }
 
@@ -644,6 +961,8 @@ export interface ReportDataPoint {
   date: string
   value: number
   breakdowns: Record<string, number>
+  change: number | null
+  composition?: ReportCompositionItem[]
 }
 
 export interface ReportMeta {
@@ -651,6 +970,9 @@ export interface ReportMeta {
   series_keys: string[]
   currency: string
   interval: string
+  forecast_start_date?: string | null
+  baseline_active?: boolean
+  baseline_lookback_days?: number | null
 }
 
 export interface ReportCompositionItem {

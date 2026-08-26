@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import event, inspect, select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Mapper, Session
 
 from app.models.account import Account
@@ -32,7 +32,7 @@ from app.models.goal import Goal
 from app.models.group import Group, GroupMember
 from app.models.group_settlement import GroupSettlement
 from app.models.import_log import ImportLog
-from app.models.payee import Payee, PayeeMapping
+from app.models.payee import Payee, PayeeMapping, PayeeTaxId
 from app.models.portfolio_daily_snapshot import PortfolioDailySnapshot
 from app.models.portfolio_snapshot import PortfolioSnapshot
 from app.models.recurring_transaction import RecurringTransaction
@@ -61,6 +61,7 @@ _AUTOSTAMP_MODELS = (
     ImportLog,
     Payee,
     PayeeMapping,
+    PayeeTaxId,
     PortfolioDailySnapshot,
     PortfolioSnapshot,
     RecurringTransaction,
@@ -181,15 +182,11 @@ async def resolve_workspace_id(session, user_id: uuid.UUID) -> uuid.UUID | None:
     """Async twin of `_resolve_workspace_for_user`, for bulk-insert sites.
 
     Mapper events don't fire for `pg_insert(...)` bulk upserts, so the
-    handful of services that write that way have to stamp `workspace_id`
-    themselves. They call this.
+    handful of fork services that write that way have to stamp
+    `workspace_id` themselves. They call this.
 
     Deliberately uncached: bulk writes are batch operations (imports,
     snapshot rebuilds), so one indexed lookup per batch is noise.
-
-    Step 2 of the upstream merge replaces this with
-    `workspace_service.get_default_workspace`, which also handles the
-    managed-workspace fallback introduced in upstream's migration 053.
     """
     result = await session.execute(
         select(Workspace.id)
@@ -204,26 +201,9 @@ async def resolve_workspace_id(session, user_id: uuid.UUID) -> uuid.UUID | None:
     row = result.first()
     return row[0] if row else None
 
-def _has_workspace_column(model) -> bool:
-    """True when the model actually maps a `workspace_id` column.
-
-    The fork adopted workspaces in migration 062, which covers the
-    financial tables but not the agents ones (upstream does those in
-    their own 054, still unmerged). Without this guard the listener
-    would set an unmapped attribute on Agent / Conversation -- silently
-    doing nothing, which is worse than not registering at all.
-    """
-    try:
-        return "workspace_id" in inspect(model).columns
-    except Exception:
-        return False
-
-
 def install_workspace_autostamp() -> None:
     """Idempotent: register the listener on each model exactly once."""
     for model in _AUTOSTAMP_MODELS + _register_agent_models():
-        if not _has_workspace_column(model):
-            continue
         if not event.contains(model, "before_insert", _before_insert):
             event.listen(model, "before_insert", _before_insert)
 

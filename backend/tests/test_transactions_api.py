@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.account import Account
 from app.models.transaction import Transaction
 from app.models.category import Category
+from app.models.payee import Payee
 from app.models.user import User
 
 
@@ -413,18 +414,26 @@ async def test_create_transaction_invalid_account(
 
 @pytest.mark.asyncio
 async def test_update_transaction(
-    client: AsyncClient, auth_headers, test_transactions: list[Transaction],
+    client: AsyncClient, auth_headers, session: AsyncSession, test_workspace,
+    test_user: User, test_transactions: list[Transaction],
     test_categories: list[Category],
 ):
+    payee = Payee(user_id=test_user.id, workspace_id=test_workspace.id, name="Netflix")
+    session.add(payee)
+    await session.commit()
+
     txn_id = str(test_transactions[4].id)  # NETFLIX, no category
     response = await client.patch(
         f"/api/transactions/{txn_id}",
         headers=auth_headers,
-        json={"category_id": str(test_categories[0].id)},
+        json={"category_id": str(test_categories[0].id), "payee_id": str(payee.id)},
     )
     assert response.status_code == 200
     data = response.json()
     assert data["category_id"] == str(test_categories[0].id)
+    assert data["category"]["id"] == str(test_categories[0].id)
+    assert data["payee_id"] == str(payee.id)
+    assert data["payee_name"] == "Netflix"
 
 
 @pytest.mark.asyncio
@@ -613,6 +622,39 @@ async def test_list_transactions_exclude_transfers(
 
 
 @pytest.mark.asyncio
+async def test_list_transactions_user_pnl_only(
+    client: AsyncClient,
+    auth_headers,
+    session: AsyncSession,
+    test_transactions_with_transfers,
+):
+    """user_pnl_only returns only rows that count toward dashboard/user P&L."""
+    for txn in test_transactions_with_transfers:
+        if txn.description == "GROCERIES":
+            txn.is_ignored = True
+    settlement = Transaction(
+        id=uuid.uuid4(),
+        user_id=test_transactions_with_transfers[0].user_id,
+        account_id=test_transactions_with_transfers[0].account_id,
+        description="Settlement credit",
+        amount=Decimal("75.00"),
+        date=date.today(),
+        type="credit",
+        source="settlement",
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(settlement)
+    await session.commit()
+
+    response = await client.get("/api/transactions?user_pnl_only=true", headers=auth_headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert [item["description"] for item in data["items"]] == ["SALARY"]
+
+
+@pytest.mark.asyncio
 async def test_exclude_transfers_false_includes_all(
     client: AsyncClient, auth_headers, test_transactions_with_transfers,
 ):
@@ -756,3 +798,73 @@ async def test_list_transactions_summary_respects_filters(
     assert summary["income"] == pytest.approx(0.0)
     assert summary["expense"] == pytest.approx(25.5)
     assert summary["net"] == pytest.approx(-25.5)
+
+
+@pytest.mark.asyncio
+async def test_list_transactions_includes_ignored_by_default(
+    client: AsyncClient, auth_headers, session: AsyncSession, test_transactions: list[Transaction],
+):
+    """The flag has to be asked for: an ignored row is still part of the ledger."""
+    test_transactions[0].is_ignored = True
+    await session.commit()
+
+    response = await client.get("/api/transactions", headers=auth_headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == len(test_transactions)
+    assert test_transactions[0].description in [item["description"] for item in data["items"]]
+
+
+@pytest.mark.asyncio
+async def test_list_transactions_exclude_ignored(
+    client: AsyncClient, auth_headers, session: AsyncSession, test_transactions: list[Transaction],
+):
+    test_transactions[0].is_ignored = True
+    await session.commit()
+
+    response = await client.get("/api/transactions?exclude_ignored=true", headers=auth_headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    descriptions = [item["description"] for item in data["items"]]
+    assert test_transactions[0].description not in descriptions
+    # `total` drives the pager, so it has to shrink with the rows.
+    assert data["total"] == len(test_transactions) - 1
+
+
+@pytest.mark.asyncio
+async def test_list_transactions_exclude_ignored_drops_rows_in_an_ignored_category(
+    client: AsyncClient,
+    auth_headers,
+    session: AsyncSession,
+    test_transactions: list[Transaction],
+    test_categories: list[Category],
+):
+    """The list badges a row as ignored when its category is, so hiding must
+    follow the badge rather than the column."""
+    test_categories[0].is_ignored = True
+    await session.commit()
+
+    in_ignored_category = [t.description for t in test_transactions if t.category_id == test_categories[0].id]
+    assert in_ignored_category, "fixture no longer has a transaction in this category"
+
+    response = await client.get("/api/transactions?exclude_ignored=true", headers=auth_headers)
+
+    descriptions = [item["description"] for item in response.json()["items"]]
+    for description in in_ignored_category:
+        assert description not in descriptions
+
+
+@pytest.mark.asyncio
+async def test_export_transactions_exclude_ignored(
+    client: AsyncClient, auth_headers, session: AsyncSession, test_transactions: list[Transaction],
+):
+    """The CSV is the list you are looking at, so it takes the same filter."""
+    test_transactions[0].is_ignored = True
+    await session.commit()
+
+    response = await client.get("/api/transactions/export?exclude_ignored=true", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert test_transactions[0].description not in response.text

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.app_settings import AppSetting
 from app.models.user import User
+from app.core.auth import get_jwt_strategy
 
 
 pytestmark = pytest.mark.asyncio
@@ -49,6 +50,47 @@ class TestAdminUserCRUD:
         assert data["email"] == "newuser@example.com"
         assert data["is_active"] is True
         assert data["is_superuser"] is False
+
+    async def test_create_user_forbidden_when_local_auth_disabled(
+        self,
+        client: AsyncClient,
+        test_superuser: User,
+        oidc_only_settings,
+    ):
+        token = await get_jwt_strategy().write_token(test_superuser)
+        response = await client.post(
+            "/api/admin/users",
+            json={"email": "newuser@example.com", "password": "password123"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "LOCAL_AUTH_DISABLED"
+
+    async def test_admin_password_update_forbidden_but_profile_update_allowed(
+        self,
+        client: AsyncClient,
+        test_superuser: User,
+        oidc_only_settings,
+    ):
+        headers = {
+            "Authorization": f"Bearer {await get_jwt_strategy().write_token(test_superuser)}"
+        }
+        password_response = await client.patch(
+            f"/api/admin/users/{test_superuser.id}",
+            json={"password": "newpassword456"},
+            headers=headers,
+        )
+        profile_response = await client.patch(
+            f"/api/admin/users/{test_superuser.id}",
+            json={"preferences": {"language": "de"}},
+            headers=headers,
+        )
+
+        assert password_response.status_code == 403
+        assert password_response.json()["detail"] == "LOCAL_AUTH_DISABLED"
+        assert profile_response.status_code == 200
+        assert profile_response.json()["preferences"]["language"] == "de"
 
     async def test_create_user_seeds_defaults(
         self, client: AsyncClient, admin_auth_headers: dict, test_superuser: User
@@ -469,3 +511,51 @@ class TestUseProviderCategoriesToggle:
             headers=auth_headers,
         )
         assert response.status_code == 403
+
+
+class TestThemeSettings:
+    """Test theme color settings and the public default-colors endpoint."""
+
+    async def test_get_default_colors_empty(self, client: AsyncClient, clean_db):
+        response = await client.get("/api/admin/default-colors")
+        assert response.status_code == 200
+        assert response.json() == {"light": None, "dark": None}
+
+    async def test_get_default_colors_populated(self, client: AsyncClient, session: AsyncSession, clean_db):
+        session.add_all([
+            AppSetting(key="theme_color_light", value="#FFFFFF"),
+            AppSetting(key="theme_color_dark", value="#000000"),
+        ])
+        await session.commit()
+
+        response = await client.get("/api/admin/default-colors")
+        assert response.status_code == 200
+        assert response.json() == {"light": "#FFFFFF", "dark": "#000000"}
+
+    async def test_update_theme_color_valid(self, client: AsyncClient, admin_auth_headers: dict, test_superuser: User):
+        response = await client.patch(
+            "/api/admin/settings/theme_color_light",
+            json={"value": "#6366F1"},
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["value"] == "#6366F1"
+
+    @pytest.mark.parametrize("invalid_color", [
+        "6366F1",      # missing #
+        "#6366F",       # too short
+        "#6366F11",     # too long
+        "#GGGGGG",      # invalid hex chars
+        "red",          # named color
+        "#123",         # 3-digit hex (not allowed by regex)
+    ])
+    async def test_update_theme_color_invalid(
+        self, client: AsyncClient, admin_auth_headers: dict, test_superuser: User, invalid_color: str
+    ):
+        response = await client.patch(
+            "/api/admin/settings/theme_color_light",
+            json={"value": invalid_color},
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 400
+        assert "invalid hex color code" in response.json()["detail"].lower()

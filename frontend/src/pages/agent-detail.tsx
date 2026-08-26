@@ -12,12 +12,14 @@ import { AgentFormDialog } from '@/components/agents/agent-form-dialog'
 import { ChatPanel } from '@/components/agents/chat-panel'
 import { KnowledgeSection } from '@/components/agents/knowledge-section'
 import { ToolsSection } from '@/components/agents/tools-section'
+import { useWorkspace } from '@/contexts/workspace-context'
 
 export default function AgentDetailPage() {
   const { t } = useTranslation()
   const { id = '' } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { canWrite } = useWorkspace()
   const [editOpen, setEditOpen] = useState(false)
   const [conversationId, setConversationId] = useState<string | null>(null)
   // Increments on every sidebar click so the chat input refocuses even
@@ -75,7 +77,7 @@ export default function AgentDetailPage() {
     // overflow-hidden ensures only the messages div inside ChatPanel scrolls.
     <div className="flex flex-col h-[calc(100dvh-6.5rem)] lg:h-[calc(100dvh-3rem)] overflow-hidden">
       <div className="border-b px-4 py-3 flex items-center gap-3">
-        <Button size="icon" variant="ghost" onClick={() => navigate('/agents')}>
+        <Button size="icon" variant="ghost" onClick={() => navigate('/agents')} title={t('common.back')} aria-label={t('common.back')}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div
@@ -90,20 +92,24 @@ export default function AgentDetailPage() {
             {providerLabel} · {modelLabel} · temp {agent.temperature}
           </div>
         </div>
-        <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
-          <Edit2 className="h-3.5 w-3.5 mr-1.5" /> {t('agents.detail.edit')}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            if (confirm(t('agents.detail.deleteConfirm'))) {
-              removeMut.mutate()
-            }
-          }}
-        >
-          <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('agents.detail.delete')}
-        </Button>
+        {canWrite && (
+          <>
+            <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
+              <Edit2 className="h-3.5 w-3.5 mr-1.5" /> {t('agents.detail.edit')}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                if (confirm(t('agents.detail.deleteConfirm'))) {
+                  removeMut.mutate()
+                }
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5 mr-1.5" /> {t('agents.detail.delete')}
+            </Button>
+          </>
+        )}
       </div>
 
       <Tabs defaultValue="chat" className="flex-1 flex flex-col min-h-0">

@@ -7,7 +7,7 @@ transaction immediately moves the chart and the asset's holdings.
 
 import logging
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -236,3 +236,158 @@ async def delete_all_for_user(session: AsyncSession,
     await session.commit()
     invalidate_ts_cache(user_id)
     return result.rowcount or 0
+
+
+# ---------------------------------------------------------------------------
+# Posição derivada do histórico (vindo do upstream, ensinada aos nossos tipos)
+# ---------------------------------------------------------------------------
+# O upstream deriva unidades, preço médio e ganho realizado relendo o
+# histórico. O código deles só conhece dois eventos, `buy` e `sell`, porque
+# é só isso que o histórico deles tem.
+#
+# O nosso tem dez. Rodar a versão original aqui zeraria posição: as 256
+# cotas do desdobramento da SBSP3 e as 4 da bonificação da RENT4 entram
+# como DEPOSIT, que ele ignoraria — a SBSP3 cairia de 320 para 64 e a RENT4
+# para zero, sem erro nenhum na tela.
+
+def _d(value) -> Decimal:
+    return Decimal(str(value or 0))
+
+
+#: Eventos que movem quantidade de cotas.
+_TX_ADDS_UNITS = ("BUY", "DEPOSIT")
+_TX_REMOVES_UNITS = ("SELL",)
+#: Poeira de ponto flutuante, relativa ao que foi negociado. O BOVA11
+#: comprou 1000,000005 cotas e vendeu 999,999989: sobra 1,6e-5, e sem
+#: isto o reprocessamento trataria a posição como aberta e limparia a
+#: data de venda, ressuscitando um ativo encerrado em 2023.
+#:
+#: Relativa, e não absoluta, por causa de cripto: um limiar fixo grande o
+#: bastante para pegar 1,6e-5 de BOVA11 apagaria uma posição real de
+#: Bitcoin, que aqui é de 0,0746 unidade. Um milionésimo do volume
+#: comprado separa os dois casos com folga.
+_DUST_RATIO = Decimal("0.000001")
+
+
+def _recompute(transactions: list[AssetTransaction]) -> dict:
+    """Relê o histórico em ordem de data e devolve a posição derivada.
+
+    Preço médio pelo método da média ponderada (a convenção brasileira de
+    preço médio), não PEPS: uma venda realiza `(preço - médio) × qtd` e
+    reduz o custo proporcionalmente, deixando a média por cota intacta.
+
+    Como cada tipo entra:
+      BUY         cotas e custo sobem. O custo sai de `value` (caixa real
+                  do lançamento) quando existe, senão de qtd × preço.
+      DEPOSIT     cotas sobem, custo não: bonificação e desdobramento não
+                  custam dinheiro. É o caso que a versão original perdia.
+      SELL        realiza o ganho, reduz custo e cotas.
+      demais      DIVIDEND, JCP, RENDIMENTO, INTEREST, RESGATE, WITHDRAWAL
+                  e FEE são caixa, não cota. Ficam de fora daqui — quem os
+                  contabiliza é `_asset_to_read`, via `total_returned_net`.
+    """
+    txs = sorted(
+        transactions,
+        key=lambda t: (t.date, t.created_at or datetime.min.replace(tzinfo=timezone.utc)),
+    )
+    qty = Decimal("0")
+    cost = Decimal("0")
+    realized = Decimal("0")
+    bought = Decimal("0")
+    first_buy: Optional[date] = None
+    last_sell: Optional[date] = None
+
+    for tx in txs:
+        q = _d(tx.qty)
+        p = _d(tx.price)
+        fees = _d(tx.fees)
+        if tx.type in _TX_ADDS_UNITS:
+            if tx.type == "BUY":
+                # `value` é o caixa que saiu de fato, incluindo o que a
+                # corretora cobrou por dentro; qtd × preço é a aproximação.
+                cost += (_d(tx.value) if tx.value is not None else q * p) + fees
+                if first_buy is None:
+                    first_buy = tx.date
+            qty += q
+            bought += q
+        elif tx.type in _TX_REMOVES_UNITS:
+            avg = (cost / qty) if qty > 0 else Decimal("0")
+            sold = q if q <= qty else qty      # trava venda a descoberto
+            realized += (p - avg) * sold - fees
+            cost -= avg * sold
+            qty -= sold
+            last_sell = tx.date
+
+    if bought > 0 and abs(qty) < bought * _DUST_RATIO:
+        qty = Decimal("0")
+        cost = Decimal("0")
+
+    return {
+        "units": qty,
+        "average_price": (cost / qty) if qty > 0 else None,
+        "cost_basis": cost if qty > 0 else Decimal("0"),
+        "realized_gain": realized,
+        "first_buy": first_buy,
+        "last_sell": last_sell,
+    }
+
+
+async def _load_txs(session: AsyncSession, asset_id: uuid.UUID) -> list[AssetTransaction]:
+    result = await session.execute(
+        select(AssetTransaction).where(AssetTransaction.asset_id == asset_id)
+    )
+    return list(result.scalars().all())
+
+
+async def recompute_and_cache(session: AsyncSession, asset: Asset) -> None:
+    """Grava a posição derivada no ativo. Silencioso quando não se aplica.
+
+    Só age sobre ativos precificados a mercado. Renda fixa e empréstimos
+    guardam "unidades" que não vêm do histórico — CDB tem a quantidade de
+    títulos, empréstimo tem 1 — e o histórico deles carrega só `value`, sem
+    quantidade. Conferido contra os dados reais: dos 82 ativos a mercado, 81
+    já batem com o que o histórico reproduz; dos 35 manuais, 7 seriam
+    zerados (quatro CDBs, um Tesouro e dois empréstimos).
+    """
+    if asset.valuation_method != "market_price":
+        return
+
+    pos = _recompute(await _load_txs(session, asset.id))
+    if pos["units"] == 0 and not pos["first_buy"]:
+        # Ativo a mercado sem histórico de compra: as unidades vieram de
+        # outro caminho (cadastro manual, importação antiga). Não há o que
+        # derivar, e sobrescrever apagaria a posição.
+        return
+
+    asset.units = pos["units"]
+    asset.average_price = pos["average_price"]
+    asset.realized_gain = pos["realized_gain"].quantize(Decimal("0.01"))
+
+    # `purchase_price` e `purchase_date` NÃO são reescritos aqui, e isso é
+    # deliberado. No upstream `purchase_price` guarda o custo total das
+    # cotas em carteira; aqui ele sempre significou preço POR UNIDADE, e
+    # três lugares dependem disso — o "Onde Aportar"
+    # (asset_allocation_service faz purchase_price × units), o fallback de
+    # saldo do asset_group_service e o diálogo de edição do Patrimônio.
+    # Gravar o custo total aí inflaria o valor pelo número de cotas: o
+    # IVVB11, com 491 delas, apareceria 491 vezes maior na meta de
+    # alocação. O equivalente por unidade já está em `average_price`.
+
+    if pos["units"] > 0:
+        asset.sell_date = None
+        asset.sell_price = None
+    elif pos["last_sell"] is not None:
+        asset.sell_date = pos["last_sell"]
+
+
+def _type_from_quote(quote_type: Optional[str]) -> str:
+    """Espelha o mapeamento quoteType → tipo de ativo do frontend, para uma
+    posição criada pelo histórico cair num ícone/tipo sensato."""
+    mapping = {
+        "EQUITY": "stock",
+        "ETF": "etf",
+        "CRYPTOCURRENCY": "crypto",
+        "MUTUALFUND": "fund",
+        "INDEX": "fund",
+    }
+    return mapping.get((quote_type or "").upper(), "investment")

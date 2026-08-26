@@ -122,10 +122,12 @@ async def _primary_currency_for(session: AsyncSession, user_id: uuid.UUID) -> st
     return get_settings().default_currency
 
 
-async def get_groups(session: AsyncSession, user_id: uuid.UUID) -> list[AssetGroupRead]:
+async def get_groups(
+    session: AsyncSession, workspace_id: uuid.UUID, user_id: uuid.UUID
+) -> list[AssetGroupRead]:
     result = await session.execute(
         select(AssetGroup)
-        .where(AssetGroup.user_id == user_id)
+        .where(AssetGroup.workspace_id == workspace_id)
         .order_by(AssetGroup.position, AssetGroup.name)
     )
     groups = list(result.scalars().all())
@@ -236,10 +238,13 @@ async def _bulk_rollup(
 
 
 async def get_group(
-    session: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID
+    session: AsyncSession,
+    group_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
 ) -> Optional[AssetGroupRead]:
     result = await session.execute(
-        select(AssetGroup).where(AssetGroup.id == group_id, AssetGroup.user_id == user_id)
+        select(AssetGroup).where(AssetGroup.id == group_id, AssetGroup.workspace_id == workspace_id)
     )
     group = result.scalar_one_or_none()
     if not group:
@@ -251,6 +256,8 @@ async def get_group(
 
 
 async def _next_position(session: AsyncSession, user_id: uuid.UUID) -> int:
+    # Position is per-user for sync compatibility — the connection sync path
+    # also calls this, and isn't yet workspace-scoped.
     row = await session.execute(
         select(func.coalesce(func.max(AssetGroup.position), -1) + 1).where(
             AssetGroup.user_id == user_id
@@ -260,7 +267,10 @@ async def _next_position(session: AsyncSession, user_id: uuid.UUID) -> int:
 
 
 async def create_group(
-    session: AsyncSession, user_id: uuid.UUID, data: AssetGroupCreate
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: AssetGroupCreate,
 ) -> AssetGroupRead:
     # Let the caller supply a position, otherwise append to the end so new
     # groups don't fight with existing drag-ordered ones.
@@ -269,6 +279,7 @@ async def create_group(
         position = await _next_position(session, user_id)
     group = AssetGroup(
         user_id=user_id,
+        workspace_id=workspace_id,
         name=data.name,
         icon=data.icon,
         color=data.color,
@@ -282,10 +293,14 @@ async def create_group(
 
 
 async def update_group(
-    session: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID, data: AssetGroupUpdate
+    session: AsyncSession,
+    group_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    data: AssetGroupUpdate,
 ) -> Optional[AssetGroupRead]:
     result = await session.execute(
-        select(AssetGroup).where(AssetGroup.id == group_id, AssetGroup.user_id == user_id)
+        select(AssetGroup).where(AssetGroup.id == group_id, AssetGroup.workspace_id == workspace_id)
     )
     group = result.scalar_one_or_none()
     if not group:
@@ -300,9 +315,9 @@ async def update_group(
     return _group_to_read(group, count, cv, cvp, institution)
 
 
-async def delete_group(session: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+async def delete_group(session: AsyncSession, group_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
     result = await session.execute(
-        select(AssetGroup).where(AssetGroup.id == group_id, AssetGroup.user_id == user_id)
+        select(AssetGroup).where(AssetGroup.id == group_id, AssetGroup.workspace_id == workspace_id)
     )
     group = result.scalar_one_or_none()
     if not group:

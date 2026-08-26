@@ -1,13 +1,16 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.asset import Asset
 
 
 class AssetTransaction(Base):
@@ -53,3 +56,10 @@ class AssetTransaction(Base):
     external_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now())
+    #: A importação que escreveu esta linha, para que apagar a importação
+    #: leve as transações junto.
+    import_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("import_logs.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+
+    asset: Mapped["Asset"] = relationship(back_populates="transactions")

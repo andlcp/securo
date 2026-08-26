@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ImportReviewTransaction, Category, CategoryGroup } from '@/types'
 import { formatCurrency } from '@/lib/format'
@@ -13,8 +13,21 @@ import {
 import { Input } from '@/components/ui/input'
 import { CategorySelect } from '@/components/category-select'
 import { CategoryFilterDropdown } from '@/components/category-filter-dropdown'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
-const PAGE_SIZE = 50
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+
+function formatLocalDate(date: string, locale: string) {
+  const match = ISO_DATE_RE.exec(date)
+  if (!match) return new Date(date).toLocaleDateString(locale)
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).toLocaleDateString(locale)
+}
 
 interface ImportReviewTableProps {
   transactions: ImportReviewTransaction[]
@@ -22,6 +35,7 @@ interface ImportReviewTableProps {
   groups: CategoryGroup[]
   userCurrency: string
   locale: string
+  dateLocale: string
   searchQuery: string
   filterCategoryIds: string[]
   filterUncategorized: boolean
@@ -42,6 +56,7 @@ export function ImportReviewTable({
   groups,
   userCurrency,
   locale,
+  dateLocale,
   searchQuery,
   filterCategoryIds,
   filterUncategorized,
@@ -56,6 +71,14 @@ export function ImportReviewTable({
   onPageChange,
 }: ImportReviewTableProps) {
   const { t } = useTranslation()
+  const [pageSize, setPageSize] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem('securo.import.pageSize')
+      return stored ? Number(stored) : 50
+    } catch {
+      return 50
+    }
+  })
 
   const hasCategoryFilter = filterCategoryIds.length > 0 || filterUncategorized
 
@@ -81,9 +104,9 @@ export function ImportReviewTable({
     })
   }, [transactions, searchQuery, filterCategoryIds, filterUncategorized, hasCategoryFilter, statusFilter])
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const safePage = Math.min(currentPage, totalPages)
-  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+  const pageItems = filtered.slice((safePage - 1) * pageSize, safePage * pageSize)
 
   return (
     <div>
@@ -93,7 +116,7 @@ export function ImportReviewTable({
           placeholder={t('import.searchTransactions')}
           value={searchQuery}
           onChange={(e) => { onSearchChange(e.target.value); onPageChange(1) }}
-          className="max-w-xs h-8 text-sm border border-border rounded-md px-3 bg-background focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
+          className="max-w-xs h-8 text-sm border border-border rounded-md px-3 bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
         />
         <CategoryFilterDropdown
           categoryIds={filterCategoryIds}
@@ -105,7 +128,7 @@ export function ImportReviewTable({
           label={t('import.filterCategory')}
         />
         <select
-          className="border border-border rounded-md px-3 py-1.5 text-sm bg-background focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
+          className="border border-border rounded-md px-3 py-1.5 text-sm bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
           value={statusFilter}
           onChange={(e) => { onStatusFilterChange(e.target.value as 'all' | 'included' | 'excluded'); onPageChange(1) }}
         >
@@ -156,7 +179,7 @@ export function ImportReviewTable({
                     />
                   </TableCell>
                   <TableCell className="py-2.5 text-xs text-muted-foreground whitespace-nowrap">
-                    {new Date(tx.date).toLocaleDateString(locale)}
+                    {formatLocalDate(tx.date, dateLocale)}
                   </TableCell>
                   <TableCell className={`py-2.5 text-sm ${tx.excluded ? 'line-through text-muted-foreground' : 'text-foreground'}`}>
                     {tx.description}
@@ -174,7 +197,7 @@ export function ImportReviewTable({
                       groups={groups}
                       placeholder={t('import.noCategory')}
                       allowNone
-                      className="w-full border border-border rounded-md px-2 py-1 text-xs bg-background focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
+                      className="w-full border border-border rounded-md px-2 py-1 text-xs bg-card focus:outline-none focus-visible:ring-ring/30 focus-visible:ring-[2px]"
                     />
                   </TableCell>
                   <TableCell className="py-2.5 pr-4">
@@ -196,25 +219,58 @@ export function ImportReviewTable({
       </div>
 
       {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="px-5 py-3 border-t border-border flex items-center justify-between text-sm">
-          <button
-            className="text-muted-foreground hover:text-foreground disabled:opacity-30"
-            disabled={safePage <= 1}
-            onClick={() => onPageChange(safePage - 1)}
-          >
-            ← {t('common.previous', 'Previous')}
-          </button>
-          <span className="text-xs text-muted-foreground">
-            {t('import.page', { current: safePage, total: totalPages })}
-          </span>
-          <button
-            className="text-muted-foreground hover:text-foreground disabled:opacity-30"
-            disabled={safePage >= totalPages}
-            onClick={() => onPageChange(safePage + 1)}
-          >
-            {t('common.next', 'Next')} →
-          </button>
+      {filtered.length > 10 && (
+        <div className="px-5 py-3 border-t border-border flex flex-col sm:flex-row items-center justify-between gap-4 text-sm">
+          {totalPages > 1 ? (
+            <div className="flex items-center gap-4">
+              <button
+                className="text-muted-foreground hover:text-foreground disabled:opacity-30 font-medium"
+                disabled={safePage <= 1}
+                onClick={() => onPageChange(safePage - 1)}
+              >
+                ← {t('common.previous', 'Previous')}
+              </button>
+              <span className="text-xs text-muted-foreground">
+                {t('import.page', { current: safePage, total: totalPages })}
+              </span>
+              <button
+                className="text-muted-foreground hover:text-foreground disabled:opacity-30 font-medium"
+                disabled={safePage >= totalPages}
+                onClick={() => onPageChange(safePage + 1)}
+              >
+                {t('common.next', 'Next')} →
+              </button>
+            </div>
+          ) : (
+            <div className="hidden sm:block" />
+          )}
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">{t('common.rowsPerPage', 'Rows per page')}</span>
+            <Select
+              value={String(pageSize)}
+              onValueChange={(val) => {
+                const nextSize = Number(val)
+                setPageSize(nextSize)
+                onPageChange(1)
+                try {
+                  localStorage.setItem('securo.import.pageSize', String(nextSize))
+                } catch {
+                  // ignored
+                }
+              }}
+            >
+              <SelectTrigger className="w-[70px] h-8 text-xs">
+                <SelectValue placeholder={pageSize} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="10">10</SelectItem>
+                <SelectItem value="20">20</SelectItem>
+                <SelectItem value="50">50</SelectItem>
+                <SelectItem value="100">100</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       )}
     </div>

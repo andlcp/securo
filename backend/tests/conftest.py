@@ -1,4 +1,3 @@
-import asyncio
 import os
 import uuid
 from datetime import date, datetime, timezone
@@ -36,19 +35,18 @@ class _VectorJSON(sqlalchemy.types.JSON):
         return literal(0.5)
 
 
-_pgv.Vector = _VectorJSON  # type: ignore[attr-defined]
+setattr(_pgv, "Vector", _VectorJSON)
 # ---------------------------------------------------------------------------
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker  # noqa: E402
-from sqlalchemy import event as sqlalchemy_event  # noqa: E402
-from sqlalchemy import insert as sqlalchemy_insert  # noqa: E402
 
 from app.core.database import Base, get_async_session  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.user import User  # noqa: E402
+from app.models.passkey import UserPasskey  # noqa: E402,F401
 from app.models.category import Category  # noqa: E402
 from app.models.bank_connection import BankConnection  # noqa: E402
 from app.models.account import Account  # noqa: E402
@@ -65,56 +63,6 @@ from app.models.group import Group, GroupMember  # noqa: E402,F401
 from app.models.transaction_split import TransactionSplit  # noqa: E402,F401
 from app.models.group_settlement import GroupSettlement  # noqa: E402,F401
 from app.models.workspace import Workspace, WorkspaceMember  # noqa: E402,F401
-
-
-# --- Auto-create a Personal workspace for every test user ------------------
-# Financial rows carry a NOT NULL `workspace_id`, filled in by the autostamp
-# listener (app/core/workspace_autostamp.py) from the row's `user_id`. That
-# lookup only works if the user already has a workspace -- in production
-# registration creates one, but tests build `User(...)` by hand in a dozen
-# places.
-#
-# Rather than patch each of those (and every one added later), hook the
-# insert: right after a user row lands, write its workspace + membership
-# straight onto the connection.
-#
-# Core inserts in `after_insert`, not `session.add()` in `before_flush`:
-# SQLAlchemy orders a flush by relationship dependencies, and no
-# relationship() links Account to User, so the accounts INSERT can be
-# emitted *before* the users one. Rows added to the session would inherit
-# that same undefined ordering; writing on the connection lands them
-# immediately, where the autostamp lookup can see them.
-#
-# Test-only on purpose. Production creates workspaces explicitly at the
-# call site and commits the user first, so the ordering never arises.
-@sqlalchemy_event.listens_for(User, "after_insert")
-def _seed_workspace_for_new_users(mapper, connection, target):
-    prefs = target.preferences or {}
-    lang = prefs.get("language")
-    ws_id = uuid.uuid4()
-    connection.execute(
-        sqlalchemy_insert(Workspace).values(
-            id=ws_id,
-            name="Pessoal" if (lang or "").lower().startswith("pt") else "Personal",
-            kind="personal",
-            created_by_user_id=target.id,
-            default_currency=prefs.get("currency_display", "USD"),
-            locale=lang,
-            is_archived=False,
-            created_at=datetime.now(timezone.utc),
-        )
-    )
-    connection.execute(
-        sqlalchemy_insert(WorkspaceMember).values(
-            id=uuid.uuid4(),
-            workspace_id=ws_id,
-            user_id=target.id,
-            role="owner",
-            joined_at=datetime.now(timezone.utc),
-        )
-    )
-
-
 # Agent models — gated by AGENTS_ENABLED above so tests always cover them.
 from app.agents.models import (  # noqa: E402,F401
     Agent,
@@ -126,10 +74,22 @@ from app.agents.models import (  # noqa: E402,F401
     LlmUsage,
 )
 
-# Use SQLite for tests — fast, no external dependency
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+# Use SQLite for tests — fast, no external dependency.
+# Keep the DB file off the bind-mounted project dir (macOS bind mounts
+# have known SQLite locking/journal quirks under aiosqlite) — /tmp is a
+# tmpfs inside the container. StaticPool + a single shared connection
+# is required so async fixtures and tests running on the shared
+# session-scoped event loop see the same in-memory schema state.
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
-engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+engine = create_async_engine(
+    TEST_DATABASE_URL,
+    echo=False,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -139,14 +99,7 @@ TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_com
 # UUID comparisons.
 
 
-@pytest_asyncio.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest_asyncio.fixture(scope="session", autouse=True)
+@pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)
 async def setup_database():
     """Create all tables once for the test session."""
     async with engine.begin() as conn:
@@ -157,7 +110,7 @@ async def setup_database():
     # Clean up test db file
     import os
     try:
-        os.remove("./test.db")
+        os.remove("/tmp/securo_test.db")
     except FileNotFoundError:
         pass
 
@@ -196,9 +149,35 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
         yield ac
 
 
+@pytest.fixture
+def oidc_only_settings():
+    """Enable a complete OIDC-only policy and restore only changed keys."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    previous = {
+        "oidc_enabled": settings.oidc_enabled,
+        "oidc_discovery_url": settings.oidc_discovery_url,
+        "oidc_client_id": settings.oidc_client_id,
+        "local_auth_enabled": settings.local_auth_enabled,
+    }
+    settings.oidc_enabled = True
+    settings.oidc_discovery_url = "https://id.example.com/.well-known/openid-configuration"
+    settings.oidc_client_id = "securo"
+    settings.local_auth_enabled = False
+    yield settings
+    for key, value in previous.items():
+        setattr(settings, key, value)
+
+
 @pytest_asyncio.fixture
 async def test_user(session: AsyncSession, clean_db) -> User:
-    """Create a test user."""
+    """Create a test user with an auto-created Personal workspace.
+
+    Pre-creates the workspace so the auto-stamp listener (registered on
+    the financial models) can resolve `workspace_id` from `user_id` for
+    legacy test fixtures that construct rows without setting it.
+    """
     import bcrypt as _bcrypt
 
     hashed = _bcrypt.hashpw(b"testpass123", _bcrypt.gensalt()).decode()
@@ -217,9 +196,43 @@ async def test_user(session: AsyncSession, clean_db) -> User:
         },
     )
     session.add(user)
+    await session.flush()
+
+    workspace = Workspace(
+        id=uuid.uuid4(),
+        name="Pessoal",
+        kind="personal",
+        created_by_user_id=user.id,
+        default_currency="BRL",
+        locale="pt-BR",
+    )
+    session.add(workspace)
+    await session.flush()
+    session.add(
+        WorkspaceMember(
+            id=uuid.uuid4(),
+            workspace_id=workspace.id,
+            user_id=user.id,
+            role="owner",
+        )
+    )
     await session.commit()
     await session.refresh(user)
     return user
+
+
+@pytest_asyncio.fixture
+async def test_workspace(session: AsyncSession, test_user: User) -> Workspace:
+    """Return the test user's default workspace (created by `test_user`)."""
+    from sqlalchemy import select as _select
+    result = await session.execute(
+        _select(Workspace)
+        .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+        .where(WorkspaceMember.user_id == test_user.id)
+        .limit(1)
+    )
+    ws = result.scalar_one()
+    return ws
 
 
 @pytest_asyncio.fixture
@@ -235,7 +248,7 @@ async def auth_token(client: AsyncClient, test_user: User) -> str:
 
 
 @pytest_asyncio.fixture
-def auth_headers(auth_token: str) -> dict:
+async def auth_headers(auth_token: str) -> dict:
     """Auth headers for authenticated requests."""
     return {"Authorization": f"Bearer {auth_token}"}
 
@@ -279,9 +292,57 @@ async def admin_auth_token(client: AsyncClient, test_superuser: User) -> str:
 
 
 @pytest_asyncio.fixture
-def admin_auth_headers(admin_auth_token: str) -> dict:
+async def admin_auth_headers(admin_auth_token: str) -> dict:
     """Auth headers for admin requests."""
     return {"Authorization": f"Bearer {admin_auth_token}"}
+
+
+@pytest_asyncio.fixture
+async def viewer_auth_headers(
+    session: AsyncSession, client: AsyncClient, test_workspace: Workspace
+) -> dict:
+    """A second user who is a `viewer` member of the test workspace.
+
+    Read-only by role. Exists so the write gate can be exercised over HTTP:
+    the enforcement is a dependency wrapper, so asserting it at the service
+    layer alone leaves the wiring between route and role untested — which is
+    exactly the gap that let an audit conclude the gate was missing when it
+    was not.
+    """
+    import bcrypt as _bcrypt
+
+    user = User(
+        id=uuid.uuid4(),
+        email="viewer-role@example.com",
+        hashed_password=_bcrypt.hashpw(b"viewerpass123", _bcrypt.gensalt()).decode(),
+        is_active=True,
+        is_superuser=False,
+        is_verified=True,
+    )
+    session.add(user)
+    await session.flush()
+    session.add(
+        WorkspaceMember(
+            id=uuid.uuid4(),
+            workspace_id=test_workspace.id,
+            user_id=user.id,
+            role="viewer",
+        )
+    )
+    await session.commit()
+
+    response = await client.post(
+        "/api/auth/login",
+        data={"username": "viewer-role@example.com", "password": "viewerpass123"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 200, f"Viewer login failed: {response.text}"
+    return {
+        "Authorization": f"Bearer {response.json()['access_token']}",
+        # Explicit, because the viewer's *default* workspace resolution would
+        # otherwise decide which workspace this request lands in.
+        "X-Workspace-Id": str(test_workspace.id),
+    }
 
 
 @pytest_asyncio.fixture

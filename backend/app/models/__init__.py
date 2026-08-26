@@ -1,4 +1,5 @@
 from app.models.user import User
+from app.models.passkey import UserPasskey
 from app.models.workspace import Workspace, WorkspaceMember
 from app.models.category import Category
 from app.models.category_group import CategoryGroup
@@ -11,27 +12,29 @@ from app.models.budget import Budget
 from app.models.import_log import ImportLog
 from app.models.asset import Asset
 from app.models.asset_group import AssetGroup
+from app.models.asset_transaction import AssetTransaction
+from app.models.portfolio_daily_snapshot import PortfolioDailySnapshot
+from app.models.portfolio_snapshot import PortfolioSnapshot
 from app.models.asset_value import AssetValue
 from app.models.fx_rate import FxRate
 from app.models.transaction_attachment import TransactionAttachment
-from app.models.payee import Payee, PayeeMapping
+from app.models.payee import Payee, PayeeMapping, PayeeTaxId
 from app.models.app_settings import AppSetting
 from app.models.goal import Goal
-from app.models.portfolio_snapshot import PortfolioSnapshot
-from app.models.portfolio_daily_snapshot import PortfolioDailySnapshot
-from app.models.asset_transaction import AssetTransaction
 from app.models.credit_card_bill import CreditCardBill
 from app.models.group import Group, GroupMember
 from app.models.transaction_split import TransactionSplit
 from app.models.group_settlement import GroupSettlement
+from app.models.collection import Collection, collection_accounts, collection_asset_groups
 
-# Side-effect import: registers the before_insert listener that stamps
-# workspace_id from user_id (or the parent row's workspace). Imported
-# last so every referenced model is already loaded.
+# Side-effect import: register the before_insert listener that auto-stamps
+# workspace_id from user_id on financial entities. Imported last so all
+# referenced models are loaded.
 from app.core import workspace_autostamp  # noqa: F401, E402
 
 __all__ = [
     "User",
+    "UserPasskey",
     "Workspace",
     "WorkspaceMember",
     "Category",
@@ -45,19 +48,23 @@ __all__ = [
     "ImportLog",
     "Asset",
     "AssetGroup",
+    "AssetTransaction",
+    "PortfolioDailySnapshot",
+    "PortfolioSnapshot",
     "AssetValue",
     "FxRate",
     "TransactionAttachment",
     "Payee",
     "PayeeMapping",
+    "PayeeTaxId",
     "AppSetting",
     "Goal",
-    "PortfolioSnapshot",
-    "PortfolioDailySnapshot",
-    "AssetTransaction",
     "CreditCardBill",
     "Group",
     "GroupMember",
     "TransactionSplit",
     "GroupSettlement",
+    "Collection",
+    "collection_accounts",
+    "collection_asset_groups",
 ]

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.worker import celery_app
 from app.core.config import get_settings
 from app.models.bank_connection import BankConnection
+from app.providers.base import ProviderNotConfiguredError
 from app.services import connection_service
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,10 @@ async def _sync_all() -> int:
                 logger.info("Syncing connection %s (last_sync=%s)", conn_id, last_sync)
                 await _sync_one(session_maker, conn_id, user_id)
                 synced += 1
+            except ProviderNotConfiguredError as exc:
+                # Actionable one-liner instead of a buried traceback: this
+                # means THIS process is missing the provider's configuration.
+                logger.error("Skipping connection %s: %s", conn_id, exc)
             except Exception:
                 logger.exception("Background sync failed for connection %s", conn_id)
 
@@ -63,7 +68,15 @@ async def _sync_all() -> int:
 async def _sync_one(session_maker, connection_id: uuid.UUID, user_id: uuid.UUID) -> None:
     """Sync a single connection. Error status is set by sync_connection itself."""
     async with session_maker() as session:
-        await connection_service.sync_connection(session, connection_id, user_id)
+        workspace_id = await session.scalar(
+            select(BankConnection.workspace_id).where(BankConnection.id == connection_id)
+        )
+        if workspace_id is None:
+            logger.warning("Connection %s has no workspace; skipping sync", connection_id)
+            return
+        await connection_service.sync_connection(
+            session, connection_id, workspace_id, user_id
+        )
 
 
 @celery_app.task(name="app.tasks.sync_tasks.sync_all_connections")
@@ -89,6 +102,15 @@ async def _sync_one_celery(connection_id: str, user_id: str) -> None:
     engine, session_maker = _make_session_maker()
     try:
         async with session_maker() as session:
-            await connection_service.sync_connection(session, uuid.UUID(connection_id), uuid.UUID(user_id))
+            conn_uuid = uuid.UUID(connection_id)
+            workspace_id = await session.scalar(
+                select(BankConnection.workspace_id).where(BankConnection.id == conn_uuid)
+            )
+            if workspace_id is None:
+                logger.warning("Connection %s has no workspace; skipping sync", connection_id)
+                return
+            await connection_service.sync_connection(
+                session, conn_uuid, workspace_id, uuid.UUID(user_id)
+            )
     finally:
         await engine.dispose()

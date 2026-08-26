@@ -5,12 +5,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import current_active_user
 from app.core.database import get_async_session
-from app.models.user import User
+from app.core.workspace_context import (
+    WorkspaceContext,
+    current_workspace,
+    current_writable_workspace,
+)
 from app.schemas.transaction import TransactionImportPreview, TransactionImportRequest
-from app.services import import_service
-from app.services import account_service
+from app.services import account_service, import_service
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +27,16 @@ async def preview_import(
     inflow_column: Optional[str] = Form(None),
     outflow_column: Optional[str] = Form(None),
     column_mapping: Optional[str] = Form(None),
+    # Read-gated on purpose, and the exception is deliberate rather than an
+    # oversight. This is a POST because it takes a file upload, not because
+    # it changes anything: it parses the upload and returns what *would* be
+    # imported. The only workspace data it touches is
+    # `enrich_with_category_suggestions`, which SELECTs rules and categories
+    # to label the preview. Nothing is persisted, so a read-only member
+    # previewing a file is doing exactly what their role allows. The write
+    # gate belongs on `POST /import` below, which is where the rows land.
+    ctx: WorkspaceContext = Depends(current_workspace),
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
     content = await file.read()
     filename = file.filename or ""
@@ -58,7 +68,7 @@ async def preview_import(
             transactions = import_service.parse_ofx(content)
             detected_format = "ofx"
         elif filename.lower().endswith('.qif'):
-            transactions = import_service.parse_qif(content)
+            transactions = import_service.parse_qif(content, date_format=date_format)
             detected_format = "qif"
         elif filename.lower().endswith('.xml') or filename.lower().endswith('.camt'):
             transactions = import_service.parse_camt(content)
@@ -89,7 +99,7 @@ async def preview_import(
                 detected_format = "ofx"
             except Exception:
                 try:
-                    transactions = import_service.parse_qif(content)
+                    transactions = import_service.parse_qif(content, date_format=date_format)
                     detected_format = "qif"
                 except Exception:
                     try:
@@ -117,7 +127,7 @@ async def preview_import(
     )
 
     transactions = await import_service.enrich_with_category_suggestions(
-        session, user.id, transactions,
+        session, ctx.workspace.id, transactions,
     )
 
     # Expose CSV headers so the UI can offer accurate column-mapping dropdowns.
@@ -139,16 +149,18 @@ async def preview_import(
 @router.post("/import", status_code=status.HTTP_201_CREATED)
 async def import_transactions(
     data: TransactionImportRequest,
+    ctx: WorkspaceContext = Depends(current_writable_workspace),
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(current_active_user),
 ):
-    # Verify account belongs to user
-    account = await account_service.get_account(session, data.account_id, user.id)
+    # Verify the target account lives in this workspace BEFORE doing any
+    # writes — otherwise a hand-rolled request could import into an
+    # account owned by another tenant.
+    account = await account_service.get_account(session, data.account_id, ctx.workspace.id)
     if not account:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
     imported, skipped, excluded, import_log_id = await import_service.import_transactions(
-        session, user.id, data.account_id, data.transactions, "import",
+        session, ctx.workspace.id, ctx.user_id, data.account_id, data.transactions, "import",
         filename=data.filename, detected_format=data.detected_format,
         detect_duplicates=data.detect_duplicates,
     )

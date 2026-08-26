@@ -18,4 +18,7 @@ async def get_agents_info():
         "default_top_n": s.default_top_n,
         "default_similarity_threshold": s.default_similarity_threshold,
         "extra_mcp_servers_configured": bool(s.extra_mcp_servers.strip()),
+        "mcp_external_ttl_days": s.mcp_external_ttl_days,
+        # Empty string means "let the frontend derive it from window.location".
+        "external_mcp_url": s.external_mcp_url.strip(),
     }

@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date as _date
 from decimal import Decimal
 from typing import Optional
 
@@ -20,7 +20,13 @@ class AssetValue(Base):
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(precision=15, scale=6))
-    date: Mapped[date] = mapped_column(Date)
+    # Per-share price on `date` for market-priced holdings (quantity-independent).
+    # The value chart is rebuilt as ledger_quantity(date) × price(date) so that
+    # entering past buys/sells correctly reshapes the whole history (issue:
+    # backdated trades didn't update the baked `amount`). Null for manual/growth
+    # assets, where `amount` is the value directly.
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(precision=18, scale=6), nullable=True)
+    date: Mapped[_date] = mapped_column(Date)
     source: Mapped[str] = mapped_column(String(20), default="manual")  # manual, rule, sync
     # Valor a mercado, preenchido só para Tesouro marcado na curva. Nesses
     # títulos `amount` carrega o carrego (valor oficial para patrimônio e
