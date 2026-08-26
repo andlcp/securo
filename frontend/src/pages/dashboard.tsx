@@ -973,10 +973,8 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Charts: Category Spending Bars + Balance Flow
-          HIDDEN by user preference (not using the expense-tracking module).
-          Toggle the surrounding `false &&` to bring them back. */}
-      {false && (
+      {/* Gastos por categoria + fluxo de saldo. */}
+      {(
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5" style={{ gridAutoRows: 'minmax(380px, auto)' }}>
         {/* Category Spending Bars */}
         <div className="bg-card rounded-xl border border-border shadow-sm flex flex-col max-h-[420px]">
@@ -1185,11 +1183,9 @@ export default function DashboardPage() {
             const footerCurrent = cumulativeData.find(d => d.day === footerDay)?.current ?? totalBalance
             const rawPct = footerPrev !== 0 ? ((footerCurrent - footerPrev) / Math.abs(footerPrev)) * 100 : null
             if (footerPrev === 0 || rawPct === null) return null
-            // Pin to a non-null local \u2014 when this block is wrapped in a
-            // `{false && (...)}` toggle (which the dashboard currently is for
-            // expense-tracking sections), TS loses the IIFE-internal
-            // narrowing of `rawPct` and reports possibly-null errors at the
-            // usage sites. The explicit assignment restores the narrow.
+            // Fixa num local nao-nulo: dentro da IIFE o TypeScript perde o
+            // estreitamento de `rawPct` e acusa possivelmente-nulo nos usos
+            // abaixo. A atribuicao explicita devolve o estreitamento.
             const footerPct = rawPct as number
             return (
               <div className="px-5 pb-4 pt-0 shrink-0">
@@ -1283,10 +1279,8 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Period Transactions
-          HIDDEN by user preference (not using transactions module). Toggle
-          the surrounding `false &&` to bring it back. */}
-      {false && (
+      {/* Transações do período. */}
+      {(
       <div>
         <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-border flex items-center justify-between">
