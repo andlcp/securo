@@ -300,6 +300,9 @@
     "dayChange": "Day change",
     "dayGain": "Day gain",
     "dayLoss": "Day loss",
+    "monthChange": "Month change",
+    "monthGain": "Month gain",
+    "monthLoss": "Month loss",
     "asOf": "as of {{date}}"
   },
   "transactions": {

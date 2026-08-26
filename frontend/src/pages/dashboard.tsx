@@ -100,6 +100,40 @@ function parseMonthFromParams(params: URLSearchParams): string | null {
 }
 
 
+/** Par de chips de um período da carteira: a variação em % e o resultado
+ *  em dinheiro. Os dois seguem o sinal do dinheiro, não o do percentual —
+ *  num mês com aporte grande as duas contas podem divergir de sinal, e o
+ *  que o olho procura ali é "ganhei ou perdi". */
+function ChangeChips({ pct, money, pctLabel, gainLabel, lossLabel, formatMoney }: {
+  pct: number
+  money: number
+  pctLabel: string
+  gainLabel: string
+  lossLabel: string
+  formatMoney: (v: number) => string
+}) {
+  const up = money >= 0
+  const tone = up
+    ? 'bg-emerald-500/10 text-emerald-600'
+    : 'bg-rose-500/10 text-rose-600'
+  return (
+    <>
+      <div className={`rounded-lg px-3 py-2 ${tone}`}>
+        <p className="text-[11px] font-medium opacity-80">{pctLabel}</p>
+        <p className="text-base font-bold tabular-nums leading-tight">
+          {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
+        </p>
+      </div>
+      <div className={`rounded-lg px-3 py-2 ${tone}`}>
+        <p className="text-[11px] font-medium opacity-80">{up ? gainLabel : lossLabel}</p>
+        <p className="text-base font-bold tabular-nums leading-tight">
+          {up ? '+' : ''}{formatMoney(money)}
+        </p>
+      </div>
+    </>
+  )
+}
+
 export default function DashboardPage() {
   const { t, i18n } = useTranslation()
   const navigate = useNavigate()
@@ -200,13 +234,19 @@ export default function DashboardPage() {
     staleTime: 1000 * 60 * 30,
   })
 
-  // Série curta só para a variação do dia no card. Separada da lifetime
-  // porque esta revalida sozinha a cada 5 min — acompanhar o pregão com
-  // os ~2.600 pontos do histórico inteiro seria desperdício. O worker faz
-  // refresh intradiário de cotações, então o número anda ao longo do dia.
+  // Série curta só para as variações do dia e do mês no card. Separada da
+  // lifetime porque esta revalida sozinha a cada 5 min — acompanhar o
+  // pregão com os ~2.600 pontos do histórico inteiro seria desperdício. O
+  // worker faz refresh intradiário de cotações, então o número anda ao
+  // longo do dia.
+  //
+  // Dois meses, não um: a janela do backend é `hoje - months * 30` dias
+  // corridos. Com months=1, no dia 31 de um mês de 31 dias ela começaria
+  // no dia 1º e perderia o fechamento do mês anterior, que é justamente a
+  // âncora do cálculo mensal. Sessenta pontos diários seguem sendo barato.
   const { data: portfolioRecent } = useQuery<PortfolioPoint[]>({
     queryKey: ['dashboard', 'portfolio-recent'],
-    queryFn: () => portfolioTimeseries.series({ months: 1, granularity: 'daily' }),
+    queryFn: () => portfolioTimeseries.series({ months: 2, granularity: 'daily' }),
     staleTime: 1000 * 60 * 5,
     refetchInterval: 1000 * 60 * 5,
     refetchOnWindowFocus: true,
@@ -225,6 +265,42 @@ export default function DashboardPage() {
       money: (last.v_end ?? 0) - (prev.v_end ?? 0) - cf,
       pct: (last.return_month ?? 0) * 100,
       asOf: last.month_end,
+    }
+  }, [portfolioRecent])
+
+  // Variação do mês corrente, ancorada no último dia do mês anterior.
+  // Mesma ideia do dia, só que a janela é maior: o dinheiro desconta todos
+  // os aportes e resgates do mês (senão um aporte viraria "ganho"), e o
+  // percentual encadeia o TWR entre as duas pontas.
+  //
+  // Usar a razão entre os `twr_cum` é seguro mesmo o backend rebaseando a
+  // série para começar em 0%: o fator de rebase é o mesmo nas duas pontas
+  // e se cancela na divisão.
+  const monthChange = useMemo(() => {
+    if (!portfolioRecent || portfolioRecent.length < 2) return null
+    const last = portfolioRecent[portfolioRecent.length - 1]
+    const currentMonth = last.month_end.slice(0, 7)
+
+    // Última ponta antes do mês corrente = fechamento do mês anterior.
+    let anchorIdx = -1
+    for (let i = portfolioRecent.length - 1; i >= 0; i--) {
+      if (portfolioRecent[i].month_end.slice(0, 7) !== currentMonth) {
+        anchorIdx = i
+        break
+      }
+    }
+    // Série curta demais para conter o mês anterior (carteira recém-criada,
+    // por exemplo). Sem âncora não há mês fechado para comparar.
+    if (anchorIdx < 0) return null
+
+    const anchor = portfolioRecent[anchorIdx]
+    const month = portfolioRecent.slice(anchorIdx + 1)
+    const cashflow = month.reduce((acc, p) => acc + (p.cashflow ?? 0), 0)
+    const base = 1 + (anchor.twr_cum ?? 0)
+
+    return {
+      money: (last.v_end ?? 0) - (anchor.v_end ?? 0) - cashflow,
+      pct: base > 0 ? ((1 + (last.twr_cum ?? 0)) / base - 1) * 100 : 0,
     }
   }, [portfolioRecent])
 
@@ -844,32 +920,28 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {dayChange && (
-              <div className="flex gap-2">
-                {(() => {
-                  const up = dayChange.money >= 0
-                  const tone = up
-                    ? 'bg-emerald-500/10 text-emerald-600'
-                    : 'bg-rose-500/10 text-rose-600'
-                  return (
-                    <>
-                      <div className={`rounded-lg px-3 py-2 ${tone}`}>
-                        <p className="text-[11px] font-medium opacity-80">{t('dashboard.dayChange')}</p>
-                        <p className="text-base font-bold tabular-nums leading-tight">
-                          {up ? '+' : ''}{dayChange.pct.toFixed(2)}%
-                        </p>
-                      </div>
-                      <div className={`rounded-lg px-3 py-2 ${tone}`}>
-                        <p className="text-[11px] font-medium opacity-80">
-                          {up ? t('dashboard.dayGain') : t('dashboard.dayLoss')}
-                        </p>
-                        <p className="text-base font-bold tabular-nums leading-tight">
-                          {up ? '+' : ''}{mask(formatCurrency(dayChange.money, primaryCurrency, locale))}
-                        </p>
-                      </div>
-                    </>
-                  )
-                })()}
+            {(dayChange || monthChange) && (
+              <div className="flex flex-wrap gap-2">
+                {dayChange && (
+                  <ChangeChips
+                    pct={dayChange.pct}
+                    money={dayChange.money}
+                    pctLabel={t('dashboard.dayChange')}
+                    gainLabel={t('dashboard.dayGain')}
+                    lossLabel={t('dashboard.dayLoss')}
+                    formatMoney={(v) => mask(formatCurrency(v, primaryCurrency, locale))}
+                  />
+                )}
+                {monthChange && (
+                  <ChangeChips
+                    pct={monthChange.pct}
+                    money={monthChange.money}
+                    pctLabel={t('dashboard.monthChange')}
+                    gainLabel={t('dashboard.monthGain')}
+                    lossLabel={t('dashboard.monthLoss')}
+                    formatMoney={(v) => mask(formatCurrency(v, primaryCurrency, locale))}
+                  />
+                )}
               </div>
             )}
           </div>
