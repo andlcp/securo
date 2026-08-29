@@ -1455,6 +1455,10 @@ export interface PortfolioPoint {
   cashflow: number
   income: number
   return_month: number | null
+  /** Resultado do período em dinheiro, calculado pelo motor junto com o
+   *  percentual. Opcional porque snapshots gravados antes de 28/08/2026
+   *  não têm o campo — nesses, o consumidor cai na subtração antiga. */
+  gain?: number | null
   twr_cum: number
   by_class: Record<string, number>
 }

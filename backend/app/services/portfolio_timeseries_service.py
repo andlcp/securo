@@ -1142,6 +1142,16 @@ async def _compute_timeseries_uncached(session: AsyncSession, user: User,
                 "cashflow": round(cf, 2),
                 "income": round(inc, 2),
                 "return_month": round(r_d, 6) if r_d is not None else None,
+                # Resultado do periodo em dinheiro: o proprio numerador do
+                # Dietz. Emitido junto porque reconstrui-lo do lado de fora,
+                # subtraindo o `v_end` de dois snapshots, so acerta quando os
+                # dois vieram da MESMA varredura. Numa reconstrucao
+                # incremental o dia anterior e re-derivado dos valores de
+                # ativo de agora, enquanto o snapshot guardado congelou o
+                # valor de quando ele foi calculado -- e a diferenca chegou
+                # a inverter o sinal do ganho no painel (28/08/2026: +0,02%
+                # ao lado de -R$ 1.364).
+                "gain": round(v_end_total + inc - prev_v_end - cf, 2),
                 "twr_cum": round(cum - 1.0, 6),
                 "by_class": {k: round(v, 2) for k, v in per_class.items()},
             })
@@ -1216,6 +1226,8 @@ async def _compute_timeseries_uncached(session: AsyncSession, user: User,
             "cashflow": round(cf, 2),
             "income": round(inc, 2),
             "return_month": round(r_m, 6) if r_m is not None else None,
+            # Mesmo contrato do diario: numerador do Dietz, em dinheiro.
+            "gain": round(v_end_total + inc - prev_v_end - cf, 2),
             "twr_cum": round(cum - 1.0, 6),
             "by_class": {k: round(v, 2) for k, v in per_class.items()},
         })

@@ -260,9 +260,15 @@ export default function DashboardPage() {
     if (!portfolioRecent || portfolioRecent.length < 2) return null
     const last = portfolioRecent[portfolioRecent.length - 1]
     const prev = portfolioRecent[portfolioRecent.length - 2]
+    // O motor emite `gain` junto com o percentual, calculado contra o mesmo
+    // valor de ontem que ele usou. Subtrair dois `v_end` guardados so acerta
+    // quando ambos vieram da mesma varredura -- numa reconstrucao incremental
+    // eles vem de momentos diferentes, e o sinal chega a inverter.
+    // A subtracao fica como reserva para snapshots anteriores a 28/08/2026.
     const cf = last.cashflow ?? 0
+    const money = last.gain ?? ((last.v_end ?? 0) - (prev.v_end ?? 0) - cf)
     return {
-      money: (last.v_end ?? 0) - (prev.v_end ?? 0) - cf,
+      money,
       pct: (last.return_month ?? 0) * 100,
       asOf: last.month_end,
     }
@@ -295,11 +301,21 @@ export default function DashboardPage() {
 
     const anchor = portfolioRecent[anchorIdx]
     const month = portfolioRecent.slice(anchorIdx + 1)
-    const cashflow = month.reduce((acc, p) => acc + (p.cashflow ?? 0), 0)
     const base = 1 + (anchor.twr_cum ?? 0)
 
+    // O resultado do mes em dinheiro e a soma dos resultados diarios --
+    // mesma composicao que o percentual faz ao encadear os retornos. Se
+    // algum dia da janela nao tiver `gain` (snapshot antigo), cai inteiro
+    // na subtracao, porque misturar as duas contas daria um numero que nao
+    // e nem uma coisa nem outra.
+    const temTodos = month.every((p) => p.gain != null)
+    const money = temTodos
+      ? month.reduce((acc, p) => acc + (p.gain ?? 0), 0)
+      : (last.v_end ?? 0) - (anchor.v_end ?? 0)
+        - month.reduce((acc, p) => acc + (p.cashflow ?? 0), 0)
+
     return {
-      money: (last.v_end ?? 0) - (anchor.v_end ?? 0) - cashflow,
+      money,
       pct: base > 0 ? ((1 + (last.twr_cum ?? 0)) / base - 1) * 100 : 0,
     }
   }, [portfolioRecent])
