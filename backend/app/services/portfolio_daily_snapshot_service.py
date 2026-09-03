@@ -254,8 +254,21 @@ async def rebuild_daily_snapshots(
             granularity="daily",
         )
     else:
+        # A varredura comeca UM DIA ANTES do pedido e reescreve esse dia
+        # junto. Sem isso, o primeiro dia da janela e comparado contra um
+        # "ontem" re-derivado dos valores de ativo do momento, enquanto o
+        # snapshot guardado de ontem congelou o valor de quando FOI
+        # calculado. Os dois nao coincidem, e a serie deixa de telescopar:
+        # a soma dos resultados diarios do mes nao fecha com a variacao do
+        # patrimonio (em 01-03/09/2026 sobraram R$ 1.059 sem explicacao).
+        # Recalculando o dia anterior, ele passa a valer o mesmo dos dois
+        # lados e a conta fecha.
+        walk_from = from_date - timedelta(days=1)
         initial_cum = 1.0
-        prev_day = from_date - timedelta(days=1)
+        # O acumulado tem de vir de dois dias antes: `walk_from` sera
+        # recalculado pela varredura e traz o proprio retorno consigo.
+        # Semear com o dia anterior a ele contaria esse retorno duas vezes.
+        prev_day = walk_from - timedelta(days=1)
         prev_payload = (await session.execute(
             select(PortfolioDailySnapshot.payload).where(
                 PortfolioDailySnapshot.user_id == user.id,
@@ -289,7 +302,7 @@ async def rebuild_daily_snapshots(
                     return len(rows)
         rows = await _compute_timeseries_uncached(
             session, user,
-            date_from=from_date,
+            date_from=walk_from,
             date_to=date.today(),
             granularity="daily",
             initial_cum=initial_cum,

@@ -49,9 +49,18 @@ def _payload(d: date, twr_cum: float) -> dict:
 
 @pytest.mark.asyncio
 async def test_incremental_rebuild_seeds_cum_from_previous_snapshot():
-    """When `from_date` has a cached snapshot on the prior day, the
-    rebuild must pass `initial_cum = 1.0 + prev_twr_cum` so the chart
-    continues from where it left off."""
+    """Duas coisas de uma vez.
+
+    O `initial_cum` tem de sair do `twr_cum` guardado, senão o gráfico
+    ganha um degrau vertical na emenda entre o trecho em cache e o
+    recém-calculado.
+
+    E a varredura tem de começar UM DIA ANTES do pedido. Para calcular o
+    resultado do primeiro dia da janela o motor precisa do valor de ontem,
+    e ele re-deriva esse valor dos dados do momento — que não coincide com
+    o que ficou congelado no snapshot de ontem. Recalculando o dia anterior
+    junto, o valor passa a ser o mesmo dos dois lados e a soma dos
+    resultados diários volta a fechar com a variação do patrimônio."""
     user = _user()
     from_d = date(2026, 5, 16)
     prev_d = from_d - timedelta(days=1)
@@ -75,7 +84,9 @@ async def test_incremental_rebuild_seeds_cum_from_previous_snapshot():
 
     assert compute_mock.called, "compute should have been called"
     kwargs = compute_mock.call_args.kwargs
-    assert kwargs.get("date_from") == from_d
+    assert kwargs.get("date_from") == from_d - timedelta(days=1), (
+        "a varredura tem de cobrir o dia anterior para a série telescopar"
+    )
     assert kwargs.get("initial_cum") == pytest.approx(1.0 + prev_twr), (
         "incremental rebuild must seed cum from previous snapshot's twr_cum; "
         "otherwise the chart shows a vertical cliff at the join."
